@@ -1,11 +1,11 @@
 Pando
 =====
 
-Pando is a C++ corpus query engine that sits alongside Manatee, CWB/CQP, and the newer ClickHouse-based stack (via Flexicorp). The repository currently focuses on:
+Pando is a C++ corpus query engine in the same family as Manatee and CWB/CQP: it supports familiar positional/s-attribute style querying, adds the ability to search over dependency trees, and has extensive support for aligned corpora. The repository currently focuses on:
 
 - **Core engine**: query parsing, execution, and indexing (`src/query`, `src/index`, `src/corpus`).
 - **CLI tools**: binaries for querying, indexing, checking, and serving HTTP APIs (`src/cli`, `src/api`).
-- **Dev tooling**: benchmark harnesses and design notes under `dev/`.
+- **Dev tooling**: internal benchmark harnesses and design notes under `dev/` (not installed or shipped).
 
 This README is intentionally minimal and documents how to build and run the current prototype for private/use-at-your-own-risk purposes.
 
@@ -16,7 +16,7 @@ This README is intentionally minimal and documents how to build and run the curr
 - **Companion repos**: Pando is designed to work with:
   - `flexipipe` – corpus preparation pipelines.
   - `flexiconv` – query conversion and related tooling.
-  - `flexicorp` – ClickHouse-based corpus backend and associated tooling.
+  - `flexicorp` – auxiliary tools and integration with other backends.
 
 ## Prerequisites
 
@@ -62,7 +62,7 @@ This should print total match count and timing information to stdout/stderr. The
 
 ## Benchmark harness
 
-The script `dev/run_benchmark.py` runs a battery of queries across multiple engines (Pando, Manatee, CWB/CQP, ClickHouse via Flexicorp, etc.) and summarizes timing results.
+The script `dev/run_benchmark.py` runs a battery of queries across multiple engines (Pando, Manatee, CWB/CQP, etc.) and summarizes timing results.
 
 Basic usage (TEITOK-style layout with `pando/`, `manatee/`, `cqp/` under one root):
 
@@ -85,7 +85,7 @@ Useful design and integration notes live in `dev/`:
 - `dev/PANDO-INDEX-INTEGRATION.md` – how Pando’s index layout integrates with other tools.
 - `dev/PANDO-SEGMENTS.md` – segment-level structure and design.
 - `dev/QUERY-COMPAT.md` – query language compatibility notes vs. other engines.
-- `dev/CLICKCQL-TODO.md` – ClickHouse / CQL integration TODOs.
+- `dev/CLICKCQL-TODO.md` – internal notes on possible ClickHouse / CQL integration.
 
 These documents reflect the current state of thinking and may lag behind the code slightly.
 

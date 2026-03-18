@@ -19,13 +19,4 @@ struct Region {
     CorpusPos end;       // inclusive
 };
 
-struct PosSpan {
-    const CorpusPos* data = nullptr;
-    size_t           count = 0;
-
-    const CorpusPos* begin() const { return data; }
-    const CorpusPos* end()   const { return data + count; }
-    bool empty() const { return count == 0; }
-};
-
 } // namespace manatree

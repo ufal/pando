@@ -4,7 +4,12 @@
 #include "core/mmap_file.h"
 #include "index/lexicon.h"
 #include <string>
+
+#ifdef PANDO_USE_RE2
+#include <re2/re2.h>
+#else
 #include <regex>
+#endif
 
 namespace manatree {
 
@@ -58,7 +63,11 @@ public:
     }
 
     // Regex match: returns owned vector (union of all matching lex entries)
+#ifdef PANDO_USE_RE2
+    std::vector<CorpusPos> positions_matching(const re2::RE2& re) const;
+#else
     std::vector<CorpusPos> positions_matching(const std::regex& re) const;
+#endif
 
     // Negation: all positions where value != given value
     std::vector<CorpusPos> positions_not(const std::string& value,
@@ -76,22 +85,6 @@ private:
     CorpusPos corpus_size_ = 0;
     int dat_width_ = 4;    // bytes per element in .dat (1, 2, or 4)
     int rev_width_ = 8;    // bytes per element in .rev (2, 4, or 8)
-};
-
-// Builder counterpart: accumulates data, writes all 5 files.
-class PositionalAttrBuilder {
-public:
-    explicit PositionalAttrBuilder(const std::string& name) : name_(name) {}
-
-    void observe(CorpusPos pos, const std::string& value);
-    void build_and_write(const std::string& dir);
-
-    const std::string& name() const { return name_; }
-
-private:
-    std::string name_;
-    LexiconBuilder lex_builder_;
-    std::vector<std::string> values_;   // value per corpus position
 };
 
 } // namespace manatree

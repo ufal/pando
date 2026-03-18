@@ -1,4 +1,6 @@
 #include "corpus/corpus.h"
+#include "core/json_utils.h"
+#include "query/ast.h"
 #include "query/parser.h"
 #include "query/executor.h"
 #include <iostream>
@@ -34,6 +36,7 @@ struct Options {
     uint32_t sample_seed = 0; // RNG seed for --sample (0 = non-deterministic)
     unsigned threads = 1;    // parallel seed processing when > 1 (multi-token queries)
     bool preload    = false; // load all mmap'd pages into RAM at open (slower open, faster first query)
+    int  max_gap    = REPEAT_UNBOUNDED; // cap for + and * quantifiers (--max-gap)
     // For aggregation commands (count/group/freq), cap number of output rows; 0 = no cap.
     size_t group_limit = 1000;
     // API mode: like --json but with cleaner, single-object responses for programmatic use
@@ -44,86 +47,6 @@ struct QueryTiming {
     double open_sec = 0, query_sec = 0, fetch_sec = 0;
     size_t total = 0, returned = 0;
 };
-
-// ── JSON helpers (no external library) ──────────────────────────────────
-
-static std::string json_escape(std::string_view s) {
-    std::string out;
-    out.reserve(s.size() + 4);
-    for (char c : s) {
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20) {
-                    char buf[8];
-                    snprintf(buf, sizeof(buf), "\\u%04x", c);
-                    out += buf;
-                } else {
-                    out += c;
-                }
-        }
-    }
-    return out;
-}
-
-static std::string jstr(std::string_view s) {
-    return "\"" + json_escape(s) + "\"";
-}
-
-// ── Context extraction ──────────────────────────────────────────────────
-
-struct KwicContext {
-    std::string left;
-    std::string match;
-    std::string right;
-};
-
-static KwicContext build_context(const Corpus& corpus, const Match& m,
-                                 int ctx_width) {
-    const auto& form = corpus.attr("form");
-    KwicContext ctx;
-
-    CorpusPos first = m.first_pos();
-    CorpusPos last  = m.last_pos();
-
-    CorpusPos left_start = std::max(CorpusPos(0), first - ctx_width);
-    for (CorpusPos p = left_start; p < first; ++p) {
-        if (!ctx.left.empty()) ctx.left += ' ';
-        ctx.left += form.value_at(p);
-    }
-
-    for (size_t i = 0; i < m.positions.size(); ++i) {
-        if (m.positions[i] == NO_HEAD) continue;
-        CorpusPos span_end = (!m.span_ends.empty()) ? m.span_ends[i] : m.positions[i];
-        for (CorpusPos p = m.positions[i]; p <= span_end; ++p) {
-            if (!ctx.match.empty()) ctx.match += ' ';
-            ctx.match += form.value_at(p);
-        }
-    }
-
-    CorpusPos right_end = std::min(corpus.size() - 1, last + ctx_width);
-    for (CorpusPos p = last + 1; p <= right_end; ++p) {
-        if (!ctx.right.empty()) ctx.right += ' ';
-        ctx.right += form.value_at(p);
-    }
-
-    return ctx;
-}
-
-// ── doc_id lookup ───────────────────────────────────────────────────────
-
-static std::string_view lookup_doc_id(const Corpus& corpus, CorpusPos pos) {
-    if (!corpus.has_structure("text")) return {};
-    const auto& text = corpus.structure("text");
-    if (!text.has_values()) return {};
-    int64_t ri = text.find_region(pos);
-    if (ri < 0) return {};
-    return text.region_value(static_cast<size_t>(ri));
-}
 
 // ── JSON output ─────────────────────────────────────────────────────────
 
@@ -551,6 +474,22 @@ static void run_query(const Corpus& corpus, const std::string& input,
                       const Options& opts, QueryTiming* out_timing = nullptr) {
     Parser parser(input);
     Program prog = parser.parse();
+
+    // Apply --max-gap: clamp unbounded repetition to user-configured cap
+    if (opts.max_gap != REPEAT_UNBOUNDED) {
+        for (auto& stmt : prog) {
+            for (auto& tok : stmt.query.tokens) {
+                if (tok.max_repeat == REPEAT_UNBOUNDED)
+                    tok.max_repeat = opts.max_gap;
+            }
+            if (stmt.is_parallel) {
+                for (auto& tok : stmt.target_query.tokens)
+                    if (tok.max_repeat == REPEAT_UNBOUNDED)
+                        tok.max_repeat = opts.max_gap;
+            }
+        }
+    }
+
     QueryExecutor executor(corpus);
 
     MatchSet last_ms;
@@ -712,8 +651,8 @@ static Options parse_args(int argc, char* argv[]) {
         else if (arg == "--debug")  {
             // bare --debug → level 1 (unless already higher)
             if (opts.debug_level < 1) opts.debug_level = 1;
-            // If next arg is a non-option, treat it as level
-            if (i + 1 < argc && argv[i + 1][0] != '-') {
+            // If next arg looks like a number, treat it as level
+            if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') {
                 try {
                     opts.debug_level = std::stoi(argv[++i]);
                 } catch (...) {
@@ -740,6 +679,7 @@ static Options parse_args(int argc, char* argv[]) {
         else if (arg == "--seed" && i + 1 < argc)  { opts.sample_seed = static_cast<uint32_t>(std::stoul(argv[++i])); }
         else if (arg == "--threads" && i + 1 < argc) { opts.threads = static_cast<unsigned>(std::stoul(argv[++i])); }
         else if (arg == "--preload") { opts.preload = true; }
+        else if (arg == "--max-gap" && i + 1 < argc) { opts.max_gap = std::stoi(argv[++i]); }
         else if (arg == "--attrs" && i + 1 < argc) {
             std::string list = argv[++i];
             opts.attrs.clear();
@@ -776,7 +716,8 @@ static Options parse_args(int argc, char* argv[]) {
                   << "  --timing         Print open_sec, query_sec, fetch_sec, total, returned to stderr\n"
                   << "  --sample N       Return N randomly sampled matches (reservoir sampling)\n"
                   << "  --seed N         RNG seed for --sample (reproducible runs)\n"
-                  << "  --threads N      Parallel seed processing for multi-token queries (default: 1)\n";
+                  << "  --threads N      Parallel seed processing for multi-token queries (default: 1)\n"
+                  << "  --max-gap N      Cap for + and * quantifiers (default: " << REPEAT_UNBOUNDED << ")\n";
         std::exit(1);
     }
 

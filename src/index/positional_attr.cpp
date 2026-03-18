@@ -87,6 +87,22 @@ std::vector<CorpusPos> PositionalAttr::positions_of_id(LexiconId id) const {
     return result;
 }
 
+#ifdef PANDO_USE_RE2
+std::vector<CorpusPos> PositionalAttr::positions_matching(
+        const re2::RE2& re) const {
+    std::vector<CorpusPos> result;
+    LexiconId n = lexicon_.size();
+    for (LexiconId id = 0; id < n; ++id) {
+        std::string_view sv = lexicon_.get(id);
+        if (re2::RE2::FullMatch(sv, re)) {
+            auto span = positions_of_id(id);
+            result.insert(result.end(), span.begin(), span.end());
+        }
+    }
+    std::sort(result.begin(), result.end());
+    return result;
+}
+#else
 std::vector<CorpusPos> PositionalAttr::positions_matching(
         const std::regex& re) const {
     std::vector<CorpusPos> result;
@@ -102,6 +118,7 @@ std::vector<CorpusPos> PositionalAttr::positions_matching(
     std::sort(result.begin(), result.end());
     return result;
 }
+#endif
 
 std::vector<CorpusPos> PositionalAttr::positions_not(
         const std::string& value, CorpusPos csz) const {
@@ -120,54 +137,6 @@ std::vector<CorpusPos> PositionalAttr::positions_not(
         result.push_back(p);
     }
     return result;
-}
-
-// ── PositionalAttrBuilder ───────────────────────────────────────────────
-
-void PositionalAttrBuilder::observe(CorpusPos pos, const std::string& value) {
-    if (static_cast<size_t>(pos) >= values_.size())
-        values_.resize(static_cast<size_t>(pos) + 1);
-    values_[static_cast<size_t>(pos)] = value;
-    lex_builder_.observe(value);
-}
-
-void PositionalAttrBuilder::build_and_write(const std::string& dir) {
-    lex_builder_.finalize();
-
-    std::string base = dir + "/" + name_;
-    lex_builder_.write(base);
-
-    CorpusPos n = static_cast<CorpusPos>(values_.size());
-    LexiconId lex_sz = lex_builder_.size();
-
-    // Write .dat (corpus array: position → lex id, stored as int32 LexiconId)
-    std::vector<LexiconId> corpus_data(static_cast<size_t>(n));
-    for (CorpusPos p = 0; p < n; ++p)
-        corpus_data[static_cast<size_t>(p)] = lex_builder_.lookup(values_[static_cast<size_t>(p)]);
-    write_vec(base + ".dat", corpus_data);
-
-    // Build inverted index: lex_id → sorted positions
-    std::vector<std::vector<CorpusPos>> rev_lists(static_cast<size_t>(lex_sz));
-    for (CorpusPos p = 0; p < n; ++p)
-        rev_lists[static_cast<size_t>(corpus_data[static_cast<size_t>(p)])].push_back(p);
-
-    // Write .rev (int64 positions) and .rev.idx (int64 offsets)
-    std::vector<int64_t> rev_idx;
-    rev_idx.reserve(static_cast<size_t>(lex_sz) + 1);
-    std::vector<CorpusPos> rev_flat;
-    rev_flat.reserve(static_cast<size_t>(n));
-
-    int64_t offset = 0;
-    for (LexiconId id = 0; id < lex_sz; ++id) {
-        rev_idx.push_back(offset);
-        const auto& list = rev_lists[static_cast<size_t>(id)];
-        rev_flat.insert(rev_flat.end(), list.begin(), list.end());
-        offset += static_cast<int64_t>(list.size());
-    }
-    rev_idx.push_back(offset);
-
-    write_vec(base + ".rev", rev_flat);
-    write_vec(base + ".rev.idx", rev_idx);
 }
 
 } // namespace manatree

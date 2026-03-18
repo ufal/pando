@@ -65,7 +65,7 @@ void CorpusBuilder::read_conllu(const std::string& path) {
             auto starts_with = [&](std::string_view p) {
                 return sv.size() >= p.size() && sv.substr(0, p.size()) == p;
             };
-            auto parse_id_after_eq = [&](std::string_view key) -> std::string {
+            auto parse_id_after_eq = [&]() -> std::string {
                 auto pos = sv.find('=');
                 if (pos == std::string_view::npos) return {};
                 std::string_view val = sv.substr(pos + 1);
@@ -83,7 +83,7 @@ void CorpusBuilder::read_conllu(const std::string& path) {
                         builder_.add_region("text", doc_start_, end,
                                             std::vector<std::pair<std::string, std::string>>{{"id", doc_id_}});
                 }
-                doc_id_ = parse_id_after_eq("newdoc id");
+                doc_id_ = parse_id_after_eq();
                 doc_start_ = builder_.corpus_size();
                 has_doc_region_ = true;
             } else if (starts_with("newpar id")) {
@@ -94,7 +94,7 @@ void CorpusBuilder::read_conllu(const std::string& path) {
                         builder_.add_region("par", par_start_, end,
                                             std::vector<std::pair<std::string, std::string>>{{"id", par_id_}});
                 }
-                par_id_ = parse_id_after_eq("newpar id");
+                par_id_ = parse_id_after_eq();
                 par_start_ = builder_.corpus_size();
                 has_par_region_ = true;
             }
@@ -139,8 +139,10 @@ void CorpusBuilder::read_conllu(const std::string& path) {
 
             int head_id = 0;
             auto head_sv = field(6);
-            for (char c : head_sv)
+            for (char c : head_sv) {
+                if (c < '0' || c > '9') { head_id = -1; break; }
                 head_id = head_id * 10 + (c - '0');
+            }
 
             builder_.add_token(attrs, head_id);
             in_sentence_ = true;
@@ -475,7 +477,7 @@ void CorpusBuilder::read_jsonl(const std::string& path) {
             if (!upos.empty())   pt.attrs["upos"]   = upos;
             if (!xpos.empty())   pt.attrs["xpos"]   = xpos;
             if (!deprel.empty()) pt.attrs["deprel"] = deprel;
-            if (!feats.empty())  pt.attrs[split_feats_ ? "feats" : "feats"] = feats;
+            if (!feats.empty())  parse_feats(feats, pt.attrs);
 
             pt.tok_id      = json_get_string(line, "tok_id");
             pt.head_tok_id = json_get_string(line, "head_tok_id");

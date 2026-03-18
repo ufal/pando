@@ -2,6 +2,7 @@
 // Uses a thread pool so multiple requests are handled in parallel.
 
 #include "api/query_json.h"
+#include "core/json_utils.h"
 #include "corpus/corpus.h"
 #include <httplib.h>
 #include <iostream>
@@ -115,7 +116,7 @@ int main(int argc, char* argv[]) {
             res.set_content(json, "application/json");
         } catch (const std::exception& e) {
             res.status = 400;
-            res.set_content("{\"ok\":false,\"error\":\"" + std::string(e.what()) + "\"}\n",
+            res.set_content("{\"ok\":false,\"error\":\"" + json_escape(e.what()) + "\"}\n",
                             "application/json");
         }
     });

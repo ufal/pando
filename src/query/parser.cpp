@@ -290,6 +290,12 @@ void Parser::parse_repetition(QueryToken& qt) {
         qt.max_repeat = REPEAT_UNBOUNDED;
         return;
     }
+    if (t.type == TokType::STAR) {
+        lexer_.consume();
+        qt.min_repeat = 0;
+        qt.max_repeat = REPEAT_UNBOUNDED;
+        return;
+    }
     if (t.type == TokType::QUESTION) {
         lexer_.consume();
         qt.min_repeat = 0;

@@ -49,24 +49,4 @@ private:
     MmapFile euler_out_file_;  // int16[corpus_size]
 };
 
-class DependencyIndexBuilder {
-public:
-    void set_corpus_size(CorpusPos n);
-    void set_head(CorpusPos pos, CorpusPos head_pos);
-
-    // Converts absolute heads to sentence-local int16, computes Euler tour.
-    void finalize(const std::vector<Region>& sentences);
-    void write(const std::string& dir) const;
-
-private:
-    void dfs_local(CorpusPos sent_start, int16_t local_id,
-                   const std::vector<std::vector<int16_t>>& children,
-                   int16_t& clock);
-
-    std::vector<CorpusPos> head_abs_;     // build-time: absolute positions
-    std::vector<int16_t>   head_local_;   // output: sentence-local (-1 = root)
-    std::vector<int16_t>   euler_in_;     // output: sentence-local DFS enter
-    std::vector<int16_t>   euler_out_;    // output: sentence-local DFS exit
-};
-
 } // namespace manatree

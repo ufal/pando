@@ -37,8 +37,47 @@ enum class TokType {
     LBRACE,      // {
     RBRACE,      // }
     PLUS,        // +
+    STAR,        // *
     QUESTION,    // ?
 };
+
+inline const char* toktype_name(TokType t) {
+    switch (t) {
+        case TokType::END:       return "END";
+        case TokType::LBRACKET:  return "'['";
+        case TokType::RBRACKET:  return "']'";
+        case TokType::LPAREN:    return "'('";
+        case TokType::RPAREN:    return "')'";
+        case TokType::EQ:        return "'='";
+        case TokType::NEQ:       return "'!='";
+        case TokType::LT:        return "'<'";
+        case TokType::GT:        return "'>'";
+        case TokType::LTE:       return "'<='";
+        case TokType::GTE:       return "'>='";
+        case TokType::LTLT:      return "'<<'";
+        case TokType::GTGT:      return "'>>'";
+        case TokType::BANG_LT:   return "'!<'";
+        case TokType::BANG_GT:   return "'!>'";
+        case TokType::AMP:       return "'&'";
+        case TokType::PIPE:      return "'|'";
+        case TokType::STRING:    return "string";
+        case TokType::REGEX:     return "regex";
+        case TokType::IDENT:     return "identifier";
+        case TokType::NUMBER:    return "number";
+        case TokType::COLON:     return "':'";
+        case TokType::DCOLON:    return "'::'";
+        case TokType::AT:        return "'@'";
+        case TokType::SEMI:      return "';'";
+        case TokType::DOT:       return "'.'";
+        case TokType::COMMA:     return "','";
+        case TokType::LBRACE:    return "'{'";
+        case TokType::RBRACE:    return "'}'";
+        case TokType::PLUS:      return "'+'";
+        case TokType::STAR:      return "'*'";
+        case TokType::QUESTION:  return "'?'";
+    }
+    return "unknown";
+}
 
 struct Token {
     TokType     type = TokType::END;

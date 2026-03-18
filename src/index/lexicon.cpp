@@ -39,35 +39,4 @@ LexiconId Lexicon::lookup(std::string_view value) const {
     return UNKNOWN_LEX;
 }
 
-// ── LexiconBuilder ──────────────────────────────────────────────────────
-
-void LexiconBuilder::observe(const std::string& value) {
-    seen_.insert(value);
-}
-
-void LexiconBuilder::finalize() {
-    sorted_.assign(seen_.begin(), seen_.end());
-    std::sort(sorted_.begin(), sorted_.end());
-    id_map_.clear();
-    id_map_.reserve(sorted_.size());
-    for (LexiconId i = 0; i < static_cast<LexiconId>(sorted_.size()); ++i)
-        id_map_[sorted_[i]] = i;
-    finalized_ = true;
-}
-
-LexiconId LexiconBuilder::lookup(const std::string& value) const {
-    if (!finalized_)
-        throw std::logic_error("LexiconBuilder::lookup called before finalize");
-    auto it = id_map_.find(value);
-    return it != id_map_.end() ? it->second : UNKNOWN_LEX;
-}
-
-void LexiconBuilder::write(const std::string& base) const {
-    if (!finalized_)
-        throw std::logic_error("LexiconBuilder::write called before finalize");
-    std::vector<int64_t> offsets;
-    write_strings(base + ".lex", sorted_, offsets);
-    write_vec(base + ".lex.idx", offsets);
-}
-
 } // namespace manatree

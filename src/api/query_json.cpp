@@ -1,80 +1,10 @@
 #include "api/query_json.h"
+#include "core/json_utils.h"
 #include "query/parser.h"
 #include <sstream>
 #include <chrono>
 
 namespace manatree {
-
-namespace {
-
-static std::string json_escape(std::string_view s) {
-    std::string out;
-    out.reserve(s.size() + 4);
-    for (char c : s) {
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20) {
-                    char buf[8];
-                    snprintf(buf, sizeof(buf), "\\u%04x", c);
-                    out += buf;
-                } else {
-                    out += c;
-                }
-        }
-    }
-    return out;
-}
-
-static std::string jstr(std::string_view s) {
-    return "\"" + json_escape(s) + "\"";
-}
-
-struct KwicContext {
-    std::string left, match, right;
-};
-
-static KwicContext build_context(const Corpus& corpus, const Match& m, int ctx_width) {
-    const auto& form = corpus.attr("form");
-    KwicContext ctx;
-    CorpusPos first = m.first_pos();
-    CorpusPos last  = m.last_pos();
-    CorpusPos left_start = std::max(CorpusPos(0), first - ctx_width);
-    for (CorpusPos p = left_start; p < first; ++p) {
-        if (!ctx.left.empty()) ctx.left += ' ';
-        ctx.left += std::string(form.value_at(p));
-    }
-    // Iterate through all positions in all spans
-    for (size_t i = 0; i < m.positions.size(); ++i) {
-        if (m.positions[i] == NO_HEAD) continue;
-        CorpusPos span_end = (!m.span_ends.empty()) ? m.span_ends[i] : m.positions[i];
-        for (CorpusPos p = m.positions[i]; p <= span_end; ++p) {
-            if (!ctx.match.empty()) ctx.match += ' ';
-            ctx.match += std::string(form.value_at(p));
-        }
-    }
-    CorpusPos right_end = std::min(corpus.size() - 1, last + ctx_width);
-    for (CorpusPos p = last + 1; p <= right_end; ++p) {
-        if (!ctx.right.empty()) ctx.right += ' ';
-        ctx.right += std::string(form.value_at(p));
-    }
-    return ctx;
-}
-
-static std::string_view lookup_doc_id(const Corpus& corpus, CorpusPos pos) {
-    if (!corpus.has_structure("text")) return {};
-    const auto& text = corpus.structure("text");
-    if (!text.has_values()) return {};
-    int64_t ri = text.find_region(pos);
-    if (ri < 0) return {};
-    return text.region_value(static_cast<size_t>(ri));
-}
-
-} // namespace
 
 std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
                                             const std::string& query_text,

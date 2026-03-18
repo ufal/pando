@@ -8,10 +8,6 @@
 #include <cstring>
 #include <fstream>
 
-#ifndef _SC_PAGESIZE
-#define _SC_PAGESIZE 4096
-#endif
-
 namespace manatree {
 
 MmapFile::~MmapFile() { close(); }

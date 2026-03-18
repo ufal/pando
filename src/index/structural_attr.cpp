@@ -84,12 +84,4 @@ std::string_view StructuralAttr::region_value(size_t idx) const {
                             static_cast<size_t>(off[idx + 1] - off[idx] - 1));
 }
 
-void StructuralAttrBuilder::add_region(CorpusPos start, CorpusPos end) {
-    regions_.push_back({start, end});
-}
-
-void StructuralAttrBuilder::write(const std::string& path) const {
-    write_file(path, regions_.data(), regions_.size() * sizeof(Region));
-}
-
 } // namespace manatree

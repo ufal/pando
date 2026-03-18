@@ -47,14 +47,4 @@ private:
     std::vector<std::string> region_attr_names_;
 };
 
-class StructuralAttrBuilder {
-public:
-    void add_region(CorpusPos start, CorpusPos end);
-    void write(const std::string& path) const;
-    size_t size() const { return regions_.size(); }
-
-private:
-    std::vector<Region> regions_;
-};
-
 } // namespace manatree

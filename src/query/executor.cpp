@@ -1,12 +1,15 @@
 #include "query/executor.h"
 #include <algorithm>
 #include <iostream>
-#include <mutex>
 #include <queue>
 #include <random>
 #include <stdexcept>
 #include <thread>
 #include <unordered_set>
+
+#ifndef PANDO_USE_RE2
+#include <mutex>
+#endif
 
 namespace manatree {
 
@@ -15,15 +18,13 @@ QueryExecutor::QueryExecutor(const Corpus& corpus) : corpus_(corpus) {}
 // ── Attribute name normalization ────────────────────────────────────────
 
 std::string QueryExecutor::normalize_attr(const std::string& attr) const {
-    if (attr.size() > 6 && attr.substr(0, 6) == "feats.") {
+    if (attr.size() > 6 && attr.compare(0, 6, "feats.") == 0) {
         std::string split_name = "feats_" + attr.substr(6);
         if (corpus_.has_attr(split_name)) return split_name;
-        // Combined feats mode: keep the dot form for special handling
         return attr;
     }
-    if (attr.size() > 6 && attr.substr(0, 6) == "feats_") {
+    if (attr.size() > 6 && attr.compare(0, 6, "feats_") == 0) {
         if (corpus_.has_attr(attr)) return attr;
-        // Try combined feats mode
         return "feats." + attr.substr(6);
     }
     return attr;
@@ -35,7 +36,7 @@ std::string QueryExecutor::normalize_attr(const std::string& attr) const {
 // extract the value for a specific feature name.
 
 static bool is_feats_sub(const std::string& name, std::string& feat_name) {
-    if (name.size() > 6 && name.substr(0, 6) == "feats.") {
+    if (name.size() > 6 && name.compare(0, 6, "feats.") == 0) {
         feat_name = name.substr(6);
         return true;
     }
@@ -134,10 +135,20 @@ QueryPlan QueryExecutor::plan_query(const TokenQuery& query) const {
     for (size_t i = 0; i < n; ++i)
         card[i] = estimate_cardinality(query.tokens[i].conditions);
 
+    // Pick the lowest-cardinality *non-optional* token as seed.
+    // Optional tokens (min_repeat == 0) can match nothing, so they make
+    // terrible anchors — seed_len=0 would create a corrupt span (end < start).
+    // If every token is optional, fall back to the lowest-cardinality one;
+    // the seed_len guard below still protects us.
     plan.seed = 0;
-    for (size_t i = 1; i < n; ++i)
-        if (card[i] < card[plan.seed])
+    for (size_t i = 1; i < n; ++i) {
+        bool cur_optional  = (query.tokens[plan.seed].min_repeat == 0);
+        bool cand_optional = (query.tokens[i].min_repeat == 0);
+        // Prefer non-optional over optional; among same optionality, prefer lower cardinality
+        if ((!cand_optional && cur_optional) ||
+            (cand_optional == cur_optional && card[i] < card[plan.seed]))
             plan.seed = i;
+    }
 
     // BFS from seed along the linear chain
     std::vector<bool> visited(n, false);
@@ -198,12 +209,26 @@ bool QueryExecutor::check_leaf(CorpusPos pos, const AttrCondition& ac) const {
         case CompOp::EQ:    return val == ac.value;
         case CompOp::NEQ:   return val != ac.value;
         case CompOp::REGEX: {
+#ifdef PANDO_USE_RE2
+            // Look up or insert compiled RE2 under lock, then match outside lock.
+            // RE2 objects are thread-safe for matching once constructed.
+            const re2::RE2* compiled;
+            {
+                std::lock_guard<std::mutex> lock(regex_cache_mutex_);
+                auto it = regex_cache_.find(ac.value);
+                if (it == regex_cache_.end())
+                    it = regex_cache_.emplace(ac.value, std::make_unique<re2::RE2>(ac.value)).first;
+                compiled = it->second.get();
+            }
+            return re2::RE2::FullMatch(val, *compiled);
+#else
             std::lock_guard<std::mutex> lock(regex_cache_mutex_);
             auto it = regex_cache_.find(ac.value);
             if (it == regex_cache_.end())
                 it = regex_cache_.emplace(ac.value, std::regex(ac.value)).first;
             std::string s(val);
             return std::regex_match(s, it->second);
+#endif
         }
         case CompOp::LT:    return val < ac.value;
         case CompOp::GT:    return val > ac.value;
@@ -390,11 +415,24 @@ std::vector<CorpusPos> QueryExecutor::resolve_leaf(
         case CompOp::NEQ:
             return pa.positions_not(ac.value, corpus_.size());
         case CompOp::REGEX: {
+#ifdef PANDO_USE_RE2
+            // Compile RE2 under lock, then match outside lock (thread-safe).
+            const re2::RE2* compiled;
+            {
+                std::lock_guard<std::mutex> lock(regex_cache_mutex_);
+                auto it = regex_cache_.find(ac.value);
+                if (it == regex_cache_.end())
+                    it = regex_cache_.emplace(ac.value, std::make_unique<re2::RE2>(ac.value)).first;
+                compiled = it->second.get();
+            }
+            return pa.positions_matching(*compiled);
+#else
             std::lock_guard<std::mutex> lock(regex_cache_mutex_);
             auto it = regex_cache_.find(ac.value);
             if (it == regex_cache_.end())
                 it = regex_cache_.emplace(ac.value, std::regex(ac.value)).first;
             return pa.positions_matching(it->second);
+#endif
         }
         default:
             throw std::runtime_error("Unsupported comparison on positional attr");
@@ -602,200 +640,11 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
     }
 
     // Sequential path: process one seed at a time (lazy when possible)
-    // Partial match vectors are of size 2*n: [0..n-1]=starts, [n..2n-1]=ends
-    int seed_min_rep = query.tokens[plan.seed].min_repeat;
-    int seed_max_rep = query.tokens[plan.seed].max_repeat;
-
     for_each_seed_position(query.tokens[plan.seed].conditions, [&](CorpusPos seed_p) {
-        // Try different span lengths for the seed token
-        for (int seed_len = seed_min_rep; seed_len <= seed_max_rep; ++seed_len) {
-            // Validate the seed span: positions seed_p..seed_p+seed_len-1 must all match
-            if (seed_len > 1) {
-                CorpusPos end_p = seed_p + seed_len - 1;
-                if (end_p >= corpus_.size()) break;
-                bool valid = true;
-                for (CorpusPos q = seed_p + 1; q <= end_p; ++q) {
-                    if (!check_conditions(q, query.tokens[plan.seed].conditions)) {
-                        valid = false;
-                        break;
-                    }
-                }
-                if (!valid) break;
-            }
-
-            std::vector<std::vector<CorpusPos>> partial;
-            {
-                std::vector<CorpusPos> pm(2 * n, NO_HEAD);
-                pm[plan.seed] = seed_p;
-                pm[n + plan.seed] = seed_p + seed_len - 1;
-                partial.push_back(std::move(pm));
-            }
-
-            for (const auto& step : plan.steps) {
-                if (step.edge_idx >= query.relations.size())
-                    throw std::runtime_error("Internal error: query plan edge index out of range");
-                RelationType rel = query.relations[step.edge_idx].type;
-                const auto& target_cond = query.tokens[step.to].conditions;
-                int to_min = query.tokens[step.to].min_repeat;
-                int to_max = query.tokens[step.to].max_repeat;
-                bool is_negative = (rel == RelationType::NOT_GOVERNS ||
-                                    rel == RelationType::NOT_GOV_BY);
-
-                std::vector<std::vector<CorpusPos>> new_partial;
-
-                if (is_negative) {
-                    RelationType pos_rel = (rel == RelationType::NOT_GOVERNS)
-                                           ? RelationType::GOVERNS
-                                           : RelationType::GOVERNED_BY;
-                    for (const auto& pm : partial) {
-                        CorpusPos from_pos = pm[step.from];
-                        if (from_pos == NO_HEAD) continue;
-                        auto related = find_related(from_pos, pos_rel, step.reversed);
-                        bool any_match = false;
-                        for (CorpusPos r : related) {
-                            if (r >= 0 && r < corpus_.size() &&
-                                check_conditions(r, target_cond)) {
-                                any_match = true;
-                                break;
-                            }
-                        }
-                        if (!any_match) {
-                            // Optional token (min=0) with negative relation: keep as-is with NO_HEAD
-                            new_partial.push_back(pm);
-                        }
-                    }
-                } else if (rel == RelationType::SEQUENCE && (to_min != 1 || to_max != 1)) {
-                    // SEQUENCE with repetition on the target token
-                    for (const auto& pm : partial) {
-                        // Use span end for forward traversal, span start for backward
-                        CorpusPos from_end = pm[n + step.from];   // end of from-token's span
-                        CorpusPos from_start = pm[step.from];     // start of from-token's span
-                        if (from_end == NO_HEAD) continue;
-
-                        CorpusPos base;
-                        if (!step.reversed) {
-                            base = from_end + 1;    // span starts right after from's end
-                        } else {
-                            base = from_start - 1;  // span ends right before from's start
-                        }
-
-                        // Optional token: min=0 path (skip this token entirely)
-                        if (to_min == 0) {
-                            auto skipped = pm;
-                            // Leave step.to as NO_HEAD to indicate skipped
-                            new_partial.push_back(std::move(skipped));
-                        }
-
-                        // Try spans of length 1..to_max
-                        for (int len = 1; len <= to_max; ++len) {
-                            CorpusPos p;
-                            if (!step.reversed) {
-                                p = base + len - 1;
-                            } else {
-                                p = base - len + 1;
-                            }
-                            if (p < 0 || p >= corpus_.size()) break;
-                            if (!check_conditions(p, target_cond)) break;
-
-                            if (len >= std::max(to_min, 1)) {
-                                auto extended = pm;
-                                if (!step.reversed) {
-                                    extended[step.to] = base;
-                                    extended[n + step.to] = base + len - 1;
-                                } else {
-                                    extended[step.to] = base - len + 1;
-                                    extended[n + step.to] = base;
-                                }
-                                new_partial.push_back(std::move(extended));
-                            }
-                        }
-                    }
-                } else {
-                    // Standard non-repeating path (or non-SEQUENCE)
-                    for (const auto& pm : partial) {
-                        // For SEQUENCE, use span boundaries; for deps, use start position
-                        CorpusPos from_pos;
-                        if (rel == RelationType::SEQUENCE) {
-                            from_pos = step.reversed ? pm[step.from] : pm[n + step.from];
-                        } else {
-                            from_pos = pm[step.from];
-                        }
-                        if (from_pos == NO_HEAD) {
-                            // From-token was skipped (optional with min=0)
-                            // Find nearest non-skipped token's position for SEQUENCE
-                            if (rel == RelationType::SEQUENCE) {
-                                // Walk backward/forward through placed tokens
-                                // For simplicity, look at the from-token's neighbors
-                                // This handles A B? C where B is skipped
-                                CorpusPos fallback = NO_HEAD;
-                                if (!step.reversed) {
-                                    // Going forward: find the last placed end before step.from
-                                    for (int k = static_cast<int>(step.from) - 1; k >= 0; --k) {
-                                        if (pm[n + k] != NO_HEAD) { fallback = pm[n + k]; break; }
-                                    }
-                                } else {
-                                    // Going backward: find the first placed start after step.from
-                                    for (size_t k = step.from + 1; k < n; ++k) {
-                                        if (pm[k] != NO_HEAD) { fallback = pm[k]; break; }
-                                    }
-                                }
-                                if (fallback == NO_HEAD) continue;
-                                from_pos = fallback;
-                            } else {
-                                continue;
-                            }
-                        }
-
-                        auto related = find_related(from_pos, rel, step.reversed);
-
-                        // Optional token: min=0 path (skip)
-                        if (to_min == 0 && rel == RelationType::SEQUENCE) {
-                            auto skipped = pm;
-                            new_partial.push_back(std::move(skipped));
-                        }
-
-                        for (CorpusPos r : related) {
-                            if (r >= 0 && r < corpus_.size() &&
-                                check_conditions(r, target_cond)) {
-                                auto extended = pm;
-                                extended[step.to] = r;
-                                extended[n + step.to] = r;
-                                new_partial.push_back(std::move(extended));
-                            }
-                        }
-                    }
-                }
-
-                partial = std::move(new_partial);
-                if (partial.empty()) break;
-            }
-
-            // Within-clause filter
-            for (auto& pm : partial) {
-                if (within_sa) {
-                    // Find the first valid position for region check
-                    CorpusPos anchor = NO_HEAD;
-                    for (size_t i = 0; i < n; ++i) {
-                        if (pm[i] != NO_HEAD) { anchor = pm[i]; break; }
-                    }
-                    if (anchor == NO_HEAD) continue;
-                    int64_t rgn = within_sa->find_region(anchor);
-                    if (rgn < 0) continue;
-                    bool ok = true;
-                    for (size_t i = 0; i < n; ++i) {
-                        if (pm[i] == NO_HEAD) continue;
-                        if (within_sa->find_region(pm[i]) != rgn) { ok = false; break; }
-                        // Also check span end if different from start
-                        if (pm[n + i] != pm[i] && within_sa->find_region(pm[n + i]) != rgn) { ok = false; break; }
-                    }
-                    if (!ok) continue;
-                }
-                add_match(std::move(pm));
-            }
-
-            if (reached_limit() || reached_total_cap()) break;
-        }
-
+        expand_seed(query, plan, within_sa, seed_p, [&](std::vector<CorpusPos>&& pm) -> bool {
+            add_match(std::move(pm));
+            return !reached_limit() && !reached_total_cap();
+        });
         return !reached_limit() && !reached_total_cap();
     });
 
@@ -806,18 +655,19 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
     return result;
 }
 
-// ── expand_one_seed (for parallel execution) ─────────────────────────────
+// ── Shared seed expansion (single source of truth for match logic) ───────
 
-std::vector<Match> QueryExecutor::expand_one_seed(const TokenQuery& query,
-                                                  const QueryPlan& plan,
-                                                  const StructuralAttr* within_sa,
-                                                  CorpusPos seed_p) const {
-    std::vector<Match> out;
+void QueryExecutor::expand_seed(const TokenQuery& query,
+                                const QueryPlan& plan,
+                                const StructuralAttr* within_sa,
+                                CorpusPos seed_p,
+                                std::function<bool(std::vector<CorpusPos>&&)> emit) const {
     size_t n = query.tokens.size();
-    int seed_min = query.tokens[plan.seed].min_repeat;
-    int seed_max = query.tokens[plan.seed].max_repeat;
+    int seed_min_rep = std::max(query.tokens[plan.seed].min_repeat, 1); // seed_len=0 is nonsensical
+    int seed_max_rep = query.tokens[plan.seed].max_repeat;
 
-    for (int seed_len = seed_min; seed_len <= seed_max; ++seed_len) {
+    for (int seed_len = seed_min_rep; seed_len <= seed_max_rep; ++seed_len) {
+        // Validate the seed span: positions seed_p..seed_p+seed_len-1 must all match
         if (seed_len > 1) {
             CorpusPos end_p = seed_p + seed_len - 1;
             if (end_p >= corpus_.size()) break;
@@ -831,6 +681,7 @@ std::vector<Match> QueryExecutor::expand_one_seed(const TokenQuery& query,
             if (!valid) break;
         }
 
+        // Partial match vectors are of size 2*n: [0..n-1]=starts, [n..2n-1]=ends
         std::vector<std::vector<CorpusPos>> partial;
         {
             std::vector<CorpusPos> pm(2 * n, NO_HEAD);
@@ -839,6 +690,7 @@ std::vector<Match> QueryExecutor::expand_one_seed(const TokenQuery& query,
             partial.push_back(std::move(pm));
         }
 
+        // Expand outward through plan steps
         for (const auto& step : plan.steps) {
             if (step.edge_idx >= query.relations.size())
                 throw std::runtime_error("Internal error: query plan edge index out of range");
@@ -848,39 +700,65 @@ std::vector<Match> QueryExecutor::expand_one_seed(const TokenQuery& query,
             int to_max = query.tokens[step.to].max_repeat;
             bool is_negative = (rel == RelationType::NOT_GOVERNS ||
                                 rel == RelationType::NOT_GOV_BY);
+
             std::vector<std::vector<CorpusPos>> new_partial;
 
             if (is_negative) {
+                // Negative relation: keep partial only if NO target matches
                 RelationType pos_rel = (rel == RelationType::NOT_GOVERNS)
                                        ? RelationType::GOVERNS
                                        : RelationType::GOVERNED_BY;
                 for (const auto& pm : partial) {
                     CorpusPos from_pos = pm[step.from];
                     if (from_pos == NO_HEAD) continue;
-                    auto related = find_related(from_pos, pos_rel, step.reversed);
                     bool any_match = false;
-                    for (CorpusPos r : related) {
+                    for_each_related(from_pos, pos_rel, step.reversed, [&](CorpusPos r) -> bool {
                         if (r >= 0 && r < corpus_.size() &&
                             check_conditions(r, target_cond)) {
                             any_match = true;
-                            break;
+                            return false;  // stop early
                         }
-                    }
+                        return true;
+                    });
                     if (!any_match)
                         new_partial.push_back(pm);
                 }
             } else if (rel == RelationType::SEQUENCE && (to_min != 1 || to_max != 1)) {
+                // SEQUENCE with repetition/optional on the target token
                 for (const auto& pm : partial) {
                     CorpusPos from_end = pm[n + step.from];
                     CorpusPos from_start = pm[step.from];
-                    if (from_end == NO_HEAD) continue;
-
-                    CorpusPos base = step.reversed ? (from_start - 1) : (from_end + 1);
-
-                    if (to_min == 0) {
-                        new_partial.push_back(pm);
+                    if (from_end == NO_HEAD) {
+                        // From-token was skipped (optional) — walk to nearest placed token
+                        CorpusPos fallback = NO_HEAD;
+                        if (!step.reversed) {
+                            for (int k = static_cast<int>(step.from) - 1; k >= 0; --k) {
+                                if (pm[n + k] != NO_HEAD) { fallback = pm[n + k]; break; }
+                            }
+                        } else {
+                            for (size_t k = step.from + 1; k < n; ++k) {
+                                if (pm[k] != NO_HEAD) { fallback = pm[k]; break; }
+                            }
+                        }
+                        if (fallback == NO_HEAD) continue;
+                        from_end = fallback;
+                        from_start = fallback;
                     }
 
+                    CorpusPos base;
+                    if (!step.reversed) {
+                        base = from_end + 1;    // span starts right after from's end
+                    } else {
+                        base = from_start - 1;  // span ends right before from's start
+                    }
+
+                    // Optional token: min=0 path (skip this token entirely)
+                    if (to_min == 0) {
+                        auto skipped = pm;
+                        new_partial.push_back(std::move(skipped));
+                    }
+
+                    // Try spans of length 1..to_max
                     for (int len = 1; len <= to_max; ++len) {
                         CorpusPos p = step.reversed ? (base - len + 1) : (base + len - 1);
                         if (p < 0 || p >= corpus_.size()) break;
@@ -900,6 +778,7 @@ std::vector<Match> QueryExecutor::expand_one_seed(const TokenQuery& query,
                     }
                 }
             } else {
+                // Standard non-repeating path (or non-SEQUENCE relation)
                 for (const auto& pm : partial) {
                     CorpusPos from_pos;
                     if (rel == RelationType::SEQUENCE) {
@@ -907,14 +786,34 @@ std::vector<Match> QueryExecutor::expand_one_seed(const TokenQuery& query,
                     } else {
                         from_pos = pm[step.from];
                     }
-                    if (from_pos == NO_HEAD) continue;
-                    auto related = find_related(from_pos, rel, step.reversed);
-
-                    if (to_min == 0 && rel == RelationType::SEQUENCE) {
-                        new_partial.push_back(pm);
+                    if (from_pos == NO_HEAD) {
+                        // From-token was skipped (optional with min=0).
+                        // Walk to nearest placed token for SEQUENCE fallback.
+                        if (rel == RelationType::SEQUENCE) {
+                            CorpusPos fallback = NO_HEAD;
+                            if (!step.reversed) {
+                                for (int k = static_cast<int>(step.from) - 1; k >= 0; --k) {
+                                    if (pm[n + k] != NO_HEAD) { fallback = pm[n + k]; break; }
+                                }
+                            } else {
+                                for (size_t k = step.from + 1; k < n; ++k) {
+                                    if (pm[k] != NO_HEAD) { fallback = pm[k]; break; }
+                                }
+                            }
+                            if (fallback == NO_HEAD) continue;
+                            from_pos = fallback;
+                        } else {
+                            continue;
+                        }
                     }
 
-                    for (CorpusPos r : related) {
+                    // Optional token: min=0 path (skip)
+                    if (to_min == 0 && rel == RelationType::SEQUENCE) {
+                        auto skipped = pm;
+                        new_partial.push_back(std::move(skipped));
+                    }
+
+                    for_each_related(from_pos, rel, step.reversed, [&](CorpusPos r) -> bool {
                         if (r >= 0 && r < corpus_.size() &&
                             check_conditions(r, target_cond)) {
                             auto extended = pm;
@@ -922,13 +821,17 @@ std::vector<Match> QueryExecutor::expand_one_seed(const TokenQuery& query,
                             extended[n + step.to] = r;
                             new_partial.push_back(std::move(extended));
                         }
-                    }
+                        return true;
+                    });
                 }
             }
+
             partial = std::move(new_partial);
             if (partial.empty()) break;
         }
 
+        // Within-clause filter + emit
+        bool stop = false;
         for (auto& pm : partial) {
             if (within_sa) {
                 CorpusPos anchor = NO_HEAD;
@@ -946,15 +849,32 @@ std::vector<Match> QueryExecutor::expand_one_seed(const TokenQuery& query,
                 }
                 if (!ok) continue;
             }
-            Match m;
-            m.positions.assign(pm.begin(), pm.begin() + n);
-            m.span_ends.assign(pm.begin() + n, pm.begin() + 2 * n);
-            for (size_t i = 0; i < n; ++i)
-                if (!query.tokens[i].name.empty() && m.positions[i] != NO_HEAD)
-                    m.name_to_position[query.tokens[i].name] = m.positions[i];
-            out.push_back(std::move(m));
+            if (!emit(std::move(pm))) { stop = true; break; }
         }
+        if (stop) break;
     }
+}
+
+// ── expand_one_seed (convenience wrapper for parallel execution) ──────────
+
+std::vector<Match> QueryExecutor::expand_one_seed(const TokenQuery& query,
+                                                  const QueryPlan& plan,
+                                                  const StructuralAttr* within_sa,
+                                                  CorpusPos seed_p) const {
+    std::vector<Match> out;
+    size_t n = query.tokens.size();
+
+    expand_seed(query, plan, within_sa, seed_p, [&](std::vector<CorpusPos>&& pm) -> bool {
+        Match m;
+        m.positions.assign(pm.begin(), pm.begin() + n);
+        m.span_ends.assign(pm.begin() + n, pm.begin() + 2 * n);
+        for (size_t i = 0; i < n; ++i)
+            if (!query.tokens[i].name.empty() && m.positions[i] != NO_HEAD)
+                m.name_to_position[query.tokens[i].name] = m.positions[i];
+        out.push_back(std::move(m));
+        return true;  // always continue (parallel path collects all)
+    });
+
     return out;
 }
 

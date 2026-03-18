@@ -6,9 +6,15 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
-#include <regex>
 #include <functional>
+#include <memory>
+
+#ifdef PANDO_USE_RE2
+#include <re2/re2.h>
+#else
+#include <regex>
 #include <mutex>
+#endif
 
 namespace manatree {
 
@@ -98,6 +104,23 @@ private:
                                         RelationType rel,
                                         bool reversed) const;
 
+    // Callback-based variant: avoids heap allocation for SEQUENCE (the common case).
+    // Calls f(related_pos) for each related position; f returns false to stop early.
+    template<typename F>
+    void for_each_related(CorpusPos pos, RelationType rel, bool reversed, F&& f) const {
+        if (rel == RelationType::SEQUENCE) {
+            if (reversed) {
+                if (pos > 0) f(pos - 1);
+            } else {
+                if (pos + 1 < corpus_.size()) f(pos + 1);
+            }
+        } else {
+            auto v = find_related(pos, rel, reversed);
+            for (CorpusPos r : v)
+                if (!f(r)) break;
+        }
+    }
+
     // ── Seed resolution (uses inverted index for the starting token) ────
 
     std::vector<CorpusPos> resolve_conditions(const ConditionPtr& cond) const;
@@ -107,7 +130,15 @@ private:
     void for_each_seed_position(const ConditionPtr& cond,
                                 std::function<bool(CorpusPos)> f) const;
 
+    // Expand one seed position through all plan steps and within-clause filter.
+    // Calls emit(pm) for each complete partial match vector (size 2*n).
+    // emit returns true to continue expanding, false to stop early.
+    void expand_seed(const TokenQuery& query, const QueryPlan& plan,
+                     const StructuralAttr* within_sa, CorpusPos seed_p,
+                     std::function<bool(std::vector<CorpusPos>&&)> emit) const;
+
     // Expand one seed position to all full matches (for parallel execution).
+    // Convenience wrapper around expand_seed that builds Match objects.
     std::vector<Match> expand_one_seed(const TokenQuery& query,
                                        const QueryPlan& plan,
                                        const StructuralAttr* within_sa,
@@ -125,8 +156,16 @@ private:
     void apply_global_filters(const TokenQuery& query, MatchSet& result) const;
 
     const Corpus& corpus_;
+
+#ifdef PANDO_USE_RE2
+    // RE2 objects are thread-safe for matching once constructed.
+    // Only the cache insertion needs synchronization (handled by mutable + unique_ptr).
+    mutable std::unordered_map<std::string, std::unique_ptr<re2::RE2>> regex_cache_;
+    mutable std::mutex regex_cache_mutex_;  // protects cache insertion only
+#else
     mutable std::unordered_map<std::string, std::regex> regex_cache_;
     mutable std::mutex regex_cache_mutex_;
+#endif
 };
 
 } // namespace manatree

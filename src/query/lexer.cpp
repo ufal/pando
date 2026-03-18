@@ -58,6 +58,7 @@ Token Lexer::next() {
         case '{': ++pos_; return {TokType::LBRACE,   "{", start};
         case '}': ++pos_; return {TokType::RBRACE,   "}", start};
         case '+': ++pos_; return {TokType::PLUS,     "+", start};
+        case '*': ++pos_; return {TokType::STAR,     "*", start};
         case '?': ++pos_; return {TokType::QUESTION, "?", start};
         default: break;
     }
@@ -139,8 +140,8 @@ bool Lexer::at_end() const {
 Token Lexer::expect(TokType type) {
     Token t = next();
     if (t.type != type) {
-        throw std::runtime_error("Expected token type " +
-            std::to_string(static_cast<int>(type)) + " but got '" +
+        throw std::runtime_error(std::string("Expected ") +
+            toktype_name(type) + " but got '" +
             t.text + "' at position " + std::to_string(t.pos));
     }
     return t;
