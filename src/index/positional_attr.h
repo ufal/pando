@@ -76,6 +76,49 @@ public:
     const Lexicon& lexicon() const { return lexicon_; }
     CorpusPos corpus_size() const { return corpus_size_; }
 
+    // RG-5f: Multivalue component reverse index support.
+    // Call open_mv() after open() for attrs declared as multivalue.
+    void open_mv(const std::string& base_path, bool preload = false);
+    bool has_mv() const { return mv_rev_idx_.valid(); }
+
+    // Lookup a single component value (e.g. "artist") in the MV lexicon.
+    // Returns UNKNOWN_LEX if not found.
+    LexiconId mv_lookup(std::string_view component) const;
+
+    // Count of positions containing this component.
+    size_t mv_count_of(const std::string& component) const;
+    size_t mv_count_of_id(LexiconId mv_id) const;
+
+    // Lazy iteration over positions for a component MV lex ID.
+    template<typename F>
+    bool for_each_position_mv(LexiconId mv_id, F&& f) const {
+        const auto* idx = mv_rev_idx_.as<int64_t>();
+        int64_t start = idx[mv_id];
+        int64_t end   = idx[mv_id + 1];
+        const size_t count = static_cast<size_t>(end - start);
+        switch (mv_rev_width_) {
+            case 2: {
+                const auto* p = mv_rev_.as<int16_t>() + start;
+                for (size_t i = 0; i < count; ++i)
+                    if (!f(static_cast<CorpusPos>(p[i]))) return false;
+                break;
+            }
+            case 4: {
+                const auto* p = mv_rev_.as<int32_t>() + start;
+                for (size_t i = 0; i < count; ++i)
+                    if (!f(static_cast<CorpusPos>(p[i]))) return false;
+                break;
+            }
+            default: {
+                const auto* p = mv_rev_.as<int64_t>() + start;
+                for (size_t i = 0; i < count; ++i)
+                    if (!f(p[i])) return false;
+                break;
+            }
+        }
+        return true;
+    }
+
 private:
     Lexicon  lexicon_;
     MmapFile corpus_;      // .dat  — int8/int16/int32 per position
@@ -85,6 +128,12 @@ private:
     CorpusPos corpus_size_ = 0;
     int dat_width_ = 4;    // bytes per element in .dat (1, 2, or 4)
     int rev_width_ = 8;    // bytes per element in .rev (2, 4, or 8)
+
+    // RG-5f: MV component reverse index (optional, only for multivalue attrs)
+    Lexicon  mv_lexicon_;      // .mv.lex — sorted component strings
+    MmapFile mv_rev_;          // .mv.rev — positions per component
+    MmapFile mv_rev_idx_;      // .mv.rev.idx — int64 offsets
+    int mv_rev_width_ = 8;
 };
 
 } // namespace manatree

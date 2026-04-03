@@ -537,14 +537,41 @@ QueryToken Parser::parse_token_expr() {
         }
         lexer_.expect(TokType::RBRACKET);
     } else if (t.type == TokType::STRING) {
+        // "aux" → [form="aux" | contr_form="aux"]+
+        // The + repetition ensures contraction matches span all sub-tokens.
+        // For a single-token match (form="aux"), the + matches exactly 1.
         lexer_.consume();
         AttrCondition ac;
         ac.attr = "form";
         ac.op = CompOp::EQ;
         ac.value = t.text;
-        qt.conditions = ConditionNode::make_leaf(std::move(ac));
+        auto form_node = ConditionNode::make_leaf(std::move(ac));
+        AttrCondition ac_contr;
+        ac_contr.attr = "contr_form";
+        ac_contr.op = CompOp::EQ;
+        ac_contr.value = t.text;
+        auto contr_node = ConditionNode::make_leaf(std::move(ac_contr));
+        qt.conditions = ConditionNode::make_branch(BoolOp::OR, std::move(form_node), std::move(contr_node));
+        qt.min_repeat = 1;
+        qt.max_repeat = REPEAT_UNBOUNDED;
+    } else if (t.type == TokType::REGEX) {
+        // /pattern/ → [form=/pattern/ | contr_form=/pattern/]+
+        lexer_.consume();
+        AttrCondition ac;
+        ac.attr = "form";
+        ac.op = CompOp::REGEX;
+        ac.value = t.text;
+        auto form_node = ConditionNode::make_leaf(std::move(ac));
+        AttrCondition ac_contr;
+        ac_contr.attr = "contr_form";
+        ac_contr.op = CompOp::REGEX;
+        ac_contr.value = t.text;
+        auto contr_node = ConditionNode::make_leaf(std::move(ac_contr));
+        qt.conditions = ConditionNode::make_branch(BoolOp::OR, std::move(form_node), std::move(contr_node));
+        qt.min_repeat = 1;
+        qt.max_repeat = REPEAT_UNBOUNDED;
     } else {
-        throw std::runtime_error("Expected '[' or string at position " +
+        throw std::runtime_error("Expected '[' or string or /regex/ at position " +
                                  std::to_string(t.pos));
     }
 
@@ -648,6 +675,55 @@ ConditionPtr Parser::parse_primary_condition() {
         return cond;
     }
 
+    // Count condition: count(child[upos="ADJ"]) >= 3
+    if (lexer_.peek().type == TokType::IDENT && lexer_.peek().text == "count") {
+        Token count_tok = lexer_.next();  // consume "count"
+        if (lexer_.peek().type == TokType::LPAREN) {
+            lexer_.consume();  // consume (
+
+            // Parse relation keyword
+            Token rel_tok = lexer_.expect(TokType::IDENT);
+            std::string rel_lower = rel_tok.text;
+            std::transform(rel_lower.begin(), rel_lower.end(), rel_lower.begin(), ::tolower);
+            StructRelType srt;
+            if (rel_lower == "child")           srt = StructRelType::CHILD;
+            else if (rel_lower == "parent")     srt = StructRelType::PARENT;
+            else if (rel_lower == "sibling")    srt = StructRelType::SIBLING;
+            else if (rel_lower == "descendant") srt = StructRelType::DESCENDANT;
+            else if (rel_lower == "ancestor")   srt = StructRelType::ANCESTOR;
+            else throw std::runtime_error("Expected relation keyword (child/parent/sibling/descendant/ancestor) in count() at position " + std::to_string(rel_tok.pos));
+
+            // Optional filter: [conditions]
+            ConditionPtr filter;
+            if (lexer_.peek().type == TokType::LBRACKET) {
+                lexer_.consume();
+                if (lexer_.peek().type != TokType::RBRACKET)
+                    filter = parse_conditions();
+                lexer_.expect(TokType::RBRACKET);
+            }
+
+            lexer_.expect(TokType::RPAREN);  // closing )
+
+            // Comparison operator
+            CompOp op;
+            Token op_tok = lexer_.next();
+            switch (op_tok.type) {
+                case TokType::EQ:   op = CompOp::EQ;  break;
+                case TokType::NEQ:  op = CompOp::NEQ; break;
+                case TokType::LT:   op = CompOp::LT;  break;
+                case TokType::GT:   op = CompOp::GT;  break;
+                case TokType::LTE:  op = CompOp::LTE; break;
+                case TokType::GTE:  op = CompOp::GTE; break;
+                default: throw std::runtime_error("Expected comparison operator after count() at position " + std::to_string(op_tok.pos));
+            }
+
+            int64_t value = std::stoll(lexer_.expect(TokType::NUMBER).text);
+            return ConditionNode::make_count(srt, filter, op, value);
+        }
+        // count not followed by ( — not a count expression
+        throw std::runtime_error("Expected '(' after 'count' at position " + std::to_string(count_tok.pos));
+    }
+
     // Check for [not] structural relation keyword
     if (lexer_.peek().type == TokType::IDENT) {
         std::string lower = lexer_.peek().text;
@@ -708,6 +784,35 @@ ConditionPtr Parser::parse_primary_condition() {
             lexer_.expect(TokType::RBRACKET);
             return ConditionNode::make_structural(srt, nested, nested_name, negated);
         }
+    }
+
+    // nvals(attr) op NUMBER — multivalue cardinality (pipe-separated components)
+    if (lexer_.peek().type == TokType::IDENT && lexer_.peek().text == "nvals") {
+        lexer_.consume();
+        lexer_.expect(TokType::LPAREN);
+        AttrCondition ac;
+        ac.is_nvals = true;
+        Token t = lexer_.expect(TokType::IDENT);
+        ac.attr = t.text;
+        if (lexer_.peek().type == TokType::DOT) {
+            lexer_.consume();
+            ac.attr += "." + lexer_.expect(TokType::IDENT).text;
+        }
+        lexer_.expect(TokType::RPAREN);
+        Token op_tok = lexer_.next();
+        switch (op_tok.type) {
+            case TokType::EQ:  ac.op = CompOp::EQ;  break;
+            case TokType::NEQ: ac.op = CompOp::NEQ; break;
+            case TokType::LT:  ac.op = CompOp::LT;  break;
+            case TokType::GT:  ac.op = CompOp::GT;  break;
+            case TokType::LTE: ac.op = CompOp::LTE; break;
+            case TokType::GTE: ac.op = CompOp::GTE; break;
+            default:
+                throw std::runtime_error("Expected comparison operator after nvals(...) at position " +
+                                         std::to_string(op_tok.pos));
+        }
+        ac.nvals_compare = std::stoll(lexer_.expect(TokType::NUMBER).text);
+        return ConditionNode::make_leaf(std::move(ac));
     }
 
     // attr op value
@@ -881,6 +986,68 @@ void Parser::parse_global_filters(TokenQuery& tq) {
         Token t = lexer_.next();
         if (t.type != TokType::IDENT)
             throw std::runtime_error("Expected identifier in global filter");
+
+        // Function call: distance(a, b) < 5, depth(a) > depth(b), etc.
+        if (lexer_.peek().type == TokType::LPAREN) {
+            // Helper lambda: parse func_name(args...) into a GlobalFuncCall.
+            // Assumes the name token has been consumed; LPAREN is next.
+            auto parse_func_call = [&](const std::string& name) -> GlobalFuncCall {
+                GlobalFuncCall fc;
+                if (name == "distance")          fc.func = GlobalFunctionType::DISTANCE;
+                else if (name == "distabs")      fc.func = GlobalFunctionType::DISTABS;
+                else if (name == "strlen")       fc.func = GlobalFunctionType::STRLEN;
+                else if (name == "f")            fc.func = GlobalFunctionType::FREQ;
+                else if (name == "nchildren")    fc.func = GlobalFunctionType::NCHILDREN;
+                else if (name == "depth")        fc.func = GlobalFunctionType::DEPTH;
+                else if (name == "ndescendants") fc.func = GlobalFunctionType::NDESCENDANTS;
+                else if (name == "nvals")         fc.func = GlobalFunctionType::NVALS;
+                else throw std::runtime_error("Unknown function in global filter: " + name);
+                lexer_.consume(); // consume LPAREN
+                while (lexer_.peek().type != TokType::RPAREN) {
+                    std::string arg = lexer_.expect(TokType::IDENT).text;
+                    if (lexer_.peek().type == TokType::DOT) {
+                        lexer_.consume();
+                        arg += "." + lexer_.expect(TokType::IDENT).text;
+                    }
+                    fc.args.push_back(std::move(arg));
+                    if (lexer_.peek().type == TokType::COMMA) lexer_.consume();
+                }
+                lexer_.expect(TokType::RPAREN);
+                return fc;
+            };
+
+            GlobalFunctionFilter ff;
+            ff.lhs = parse_func_call(t.text);
+
+            // Read comparison operator
+            Token op_tok = lexer_.next();
+            switch (op_tok.type) {
+                case TokType::EQ:   ff.op = CompOp::EQ;  break;
+                case TokType::NEQ:  ff.op = CompOp::NEQ; break;
+                case TokType::LT:   ff.op = CompOp::LT;  break;
+                case TokType::GT:   ff.op = CompOp::GT;  break;
+                case TokType::LTE:  ff.op = CompOp::LTE; break;
+                case TokType::GTE:  ff.op = CompOp::GTE; break;
+                default: throw std::runtime_error("Expected comparison after function in global filter");
+            }
+
+            // RHS: either a number or another function call
+            if (lexer_.peek().type == TokType::NUMBER) {
+                ff.int_value = std::stoll(lexer_.next().text);
+            } else if (lexer_.peek().type == TokType::IDENT) {
+                std::string rhs_name = lexer_.next().text;
+                if (lexer_.peek().type != TokType::LPAREN)
+                    throw std::runtime_error("Expected '(' or number after comparison in global filter");
+                ff.has_rhs_func = true;
+                ff.rhs = parse_func_call(rhs_name);
+            } else {
+                throw std::runtime_error("Expected number or function after comparison in global filter");
+            }
+
+            tq.global_function_filters.push_back(std::move(ff));
+            return;
+        }
+
         if (t.text == "match") {
             lexer_.expect(TokType::DOT);
             GlobalRegionFilter gf;

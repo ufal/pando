@@ -396,9 +396,27 @@ void CorpusBuilder::read_conllu(const std::string& path) {
         };
 
         auto id_sv = field(0);
-        // Skip multi-word tokens (e.g. "1-2") and empty words (e.g. "1.1")
-        for (char c : id_sv) {
-            if (c == '-' || c == '.') goto next_line;
+        // Check for multi-word token range (e.g. "1-2") or empty word (e.g. "1.1")
+        {
+            bool is_range = false, is_empty_word = false;
+            for (char c : id_sv) {
+                if (c == '-') is_range = true;
+                if (c == '.') is_empty_word = true;
+            }
+            if (is_empty_word) goto next_line;  // skip empty words (1.1, etc.)
+            if (is_range) {
+                // MWT range line: parse "start-end" and capture form
+                size_t dash = id_sv.find('-');
+                int start_id = 0, end_id = 0;
+                for (size_t i = 0; i < dash; ++i)
+                    start_id = start_id * 10 + (id_sv[i] - '0');
+                for (size_t i = dash + 1; i < id_sv.size(); ++i)
+                    end_id = end_id * 10 + (id_sv[i] - '0');
+                mwt_form_ = std::string(field(1));
+                mwt_start_ = builder_.corpus_size();
+                mwt_remaining_ = end_id - start_id + 1;
+                goto next_line;  // don't add a token for the range line itself
+            }
         }
 
         {
@@ -428,6 +446,16 @@ void CorpusBuilder::read_conllu(const std::string& path) {
             in_sentence_ = true;
             pending_sentence_comments = false;
             seen_any_token_line = true;
+
+            // MWT contraction region: after the last sub-token, emit "contr" region.
+            if (mwt_remaining_ > 0) {
+                --mwt_remaining_;
+                if (mwt_remaining_ == 0) {
+                    CorpusPos mwt_end = builder_.corpus_size() - 1;
+                    builder_.add_region("contr", mwt_start_, mwt_end,
+                                        std::vector<std::pair<std::string, std::string>>{{"form", mwt_form_}});
+                }
+            }
         }
         next_line:;
     }
@@ -672,6 +700,94 @@ static void json_get_attrs_object(const std::string& line,
 
 } // namespace
 
+// ── JSONL v2 helpers ────────────────────────────────────────────────────
+
+// Extract a JSON array of strings:  "key": ["a","b","c"]
+static std::vector<std::string> json_get_string_array(const std::string& line,
+                                                       const std::string& key) {
+    std::vector<std::string> out;
+    std::string pattern = "\"" + key + "\"";
+    size_t kpos = line.find(pattern);
+    if (kpos == std::string::npos) return out;
+    size_t colon = line.find(':', kpos + pattern.size());
+    if (colon == std::string::npos) return out;
+    size_t br1 = line.find('[', colon + 1);
+    if (br1 == std::string::npos) return out;
+    size_t br2 = line.find(']', br1 + 1);
+    if (br2 == std::string::npos) return out;
+    std::string arr = line.substr(br1 + 1, br2 - br1 - 1);
+    size_t pos = 0;
+    while (pos < arr.size()) {
+        size_t q1 = arr.find('"', pos);
+        if (q1 == std::string::npos) break;
+        size_t q2 = arr.find('"', q1 + 1);
+        if (q2 == std::string::npos) break;
+        out.push_back(arr.substr(q1 + 1, q2 - q1 - 1));
+        pos = q2 + 1;
+    }
+    return out;
+}
+
+static bool json_get_bool(const std::string& line, const std::string& key, bool dflt) {
+    std::string pattern = "\"" + key + "\"";
+    size_t kpos = line.find(pattern);
+    if (kpos == std::string::npos) return dflt;
+    size_t colon = line.find(':', kpos + pattern.size());
+    if (colon == std::string::npos) return dflt;
+    size_t p = colon + 1;
+    while (p < line.size() && (line[p] == ' ' || line[p] == '\t')) ++p;
+    if (p < line.size() && line[p] == 't') return true;
+    if (p < line.size() && line[p] == 'f') return false;
+    return dflt;
+}
+
+// Extract all top-level "key": "value" pairs from a JSON line (string values only).
+static void json_get_all_string_pairs(const std::string& line,
+                                       std::vector<std::pair<std::string, std::string>>& out) {
+    size_t pos = 0;
+    while (pos < line.size()) {
+        // Find a quoted key
+        size_t kq1 = line.find('"', pos);
+        if (kq1 == std::string::npos) break;
+        size_t kq2 = line.find('"', kq1 + 1);
+        if (kq2 == std::string::npos) break;
+        std::string k = line.substr(kq1 + 1, kq2 - kq1 - 1);
+        // Find colon
+        size_t colon = line.find(':', kq2 + 1);
+        if (colon == std::string::npos) break;
+        // Skip whitespace after colon
+        size_t p = colon + 1;
+        while (p < line.size() && (line[p] == ' ' || line[p] == '\t')) ++p;
+        if (p >= line.size()) break;
+        if (line[p] == '"') {
+            // String value
+            size_t vq1 = p;
+            size_t vq2 = line.find('"', vq1 + 1);
+            if (vq2 == std::string::npos) break;
+            out.push_back({k, line.substr(vq1 + 1, vq2 - vq1 - 1)});
+            pos = vq2 + 1;
+        } else if (line[p] == '{' || line[p] == '[') {
+            // Skip nested objects/arrays — find matching close
+            char open = line[p], close = (open == '{') ? '}' : ']';
+            int depth = 1;
+            size_t q = p + 1;
+            while (q < line.size() && depth > 0) {
+                if (line[q] == open) ++depth;
+                else if (line[q] == close) --depth;
+                ++q;
+            }
+            pos = q;
+        } else {
+            // Number, bool, null — skip to next comma or brace
+            size_t q = p;
+            while (q < line.size() && line[q] != ',' && line[q] != '}') ++q;
+            pos = q;
+        }
+    }
+}
+
+// ── JSONL reader ────────────────────────────────────────────────────────
+
 void CorpusBuilder::read_jsonl(const std::string& path) {
     std::istream* in_ptr = nullptr;
     std::ifstream file;
@@ -686,6 +802,16 @@ void CorpusBuilder::read_jsonl(const std::string& path) {
 
     std::string line;
 
+    // ── JSONL v2 header state ──────────────────────────────────────────
+    bool have_header = false;
+    std::vector<std::string> positional_list;        // ordered, for compact mode
+    std::unordered_set<std::string> positional_set;  // fast lookup, for verbose mode
+    // Reserved token keys that are not positional attributes
+    static const std::unordered_set<std::string> reserved_keys{
+        "type", "tok_id", "head_tok_id", "head", "sent_id", "doc_id", "v", "tok_pos"
+    };
+
+    // ── Common state ───────────────────────────────────────────────────
     struct PendingToken {
         std::unordered_map<std::string, std::string> attrs;
         std::string tok_id;
@@ -694,129 +820,279 @@ void CorpusBuilder::read_jsonl(const std::string& path) {
     };
     std::vector<PendingToken> sentence_buf;
 
-    // Simple stack for open regions keyed by struct name
     struct JsonRegion {
+        std::string struct_name;   // the actual struct type (e.g. "s", "text")
         CorpusPos start = 0;
         std::vector<std::pair<std::string, std::string>> attrs;
     };
+    // Keyed by region_id when present, else by struct name (v1-compatible).
     std::unordered_map<std::string, JsonRegion> open_regions;
 
-    auto get_num_field = [](const std::string& line, const std::string& key) -> long long {
+    auto get_num_field = [](const std::string& ln, const std::string& key) -> long long {
         std::string pattern = "\"" + key + "\"";
-        size_t kpos = line.find(pattern);
+        size_t kpos = ln.find(pattern);
         if (kpos == std::string::npos) return 0;
-        size_t colon = line.find(':', kpos + pattern.size());
+        size_t colon = ln.find(':', kpos + pattern.size());
         if (colon == std::string::npos) return 0;
         size_t p = colon + 1;
-        while (p < line.size() && (line[p] == ' ' || line[p] == '\t')) ++p;
+        while (p < ln.size() && (ln[p] == ' ' || ln[p] == '\t')) ++p;
         size_t q = p;
-        while (q < line.size() && (line[q] >= '0' && line[q] <= '9')) ++q;
+        while (q < ln.size() && (ln[q] >= '0' && ln[q] <= '9')) ++q;
         if (q == p) return 0;
-        return std::stoll(line.substr(p, q - p));
+        return std::stoll(ln.substr(p, q - p));
     };
 
     auto flush_sentence = [&]() {
         if (sentence_buf.empty()) return;
-
-        // Build tok_id → local index map
         std::unordered_map<std::string, int> tok_id_to_local;
         tok_id_to_local.reserve(sentence_buf.size());
         for (size_t i = 0; i < sentence_buf.size(); ++i) {
             if (!sentence_buf[i].tok_id.empty())
                 tok_id_to_local[sentence_buf[i].tok_id] = static_cast<int>(i);
         }
-
-        // Emit tokens to StreamingBuilder with resolved heads
         for (size_t i = 0; i < sentence_buf.size(); ++i) {
             auto& pt = sentence_buf[i];
-            int sentence_head_id = 0; // 0 = root
+            int sentence_head_id = 0;
             if (pt.explicit_head > 0) {
                 sentence_head_id = static_cast<int>(pt.explicit_head);
             } else if (!pt.head_tok_id.empty()) {
                 auto it = tok_id_to_local.find(pt.head_tok_id);
                 if (it != tok_id_to_local.end())
-                    sentence_head_id = it->second + 1; // CoNLL-U style (1-based)
+                    sentence_head_id = it->second + 1;
             }
             builder_.add_token(pt.attrs, sentence_head_id);
         }
-
         builder_.end_sentence();
         sentence_buf.clear();
     };
 
+    // ── Parse region events ────────────────────────────────────────────
+    // In v2 mode, "s" regions trigger flush_sentence() (dependency resolution).
+    // In v1 mode, "s" regions are just ordinary regions (sentence_end handles flush).
+
+    auto handle_region_start = [&](const std::string& ln) {
+        std::string sname = json_get_string(ln, "struct");
+        if (sname.empty()) return;
+        std::string rid = json_get_string(ln, "region_id");
+        std::string key = rid.empty() ? sname : rid;
+        JsonRegion r;
+        r.struct_name = sname;
+        r.start = builder_.corpus_size();
+        json_get_attrs_object(ln, "attrs", r.attrs);
+        open_regions[key] = std::move(r);
+    };
+
+    auto handle_region_end = [&](const std::string& ln) {
+        std::string sname = json_get_string(ln, "struct");
+        std::string rid = json_get_string(ln, "region_id");
+
+        // Look up by region_id first, then fall back to struct name
+        auto it = open_regions.end();
+        if (!rid.empty())
+            it = open_regions.find(rid);
+        if (it == open_regions.end() && !sname.empty())
+            it = open_regions.find(sname);
+        if (it == open_regions.end()) return;
+
+        const std::string& actual_struct = it->second.struct_name.empty()
+                                           ? sname : it->second.struct_name;
+
+        // In v2 mode, closing an "s" region flushes the sentence buffer first
+        if (have_header && actual_struct == "s")
+            flush_sentence();
+        CorpusPos end = builder_.corpus_size() > 0 ? builder_.corpus_size() - 1 : 0;
+        if (end >= it->second.start)
+            builder_.add_region(actual_struct, it->second.start, end, it->second.attrs);
+        open_regions.erase(it);
+    };
+
+    auto get_num_from_line = [](const std::string& ln, const std::string& key) -> CorpusPos {
+        std::string pattern = "\"" + key + "\"";
+        size_t kpos = ln.find(pattern);
+        if (kpos == std::string::npos) return -1;
+        size_t colon = ln.find(':', kpos + pattern.size());
+        if (colon == std::string::npos) return -1;
+        size_t p = colon + 1;
+        while (p < ln.size() && (ln[p] == ' ' || ln[p] == '\t')) ++p;
+        size_t q = p;
+        while (q < ln.size() && (ln[q] >= '0' && ln[q] <= '9')) ++q;
+        if (q == p) return -1;
+        return static_cast<CorpusPos>(std::stoll(ln.substr(p, q - p)));
+    };
+
+    auto handle_region = [&](const std::string& ln) {
+        std::string sname = json_get_string(ln, "struct");
+        if (sname.empty()) return;
+        CorpusPos start = builder_.corpus_size();
+        CorpusPos end   = builder_.corpus_size() > 0 ? builder_.corpus_size() - 1 : 0;
+        CorpusPos sp = get_num_from_line(ln, "start_pos");
+        CorpusPos ep = get_num_from_line(ln, "end_pos");
+        if (sp >= 0) start = sp;
+        if (ep >= 0) end = ep;
+        std::vector<std::pair<std::string, std::string>> attrs;
+        json_get_attrs_object(ln, "attrs", attrs);
+        // In v2 mode, a single-shot "s" region flushes the sentence buffer first.
+        // Warn if the region appears to be placed late (far behind the token stream),
+        // which indicates the writer is deferring sentence regions to the end of file.
+        if (have_header && sname == "s") {
+            CorpusPos cur = builder_.corpus_size();
+            if (ep >= 0 && cur > 0 && static_cast<CorpusPos>(cur - 1) > end + 1000) {
+                static bool warned_late_s = false;
+                if (!warned_late_s) {
+                    std::cerr << "Warning: single-shot 's' region (end_pos=" << end
+                              << ") is far behind current position (" << cur
+                              << "). Sentence regions should appear inline, "
+                              << "immediately after their last token.\n";
+                    warned_late_s = true;
+                }
+            }
+            flush_sentence();
+        }
+        // Accept both normal regions (end >= start) and zero-width regions (start > end).
+        // Zero-width regions use the convention start_pos > end_pos to signal zero width.
+        // StreamingBuilder::detect_structure_mode already handles them.
+        builder_.add_region(sname, start, end, attrs);
+    };
+
+    // ── Process header (first non-empty line) if present ───────────────
+    auto try_parse_header = [&](const std::string& ln) -> bool {
+        std::string t = json_get_string(ln, "type");
+        if (t != "header") return false;
+
+        // positional attrs
+        positional_list = json_get_string_array(ln, "positional");
+        if (positional_list.empty()) {
+            std::cerr << "JSONL v2 header has no positional attributes; falling back to v1.\n";
+            return false;
+        }
+        for (const auto& a : positional_list)
+            positional_set.insert(a);
+
+        // split_feats
+        split_feats_ = json_get_bool(ln, "split_feats", false);
+
+        // default_within
+        std::string dw = json_get_string(ln, "default_within");
+        if (!dw.empty()) builder_.set_default_within(dw);
+
+        // structure mode declarations
+        for (const auto& s : json_get_string_array(ln, "nested"))
+            builder_.declare_nested(s);
+        for (const auto& s : json_get_string_array(ln, "overlapping"))
+            builder_.declare_overlapping(s);
+        for (const auto& s : json_get_string_array(ln, "zerowidth"))
+            builder_.declare_zerowidth(s);
+        for (const auto& s : json_get_string_array(ln, "multivalue"))
+            builder_.declare_multivalue(s);
+
+        return true;
+    };
+
+    // ── v2 token handler: supports verbose object mode and compact "v" array mode ──
+    auto handle_token_v2 = [&](const std::string& ln) {
+        PendingToken pt;
+        pt.attrs.reserve(positional_list.size());
+
+        // Check for compact mode: presence of "v" key with array value
+        auto compact_vals = json_get_string_array(ln, "v");
+        if (!compact_vals.empty()) {
+            // Compact mode: "v" array aligned with positional_list
+            for (size_t i = 0; i < compact_vals.size() && i < positional_list.size(); ++i) {
+                const auto& v = compact_vals[i];
+                if (v.empty() || v == "_") continue;
+                const auto& attr_name = positional_list[i];
+                if (attr_name == "feats") {
+                    parse_feats(v, pt.attrs);
+                } else {
+                    pt.attrs[attr_name] = v;
+                }
+            }
+        } else {
+            // Verbose mode: named keys on the JSON object
+            std::vector<std::pair<std::string, std::string>> all_pairs;
+            all_pairs.reserve(16);
+            json_get_all_string_pairs(ln, all_pairs);
+
+            for (auto& [k, v] : all_pairs) {
+                if (k == "tok_id") { pt.tok_id = v; continue; }
+                if (k == "head_tok_id") { pt.head_tok_id = v; continue; }
+                if (reserved_keys.count(k)) continue;
+                if (k == "feats") {
+                    if (!v.empty()) parse_feats(v, pt.attrs);
+                    continue;
+                }
+                if (positional_set.count(k) && !v.empty())
+                    pt.attrs[k] = v;
+            }
+        }
+
+        // tok_id / head_tok_id / head are always top-level string/number keys
+        // (present in both compact and verbose modes)
+        if (pt.tok_id.empty())
+            pt.tok_id = json_get_string(ln, "tok_id");
+        if (pt.head_tok_id.empty())
+            pt.head_tok_id = json_get_string(ln, "head_tok_id");
+        pt.explicit_head = get_num_field(ln, "head");
+
+        sentence_buf.push_back(std::move(pt));
+    };
+
+    // ── v1 token handler: hardcoded six fields ─────────────────────────
+    auto handle_token_v1 = [&](const std::string& ln) {
+        PendingToken pt;
+        pt.attrs.reserve(8);
+
+        std::string form   = json_get_string(ln, "form");
+        std::string lemma  = json_get_string(ln, "lemma");
+        std::string upos   = json_get_string(ln, "upos");
+        std::string xpos   = json_get_string(ln, "xpos");
+        std::string deprel = json_get_string(ln, "deprel");
+        std::string feats  = json_get_string(ln, "feats");
+
+        if (!form.empty())   pt.attrs["form"]   = form;
+        if (!lemma.empty())  pt.attrs["lemma"]  = lemma;
+        if (!upos.empty())   pt.attrs["upos"]   = upos;
+        if (!xpos.empty())   pt.attrs["xpos"]   = xpos;
+        if (!deprel.empty()) pt.attrs["deprel"] = deprel;
+        if (!feats.empty())  parse_feats(feats, pt.attrs);
+
+        pt.tok_id      = json_get_string(ln, "tok_id");
+        pt.head_tok_id = json_get_string(ln, "head_tok_id");
+        pt.explicit_head = get_num_field(ln, "head");
+
+        sentence_buf.push_back(std::move(pt));
+    };
+
+    // ── Main read loop ─────────────────────────────────────────────────
+    bool first_line = true;
     while (std::getline(in, line)) {
         if (line.empty()) continue;
 
+        if (first_line) {
+            first_line = false;
+            if (try_parse_header(line)) {
+                have_header = true;
+                std::cerr << "JSONL v2 header: " << positional_set.size()
+                          << " positional attributes.\n";
+                continue;  // header consumed, next line
+            }
+            // Not a header — fall through to process as data line in v1 mode
+            std::cerr << "No JSONL header found; using v1 compatibility mode.\n";
+        }
+
         std::string t = json_get_string(line, "type");
         if (t == "token") {
-            PendingToken pt;
-            pt.attrs.reserve(8);
-
-            std::string form   = json_get_string(line, "form");
-            std::string lemma  = json_get_string(line, "lemma");
-            std::string upos   = json_get_string(line, "upos");
-            std::string xpos   = json_get_string(line, "xpos");
-            std::string deprel = json_get_string(line, "deprel");
-            std::string feats  = json_get_string(line, "feats");
-
-            if (!form.empty())   pt.attrs["form"]   = form;
-            if (!lemma.empty())  pt.attrs["lemma"]  = lemma;
-            if (!upos.empty())   pt.attrs["upos"]   = upos;
-            if (!xpos.empty())   pt.attrs["xpos"]   = xpos;
-            if (!deprel.empty()) pt.attrs["deprel"] = deprel;
-            if (!feats.empty())  parse_feats(feats, pt.attrs);
-
-            pt.tok_id      = json_get_string(line, "tok_id");
-            pt.head_tok_id = json_get_string(line, "head_tok_id");
-            pt.explicit_head = get_num_field(line, "head"); // 0..N
-
-            sentence_buf.push_back(std::move(pt));
+            if (have_header) handle_token_v2(line);
+            else             handle_token_v1(line);
         } else if (t == "sentence_end") {
-            flush_sentence();
+            // v1 only: explicit sentence boundary.  v2 uses "s" regions instead.
+            if (!have_header) flush_sentence();
         } else if (t == "region_start") {
-            std::string sname = json_get_string(line, "struct");
-            if (sname.empty()) continue;
-            JsonRegion r;
-            r.start = builder_.corpus_size();
-            json_get_attrs_object(line, "attrs", r.attrs);
-            open_regions[sname] = std::move(r);
+            handle_region_start(line);
         } else if (t == "region_end") {
-            std::string sname = json_get_string(line, "struct");
-            auto it = open_regions.find(sname);
-            if (it == open_regions.end()) continue;
-            CorpusPos end = builder_.corpus_size() > 0 ? builder_.corpus_size() - 1 : 0;
-            if (end >= it->second.start)
-                builder_.add_region(sname, it->second.start, end, it->second.attrs);
-            open_regions.erase(it);
+            handle_region_end(line);
         } else if (t == "region") {
-            // Optional single-shot region with explicit start_pos/end_pos and attrs
-            std::string sname = json_get_string(line, "struct");
-            if (sname.empty()) continue;
-            // Parse start_pos/end_pos as integers if present
-            CorpusPos start = builder_.corpus_size();
-            CorpusPos end   = builder_.corpus_size() > 0 ? builder_.corpus_size() - 1 : 0;
-            // Very minimal numeric parsing
-            auto get_num = [&](const std::string& key) -> CorpusPos {
-                std::string pattern = "\"" + key + "\"";
-                size_t kpos = line.find(pattern);
-                if (kpos == std::string::npos) return -1;
-                size_t colon = line.find(':', kpos + pattern.size());
-                if (colon == std::string::npos) return -1;
-                size_t p = colon + 1;
-                while (p < line.size() && (line[p] == ' ' || line[p] == '\t')) ++p;
-                size_t q = p;
-                while (q < line.size() && (line[q] >= '0' && line[q] <= '9')) ++q;
-                if (q == p) return -1;
-                return static_cast<CorpusPos>(std::stoll(line.substr(p, q - p)));
-            };
-            CorpusPos sp = get_num("start_pos");
-            CorpusPos ep = get_num("end_pos");
-            if (sp >= 0) start = sp;
-            if (ep >= 0) end = ep;
-            std::vector<std::pair<std::string, std::string>> attrs;
-            json_get_attrs_object(line, "attrs", attrs);
-            if (end >= start)
-                builder_.add_region(sname, start, end, attrs);
+            handle_region(line);
         }
     }
 
@@ -825,9 +1101,11 @@ void CorpusBuilder::read_jsonl(const std::string& path) {
 
     // Close any open regions at EOF
     for (auto& kv : open_regions) {
+        const std::string& sname = kv.second.struct_name.empty()
+                                   ? kv.first : kv.second.struct_name;
         CorpusPos end = builder_.corpus_size() > 0 ? builder_.corpus_size() - 1 : 0;
         if (end >= kv.second.start)
-            builder_.add_region(kv.first, kv.second.start, end, kv.second.attrs);
+            builder_.add_region(sname, kv.second.start, end, kv.second.attrs);
     }
     open_regions.clear();
 }

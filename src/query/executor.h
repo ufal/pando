@@ -10,6 +10,7 @@
 #include <functional>
 #include <memory>
 #include <cstdint>
+#include <optional>
 
 #include "index/fold_map.h"
 
@@ -121,6 +122,45 @@ struct AggregateBucketData {
 std::string decode_aggregate_bucket_key(const AggregateBucketData& data,
                                           const std::vector<int64_t>& key);
 
+// ── Region cursor for amortized O(1) region lookup ──────────────────────
+//
+// When iterating sorted corpus positions (e.g. from an inverted index posting
+// list), this cursor advances linearly through the sorted region array,
+// achieving amortized O(1) per lookup instead of O(log N) binary search.
+
+struct RegionCursor {
+    const Region* regions = nullptr;
+    size_t n_regions = 0;
+    size_t cur = 0;
+
+    RegionCursor() = default;
+
+    explicit RegionCursor(const StructuralAttr& sa)
+        : regions(sa.region_data()), n_regions(sa.region_count()), cur(0) {}
+
+    // Find the region containing pos. Assumes positions arrive in
+    // non-decreasing order. Returns -1 if pos falls in a gap.
+    int64_t find(CorpusPos pos) {
+        while (cur < n_regions && regions[cur].end < pos)
+            ++cur;
+        if (cur < n_regions && regions[cur].start <= pos)
+            return static_cast<int64_t>(cur);
+        return -1;
+    }
+
+};
+
+// ── Pre-resolved region filter (avoid re-parsing per match) ─────────────
+
+struct ResolvedRegionFilter {
+    const StructuralAttr* sa = nullptr;
+    std::string attr_name;
+    CompOp op = CompOp::EQ;
+    std::string value;
+    std::string anchor_name;
+    bool has_reverse = false;
+};
+
 struct MatchSet {
     std::vector<Match> matches;
     size_t num_tokens = 0;
@@ -191,6 +231,9 @@ private:
     bool check_conditions(CorpusPos pos, const ConditionPtr& cond) const;
     bool check_leaf(CorpusPos pos, const AttrCondition& ac) const;
 
+    // Multivalue cardinality at a position (same rules as [nvals(attr) op N]).
+    std::optional<int64_t> nvals_cardinality_at(CorpusPos pos, const std::string& attr_spec) const;
+
     // ── Relation traversal from a single position ───────────────────────
 
     // Given a position on one side of a relation, return positions on the
@@ -223,8 +266,34 @@ private:
     std::vector<CorpusPos> resolve_leaf(const AttrCondition& ac) const;
 
     // Lazy iteration: call f(pos) for each matching position; return false from f to stop.
-    void for_each_seed_position(const ConditionPtr& cond,
-                                std::function<bool(CorpusPos)> f) const;
+    // Template version: avoids std::function overhead for the EQ leaf hot path.
+    template<typename F>
+    void for_each_seed_position(const ConditionPtr& cond, F&& f) const {
+        // Fast path: simple EQ on a positional attribute — avoids std::function entirely.
+        // Skip for multivalue attrs: component values aren't in the main lexicon,
+        // so we must delegate to the impl which uses the .mv.rev index.
+        if (cond && cond->is_leaf) {
+            const AttrCondition& ac = cond->leaf;
+            if (ac.op == CompOp::EQ && !ac.case_insensitive && !ac.diacritics_insensitive) {
+                std::string name = normalize_attr(ac.attr);
+                if (corpus_.has_attr(name) && !corpus_.is_multivalue(name)) {
+                    const auto& pa = corpus_.attr(name);
+                    LexiconId id = (ac.resolved_id >= 0)
+                        ? static_cast<LexiconId>(ac.resolved_id)
+                        : pa.lexicon().lookup(ac.value);
+                    if (id == UNKNOWN_LEX) return;
+                    pa.for_each_position_id(id, std::forward<F>(f));
+                    return;
+                }
+            }
+        }
+        // Complex cases: delegate to non-template impl (AND/OR recursion, NEQ, regex, etc.)
+        for_each_seed_position_impl(cond, std::function<bool(CorpusPos)>(std::forward<F>(f)));
+    }
+
+    // Non-template implementation for complex condition trees.
+    void for_each_seed_position_impl(const ConditionPtr& cond,
+                                     std::function<bool(CorpusPos)> f) const;
 
     // Expand one seed position through all plan steps and within-clause filter.
     // Calls emit(pm) for each complete partial match vector (size 2*n).
@@ -290,6 +359,21 @@ private:
                                                    const std::vector<AnchorConstraint>& anchor_constraints,
                                                    MatchSet& scratch,
                                                    const Match& m) const;
+
+    // ── Fast aggregation path ────────────────────────────────────────────
+    //
+    // For single-token queries with aggregation and no complex post-filters,
+    // bypass Match construction entirely. Iterates seed positions and
+    // computes bucket keys using integer array lookups only.
+    bool try_fast_aggregate(const TokenQuery& q,
+                            AggregateBucketData& agg,
+                            const std::vector<ResolvedRegionFilter>& resolved_filters,
+                            size_t max_total_cap,
+                            MatchSet& result) const;
+
+    // Pre-resolve :: region filters to avoid per-match string parsing.
+    std::vector<ResolvedRegionFilter> resolve_region_filters(
+            const TokenQuery& q) const;
 
     const Corpus& corpus_;
 

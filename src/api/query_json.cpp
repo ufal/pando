@@ -10,8 +10,63 @@
 #include <cmath>
 #include <unordered_map>
 #include <iomanip>
+#include <string_view>
 
 namespace manatree {
+
+// Same pipe boundaries as query/executor multivalue_eq (RG-5f).
+static void add_mv_counts(std::string_view stored, size_t weight,
+                          std::unordered_map<std::string, size_t>& counts) {
+    if (stored.find('|') == std::string_view::npos) {
+        counts[std::string(stored)] += weight;
+        return;
+    }
+    size_t start = 0;
+    while (start < stored.size()) {
+        size_t p = stored.find('|', start);
+        if (p == std::string_view::npos) p = stored.size();
+        std::string_view seg = stored.substr(start, p - start);
+        if (!seg.empty())
+            counts[std::string(seg)] += weight;
+        start = p + 1;
+    }
+}
+
+std::vector<std::pair<std::string, size_t>> positional_attr_show_values_mv(const PositionalAttr& pa,
+                                                                           bool split_mv) {
+    std::unordered_map<std::string, size_t> counts;
+    const auto& lex = pa.lexicon();
+    for (LexiconId id = 0; id < lex.size(); ++id) {
+        size_t cnt = pa.count_of_id(id);
+        if (cnt == 0) continue;
+        if (split_mv)
+            add_mv_counts(lex.get(id), cnt, counts);
+        else
+            counts[std::string(lex.get(id))] += cnt;
+    }
+    std::vector<std::pair<std::string, size_t>> entries(counts.begin(), counts.end());
+    std::sort(entries.begin(), entries.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    return entries;
+}
+
+std::vector<std::pair<std::string, size_t>> region_attr_show_values_mv(const StructuralAttr& sa,
+                                                                         const std::string& region_attr,
+                                                                         bool split_mv) {
+    std::unordered_map<std::string, size_t> counts;
+    size_t n = sa.region_count();
+    for (size_t i = 0; i < n; ++i) {
+        std::string_view v = sa.region_value(region_attr, i);
+        if (split_mv)
+            add_mv_counts(v, 1, counts);
+        else
+            counts[std::string(v)] += 1;
+    }
+    std::vector<std::pair<std::string, size_t>> entries(counts.begin(), counts.end());
+    std::sort(entries.begin(), entries.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    return entries;
+}
 
 std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
                                             const std::string& query_text,
@@ -121,6 +176,19 @@ std::string to_info_json(const Corpus& corpus) {
         if (i > 0) out << ", ";
         out << jstr(names[i]);
     }
+    out << "],\n";
+    out << "    \"structures\": [";
+    const auto& s_names = corpus.structure_names();
+    for (size_t i = 0; i < s_names.size(); ++i) {
+        if (i > 0) out << ", ";
+        const auto& sa = corpus.structure(s_names[i]);
+        out << "{\"name\": " << jstr(s_names[i])
+            << ", \"regions\": " << sa.region_count();
+        if (corpus.is_nested(s_names[i]))     out << ", \"nested\": true";
+        if (corpus.is_overlapping(s_names[i])) out << ", \"overlapping\": true";
+        if (corpus.is_zerowidth(s_names[i]))   out << ", \"zerowidth\": true";
+        out << "}";
+    }
     out << "]\n  }\n}\n";
     return out.str();
 }
@@ -131,18 +199,8 @@ std::string to_values_json(const Corpus& corpus, const std::string& attr_name, s
     // Try positional attribute first
     if (corpus.has_attr(attr_name)) {
         const auto& pa = corpus.attr(attr_name);
-        const auto& lex = pa.lexicon();
-        LexiconId n = lex.size();
-
-        std::vector<std::pair<std::string, size_t>> entries;
-        entries.reserve(static_cast<size_t>(n));
-        for (LexiconId id = 0; id < n; ++id) {
-            size_t cnt = pa.count_of_id(id);
-            if (cnt > 0)
-                entries.emplace_back(std::string(lex.get(id)), cnt);
-        }
-        std::sort(entries.begin(), entries.end(),
-                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        bool is_mv = corpus.is_multivalue(attr_name);
+        std::vector<std::pair<std::string, size_t>> entries = positional_attr_show_values_mv(pa, is_mv);
 
         size_t cap = (limit > 0) ? std::min(entries.size(), limit) : entries.size();
         out << "{\n  \"ok\": true,\n  \"operation\": \"values\",\n";
@@ -169,15 +227,9 @@ std::string to_values_json(const Corpus& corpus, const std::string& attr_name, s
         if (corpus.has_structure(struct_name)) {
             const auto& sa = corpus.structure(struct_name);
             if (sa.has_region_attr(region_attr)) {
-                size_t n = sa.region_count();
-                std::map<std::string, size_t> counts;
-                for (size_t i = 0; i < n; ++i) {
-                    std::string v(sa.region_value(region_attr, i));
-                    counts[v]++;
-                }
-                std::vector<std::pair<std::string, size_t>> entries(counts.begin(), counts.end());
-                std::sort(entries.begin(), entries.end(),
-                          [](const auto& a, const auto& b) { return a.second > b.second; });
+                bool is_mv = corpus.is_multivalue(attr_name);
+                std::vector<std::pair<std::string, size_t>> entries =
+                    region_attr_show_values_mv(sa, region_attr, is_mv);
 
                 size_t cap = (limit > 0) ? std::min(entries.size(), limit) : entries.size();
                 out << "{\n  \"ok\": true,\n  \"operation\": \"values\",\n";

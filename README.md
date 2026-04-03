@@ -9,6 +9,8 @@ Pando is a C++ corpus query engine in the same family as Manatee and CWB/CQP: it
 
 This README is intentionally minimal and documents how to build and run the current prototype for private/use-at-your-own-risk purposes.
 
+**Documentation:** see [docs/PANDO.md](docs/PANDO.md) for a short overview, [docs/PANDO-CQL.md](docs/PANDO-CQL.md) for the query language, and the **[wiki/](wiki/README.md)** for topic pages (same layout as flexipipe/flexiconv). Preview the wiki locally: `python scripts/serve-wiki-preview.py` → http://localhost:8765/
+
 ## Status
 
 - **Scope**: Internal / experimental. APIs, on-disk formats, and CLI flags may change without notice.
@@ -82,7 +84,8 @@ Or you can explicitly configure each engine and the query file; see the docstrin
 
 Useful design and integration notes live in `dev/`:
 
-- `dev/ROADMAP.md` – rough feature roadmap and priorities.
+- `dev/ROADMAP.md` – rough feature roadmap and priorities (full history + design narrative).
+- `dev/ROADMAP-TODO.md` – **consolidated open backlog** and current priority order (subsidiary docs may lag).
 - `dev/CODE-REVIEW.md` – internal code review and refactoring notes.
 - `dev/PANDO-INDEX-INTEGRATION.md` – how Pando’s index layout integrates with other tools.
 - `dev/PANDO-SEGMENTS.md` – segment-level structure and design.

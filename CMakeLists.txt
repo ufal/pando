@@ -55,9 +55,10 @@ endif()
 target_include_directories(pando_cwb_dialect PUBLIC src)
 
 # Default path to interim PEG bridge script (dev/pmltq-gold/parse_ast_sql.js); override with PMLTQ_GOLD_SCRIPT at runtime.
-set(PMLTQ_GOLD_SCRIPT_PATH "${CMAKE_SOURCE_DIR}/dev/pmltq-gold/parse_ast_sql.js")
+# Use CURRENT_SOURCE_DIR so this tree still resolves when Pando is add_subdirectory()'d (e.g. flexicorp_pando).
+set(PMLTQ_GOLD_SCRIPT_PATH "${CMAKE_CURRENT_SOURCE_DIR}/dev/pmltq-gold/parse_ast_sql.js")
 configure_file(
-    "${CMAKE_SOURCE_DIR}/cmake/pmltq_gold_paths.cpp.in"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/pmltq_gold_paths.cpp.in"
     "${CMAKE_BINARY_DIR}/pmltq_gold_paths.cpp"
     @ONLY)
 

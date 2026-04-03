@@ -53,6 +53,11 @@ struct AttrCondition {
     // #25: Pre-resolved lexicon ID for EQ comparisons (populated by compile_conditions).
     // When >= 0, check_leaf uses integer comparison instead of string comparison.
     int32_t resolved_id = -1;  // -1 = UNKNOWN_LEX = not resolved
+
+    // nvals(attr) op N — cardinality of explicit pipe-separated MV values (and region overlap).
+    // When true, `op` compares the computed count to `nvals_compare` (integer RHS).
+    bool is_nvals = false;
+    int64_t nvals_compare = 0;
 };
 
 // ── Boolean combination of conditions ───────────────────────────────────
@@ -83,6 +88,14 @@ struct ConditionNode {
     ConditionPtr  nested_conditions;  // conditions that the related token must satisfy
     std::string   nested_name;        // optional name for the nested token (for :: constraints)
 
+    // Count condition fields (is_leaf=false, is_structural=false, is_count=true)
+    // count(child[upos="ADJ"]) >= 3  — count related positions matching a filter
+    bool is_count = false;
+    StructRelType count_rel;          // which relation to count over (CHILD, DESCENDANT, ...)
+    ConditionPtr  count_filter;       // optional filter on the related positions (null = count all)
+    CompOp        count_op = CompOp::EQ;
+    int64_t       count_value = 0;
+
     static ConditionPtr make_leaf(AttrCondition c) {
         auto n = std::make_shared<ConditionNode>();
         n->is_leaf = true;
@@ -105,6 +118,16 @@ struct ConditionNode {
         n->struct_rel = rel;
         n->nested_conditions = std::move(nested);
         n->nested_name = name;
+        return n;
+    }
+    static ConditionPtr make_count(StructRelType rel, ConditionPtr filter, CompOp op, int64_t value) {
+        auto n = std::make_shared<ConditionNode>();
+        n->is_leaf = false;
+        n->is_count = true;
+        n->count_rel = rel;
+        n->count_filter = std::move(filter);
+        n->count_op = op;
+        n->count_value = value;
         return n;
     }
 };
@@ -158,6 +181,23 @@ struct GlobalAlignmentFilter {
     std::string name2, attr2;
 };
 
+// :: distance(a, b) < 5, :: f(a.lemma) >= 100, :: depth(a) > depth(b)
+enum class GlobalFunctionType { DISTANCE, DISTABS, STRLEN, FREQ, NCHILDREN, DEPTH, NDESCENDANTS, NVALS };
+
+// A single function call: func(args...)
+struct GlobalFuncCall {
+    GlobalFunctionType func;
+    std::vector<std::string> args;  // token names or name.attr specs
+};
+
+struct GlobalFunctionFilter {
+    GlobalFuncCall lhs;                     // left-hand side: always a function call
+    CompOp op = CompOp::EQ;
+    int64_t int_value = 0;                  // numeric RHS (used when !rhs_func)
+    bool has_rhs_func = false;              // true when RHS is a function call
+    GlobalFuncCall rhs;                     // right-hand side function (when has_rhs_func)
+};
+
 // ── Structural containment operators ──────────────────────────────────────
 
 struct ContainingClause {
@@ -178,6 +218,7 @@ struct TokenQuery {
     std::vector<ContainingClause>     containing_clauses;  // "containing s", "containing subtree [cond]"
     std::vector<GlobalRegionFilter>   global_region_filters;    // :: match.text_year > 2000
     std::vector<GlobalAlignmentFilter> global_alignment_filters; // :: a.tuid = b.tuid
+    std::vector<GlobalFunctionFilter>  global_function_filters;   // :: distance(a,b) < 5
 
     // Global position ordering constraints: :: a < b
     struct PositionOrder {

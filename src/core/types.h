@@ -19,4 +19,25 @@ struct Region {
     CorpusPos end;       // inclusive
 };
 
+// Split a composite region attribute name like "text_langcode" into its
+// structure name ("text") and attribute name ("langcode").
+// Returns false if the name has no underscore or the attr part is empty.
+// Strips an optional "match." prefix first.
+struct RegionAttrParts {
+    std::string struct_name;
+    std::string attr_name;
+};
+
+inline bool split_region_attr_name(const std::string& field, RegionAttrParts& out) {
+    std::string fld = field;
+    if (fld.size() > 6 && fld.compare(0, 6, "match.") == 0)
+        fld = fld.substr(6);
+    auto us = fld.find('_');
+    if (us == std::string::npos || us + 1 >= fld.size())
+        return false;
+    out.struct_name = fld.substr(0, us);
+    out.attr_name = fld.substr(us + 1);
+    return true;
+}
+
 } // namespace manatree

@@ -72,6 +72,14 @@ private:
     // Region stack for CoNLL-U comment extensions: # newregion X / # endregion X.
     std::vector<OpenRegion> conllu_region_stack_;
     std::vector<OpenRegion> vrt_region_stack_;
+
+    // Multi-word token (MWT) tracking for CoNLL-U contraction regions.
+    // When a range ID line (e.g. "1-2\taux\t...") is seen, we record the
+    // orthographic form and count how many sub-tokens remain. After the last
+    // sub-token is added, we emit a "contr" region spanning them.
+    std::string mwt_form_;
+    CorpusPos   mwt_start_ = 0;
+    int         mwt_remaining_ = 0;  // sub-tokens left before closing the contr region
 };
 
 } // namespace manatree

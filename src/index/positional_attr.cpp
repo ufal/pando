@@ -139,4 +139,49 @@ std::vector<CorpusPos> PositionalAttr::positions_not(
     return result;
 }
 
+// ── RG-5f: Multivalue component reverse index ───────────────────────────
+
+void PositionalAttr::open_mv(const std::string& base, bool preload) {
+    std::string mv_rev_path = base + ".mv.rev";
+    std::string mv_idx_path = base + ".mv.rev.idx";
+
+    // MV files are optional — silently skip if absent
+    mv_rev_idx_ = MmapFile::open(mv_idx_path, preload);
+    if (!mv_rev_idx_.valid()) return;
+
+    mv_lexicon_.open(base + ".mv", preload);  // opens .mv.lex and .mv.lex.idx
+    mv_rev_ = MmapFile::open(mv_rev_path, preload);
+
+    // Infer .mv.rev element width
+    if (mv_rev_.size() > 0 && corpus_size_ > 0) {
+        // Total entries = rev_idx[mv_lex_size] (last element)
+        size_t n_idx = mv_rev_idx_.count<int64_t>();
+        if (n_idx >= 2) {
+            int64_t total = mv_rev_idx_.as<int64_t>()[n_idx - 1];
+            if (total > 0) {
+                mv_rev_width_ = static_cast<int>(mv_rev_.size() /
+                                                  static_cast<size_t>(total));
+                if (mv_rev_width_ != 2 && mv_rev_width_ != 4 && mv_rev_width_ != 8)
+                    throw std::runtime_error("Invalid .mv.rev element width (" +
+                                             std::to_string(mv_rev_width_) + ") for " + base);
+            }
+        }
+    }
+}
+
+LexiconId PositionalAttr::mv_lookup(std::string_view component) const {
+    return mv_lexicon_.lookup(component);
+}
+
+size_t PositionalAttr::mv_count_of(const std::string& component) const {
+    LexiconId id = mv_lexicon_.lookup(component);
+    if (id == UNKNOWN_LEX) return 0;
+    return mv_count_of_id(id);
+}
+
+size_t PositionalAttr::mv_count_of_id(LexiconId id) const {
+    const auto* idx = mv_rev_idx_.as<int64_t>();
+    return static_cast<size_t>(idx[id + 1] - idx[id]);
+}
+
 } // namespace manatree

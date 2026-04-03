@@ -13,6 +13,7 @@ void DependencyIndex::open(const std::string& dir,
     head_file_       = MmapFile::open(dir + "/dep.head", preload);
     euler_in_file_   = MmapFile::open(dir + "/dep.euler_in", preload);
     euler_out_file_  = MmapFile::open(dir + "/dep.euler_out", preload);
+    cached_sentence_id_ = -1;  // invalidate cache on (re)open
 }
 
 CorpusPos DependencyIndex::head(CorpusPos pos) const {
@@ -29,47 +30,84 @@ CorpusPos DependencyIndex::head(CorpusPos pos) const {
     return sent.start + static_cast<CorpusPos>(local);
 }
 
-std::vector<CorpusPos> DependencyIndex::children(CorpusPos pos) const {
+// EX-2p: Build or reuse the sentence-local children map.
+// Single-entry cache: when seeds arrive in corpus order (the common case),
+// consecutive calls land in the same sentence, so a single cached sentence
+// captures most of the reuse.  Cache miss cost = one O(sentence_length) scan,
+// same as the old per-call scan.
+Region DependencyIndex::ensure_children_cache(CorpusPos pos) const {
     int64_t ri = sentences_->find_region(pos);
-    if (ri < 0) return {};
-    Region sent = sentences_->get(static_cast<size_t>(ri));
-    int16_t my_local = static_cast<int16_t>(pos - sent.start);
-
-    std::vector<CorpusPos> result;
-    const int16_t* heads = head_file_.as<int16_t>();
-    for (CorpusPos p = sent.start; p <= sent.end; ++p) {
-        if (heads[p] == my_local)
-            result.push_back(p);
+    if (ri < 0) {
+        // pos outside any sentence — return an invalid region, caller checks
+        cached_sentence_id_ = -1;
+        return {0, -1};
     }
+    if (ri == cached_sentence_id_)
+        return cached_sentence_;
+
+    Region sent = sentences_->get(static_cast<size_t>(ri));
+    size_t sent_len = static_cast<size_t>(sent.end - sent.start + 1);
+
+    cached_children_map_.assign(sent_len, {});
+    const int16_t* heads = head_file_.as<int16_t>();
+    for (size_t i = 0; i < sent_len; ++i) {
+        int16_t h = heads[sent.start + static_cast<CorpusPos>(i)];
+        if (h >= 0 && static_cast<size_t>(h) < sent_len)
+            cached_children_map_[static_cast<size_t>(h)].push_back(static_cast<int16_t>(i));
+    }
+
+    cached_sentence_id_ = ri;
+    cached_sentence_ = sent;
+    return sent;
+}
+
+std::vector<CorpusPos> DependencyIndex::children(CorpusPos pos) const {
+    Region sent = ensure_children_cache(pos);
+    if (sent.end < sent.start) return {};  // invalid sentence
+
+    int16_t my_local = static_cast<int16_t>(pos - sent.start);
+    if (my_local < 0 || static_cast<size_t>(my_local) >= cached_children_map_.size())
+        return {};
+
+    const auto& ch = cached_children_map_[static_cast<size_t>(my_local)];
+    std::vector<CorpusPos> result;
+    result.reserve(ch.size());
+    for (int16_t c : ch)
+        result.push_back(sent.start + static_cast<CorpusPos>(c));
     return result;
 }
 
-std::vector<CorpusPos> DependencyIndex::subtree(CorpusPos pos) const {
-    int64_t ri = sentences_->find_region(pos);
-    if (ri < 0) return {};
-    Region sent = sentences_->get(static_cast<size_t>(ri));
+size_t DependencyIndex::children_count(CorpusPos pos) const {
+    Region sent = ensure_children_cache(pos);
+    if (sent.end < sent.start) return 0;
+
     int16_t my_local = static_cast<int16_t>(pos - sent.start);
-    int sent_len = static_cast<int>(sent.end - sent.start + 1);
+    if (my_local < 0 || static_cast<size_t>(my_local) >= cached_children_map_.size())
+        return 0;
 
-    // One scan to build local children map
-    const int16_t* heads = head_file_.as<int16_t>();
-    std::vector<std::vector<int16_t>> ch(static_cast<size_t>(sent_len));
-    for (int i = 0; i < sent_len; ++i) {
-        int16_t h = heads[sent.start + i];
-        if (h >= 0)
-            ch[static_cast<size_t>(h)].push_back(static_cast<int16_t>(i));
-    }
+    return cached_children_map_[static_cast<size_t>(my_local)].size();
+}
 
-    // DFS from my_local
+std::vector<CorpusPos> DependencyIndex::subtree(CorpusPos pos) const {
+    Region sent = ensure_children_cache(pos);
+    if (sent.end < sent.start) return {};
+
+    int16_t my_local = static_cast<int16_t>(pos - sent.start);
+    if (my_local < 0 || static_cast<size_t>(my_local) >= cached_children_map_.size())
+        return {};
+
+    // DFS from my_local using cached children map
     std::vector<CorpusPos> result;
-    std::vector<int16_t> stack(ch[static_cast<size_t>(my_local)].begin(),
-                               ch[static_cast<size_t>(my_local)].end());
+    const auto& root_ch = cached_children_map_[static_cast<size_t>(my_local)];
+    std::vector<int16_t> stack(root_ch.begin(), root_ch.end());
     while (!stack.empty()) {
         int16_t cur = stack.back();
         stack.pop_back();
         result.push_back(sent.start + static_cast<CorpusPos>(cur));
-        for (int16_t c : ch[static_cast<size_t>(cur)])
-            stack.push_back(c);
+        if (static_cast<size_t>(cur) < cached_children_map_.size()) {
+            for (int16_t c : cached_children_map_[static_cast<size_t>(cur)])
+                stack.push_back(c);
+        }
     }
     return result;
 }
@@ -82,6 +120,16 @@ std::vector<CorpusPos> DependencyIndex::ancestors(CorpusPos pos) const {
         cur = head(cur);
     }
     return result;
+}
+
+size_t DependencyIndex::depth(CorpusPos pos) const {
+    size_t d = 0;
+    CorpusPos cur = head(pos);
+    while (cur != NO_HEAD) {
+        ++d;
+        cur = head(cur);
+    }
+    return d;
 }
 
 int16_t DependencyIndex::euler_in(CorpusPos pos) const {

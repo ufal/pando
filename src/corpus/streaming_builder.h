@@ -57,6 +57,12 @@ public:
     // #9: Set default within-structure (e.g. "text"); written to corpus.info.
     void set_default_within(const std::string& structure) { default_within_ = structure; }
 
+    // JSONL v2: Pre-declare structure modes from header (merged with auto-detected at finalize).
+    void declare_nested(const std::string& s)      { declared_nested_.insert(s); }
+    void declare_overlapping(const std::string& s)  { declared_overlapping_.insert(s); }
+    void declare_zerowidth(const std::string& s)    { declared_zerowidth_.insert(s); }
+    void declare_multivalue(const std::string& s)   { declared_multivalue_.insert(s); }
+
     CorpusPos corpus_size() const { return corpus_size_; }
 
 private:
@@ -81,6 +87,8 @@ private:
                    int target_width);
     void build_reverse_index(const std::string& base, int32_t lex_size,
                              int rev_width);
+    void build_mv_reverse_index(const std::string& base, int32_t lex_size,
+                                int rev_width);
 
     std::string output_dir_;
     CorpusPos corpus_size_ = 0;
@@ -114,6 +122,25 @@ private:
     std::unordered_map<std::string, std::unordered_map<std::string, std::vector<std::string>>> region_attr_values_;
     std::unordered_set<std::string> struct_set_;
     std::string default_within_;  // #9: e.g. "text"
+
+    // SM-ROAD-6: Per-type streaming detection of non-flat structure properties.
+    // Populated incrementally by add_region(); summarized at finalize().
+    struct StructModeDetection {
+        bool nesting_seen = false;
+        bool overlap_seen = false;
+        bool zerowidth_seen = false;
+        size_t nesting_count = 0;
+        size_t overlap_count = 0;
+        size_t zerowidth_count = 0;
+    };
+    std::unordered_map<std::string, StructModeDetection> struct_mode_detected_;
+
+    // JSONL v2: Pre-declared structure modes (from header).
+    std::unordered_set<std::string> declared_nested_;
+    std::unordered_set<std::string> declared_overlapping_;
+    std::unordered_set<std::string> declared_zerowidth_;
+    std::unordered_set<std::string> declared_multivalue_;
+    void detect_structure_mode(const std::string& type, CorpusPos start, CorpusPos end);
 };
 
 } // namespace manatree

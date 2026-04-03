@@ -1,4 +1,5 @@
 #include "corpus/corpus.h"
+#include "api/query_json.h"
 #include "core/json_utils.h"
 #include "core/count_hierarchy_json.h"
 #include "query/ast.h"
@@ -21,8 +22,22 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <set>
+#include <filesystem>
 
 using namespace manatree;
+
+namespace fs = std::filesystem;
+
+// True if dir contains a pando index (corpus.info from pando-index / StreamingBuilder).
+static bool is_corpus_dir(const std::string& path) {
+    if (path.empty() || path == "-")
+        return false;
+    std::error_code ec;
+    const fs::path p(path);
+    if (!fs::exists(p, ec) || !fs::is_directory(p, ec))
+        return false;
+    return fs::is_regular_file(p / "corpus.info", ec);
+}
 
 // ANSI color for KWIC match highlighting on TTY; <! !> delimiters when piped.
 static bool use_color() {
@@ -56,6 +71,8 @@ struct Options {
     int  max_gap    = REPEAT_UNBOUNDED; // cap for + and * quantifiers (--max-gap)
     // For aggregation commands (count/group/freq), cap number of output rows; 0 = no cap.
     size_t group_limit = 1000;
+    // When true, count/freq keep pipe-joined multivalue keys (lexicon strings) instead of RG-5f explode.
+    bool no_mv_explode = false;
     // API mode: like --json but with cleaner, single-object responses for programmatic use
     bool api = false;
     // PML-TQ: emit ClickPMLTQ reference SQL (for DB-backed data); do not open corpus or run search
@@ -322,6 +339,111 @@ static std::string conllu_cell(const Corpus& corpus, const char* attr, CorpusPos
     return conllu_esc_field(v);
 }
 
+// Constituency bracket string from nested `node` regions + parent .par (RG-REG-1).
+namespace {
+
+static std::string constituency_label(const StructuralAttr& sa, size_t idx) {
+    std::string_view v = sa.region_value("type", idx);
+    std::string label = v.empty() ? std::string("X") : std::string(v);
+    for (char& c : label) {
+        if (c == '\t' || c == '\n' || c == '\r')
+            c = ' ';
+    }
+    if (label.empty()) label = "X";
+    return label;
+}
+
+static std::string constituency_terminal_range(const Corpus& corpus, CorpusPos a, CorpusPos b) {
+    if (!corpus.has_attr("form") || a > b) return {};
+    std::string s;
+    for (CorpusPos p = a; p <= b; ++p) {
+        if (!s.empty()) s += ' ';
+        s += conllu_esc_field(corpus.attr("form").value_at(p));
+    }
+    return s;
+}
+
+static std::string constituency_emit_subtree(
+        size_t idx,
+        const Corpus& corpus,
+        const StructuralAttr& sa,
+        const std::unordered_map<size_t, std::vector<size_t>>& children) {
+    Region r = sa.get(idx);
+    std::string label = constituency_label(sa, idx);
+    auto it = children.find(idx);
+    if (it == children.end() || it->second.empty()) {
+        std::string terms = constituency_terminal_range(corpus, r.start, r.end);
+        return "(" + label + " " + terms + ")";
+    }
+    std::string inner;
+    CorpusPos cur = r.start;
+    for (size_t cidx : it->second) {
+        Region cr = sa.get(cidx);
+        if (cr.start > cur) {
+            std::string gap = constituency_terminal_range(corpus, cur, cr.start - 1);
+            if (!inner.empty() && !gap.empty()) inner += ' ';
+            inner += gap;
+        }
+        if (!inner.empty()) inner += ' ';
+        inner += constituency_emit_subtree(cidx, corpus, sa, children);
+        cur = cr.end + 1;
+    }
+    if (cur <= r.end) {
+        std::string tail = constituency_terminal_range(corpus, cur, r.end);
+        if (!inner.empty() && !tail.empty()) inner += ' ';
+        inner += tail;
+    }
+    return "(" + label + " " + inner + ")";
+}
+
+// Returns empty if no constituency tree for this sentence.
+static std::string build_constituency_line(const Corpus& corpus, Region sent) {
+    if (!corpus.has_structure("node") || !corpus.has_attr("form"))
+        return {};
+    const StructuralAttr& node_sa = corpus.structure("node");
+    if (!node_sa.has_region_attr("type") || !node_sa.has_parent_region_id())
+        return {};
+
+    std::unordered_set<size_t> in_sent;
+    std::vector<size_t> idxs;
+    for (size_t i = 0; i < node_sa.region_count(); ++i) {
+        Region r = node_sa.get(i);
+        if (r.start > r.end) continue;
+        if (r.start < sent.start || r.end > sent.end) continue;
+        idxs.push_back(i);
+        in_sent.insert(i);
+    }
+    if (idxs.empty()) return {};
+
+    std::unordered_map<size_t, std::vector<size_t>> children;
+    std::vector<size_t> roots;
+    roots.reserve(idxs.size());
+    for (size_t idx : idxs) {
+        int32_t p = node_sa.parent_region_id(idx);
+        if (p < 0 || in_sent.find(static_cast<size_t>(p)) == in_sent.end())
+            roots.push_back(idx);
+        else
+            children[static_cast<size_t>(p)].push_back(idx);
+    }
+    for (auto& kv : children) {
+        std::sort(kv.second.begin(), kv.second.end(), [&](size_t a, size_t b) {
+            return node_sa.get(a).start < node_sa.get(b).start;
+        });
+    }
+    std::sort(roots.begin(), roots.end(), [&](size_t a, size_t b) {
+        return node_sa.get(a).start < node_sa.get(b).start;
+    });
+
+    std::string out;
+    for (size_t ri = 0; ri < roots.size(); ++ri) {
+        if (ri > 0) out += ' ';
+        out += constituency_emit_subtree(roots[ri], corpus, node_sa, children);
+    }
+    return out;
+}
+
+}  // namespace
+
 static void emit_conllu(const Corpus& corpus, const MatchSet& ms, const Options& opts) {
     if (!corpus.has_structure("s")) {
         std::cerr << "Error: --conllu requires sentence structure 's' (build from CoNLL-U / UD index).\n";
@@ -334,6 +456,27 @@ static void emit_conllu(const Corpus& corpus, const MatchSet& ms, const Options&
     size_t start = std::min(opts.offset, stored);
     size_t end = std::min(start + opts.limit, stored);
     std::unordered_set<size_t> seen_sent;
+
+    // Per match in [start,end): 1-based token indices within that match's sentence region.
+    // Multiple matches in the same sentence become semicolon-separated groups on # pando_match_tokens.
+    std::unordered_map<size_t, std::vector<std::vector<int>>> sent_match_token_groups;
+    for (size_t j = start; j < end; ++j) {
+        const auto& mm = ms.matches[j];
+        CorpusPos fpp = mm.first_pos();
+        int64_t rj = sent.find_region(fpp);
+        if (rj < 0)
+            continue;
+        size_t riuj = static_cast<size_t>(rj);
+        Region rgnj = sent.get(riuj);
+        std::vector<int> group;
+        for (CorpusPos p : mm.matched_positions()) {
+            if (p < rgnj.start || p > rgnj.end)
+                continue;
+            group.push_back(static_cast<int>(p - rgnj.start + 1));
+        }
+        if (!group.empty())
+            sent_match_token_groups[riuj].push_back(std::move(group));
+    }
 
     if (opts.debug_level > 0) {
         std::cerr << "Plan: seed=token[" << ms.seed_token << "]";
@@ -375,16 +518,26 @@ static void emit_conllu(const Corpus& corpus, const MatchSet& ms, const Options&
                 std::cout << "# text = " << text_line << "\n";
         }
 
-        std::vector<CorpusPos> matched = m.matched_positions();
-        std::cout << "# pando_match_tokens =";
-        bool first_m = true;
-        for (CorpusPos p : matched) {
-            if (p < rgn.start || p > rgn.end)
-                continue;
-            if (!first_m)
-                std::cout << ',';
-            first_m = false;
-            std::cout << (p - rgn.start + 1);
+        std::string cst = build_constituency_line(corpus, rgn);
+        if (!cst.empty())
+            std::cout << "# constituency = " << cst << "\n";
+
+        std::cout << "# pando_match_tokens = ";
+        bool first_group = true;
+        auto grp_it = sent_match_token_groups.find(riu);
+        if (grp_it != sent_match_token_groups.end()) {
+            for (const std::vector<int>& group : grp_it->second) {
+                if (!first_group)
+                    std::cout << ';';
+                first_group = false;
+                bool first_t = true;
+                for (int tid : group) {
+                    if (!first_t)
+                        std::cout << ',';
+                    first_t = false;
+                    std::cout << tid;
+                }
+            }
         }
         std::cout << "\n";
 
@@ -536,7 +689,58 @@ static void emit_info_json(const Corpus& corpus) {
         if (i > 0) std::cout << ", ";
         std::cout << jstr(ra[i]);
     }
+    std::cout << "],\n";
+    std::cout << "    \"multivalue\": [";
+    const auto& mv = corpus.multivalue_attrs();
+    for (size_t i = 0; i < mv.size(); ++i) {
+        if (i > 0) std::cout << ", ";
+        std::cout << jstr(mv[i]);
+    }
     std::cout << "]\n  }\n}\n";
+}
+
+// Check whether a field's value may be pipe-separated (multivalue positional
+// attr OR overlapping/nested region attribute).
+static bool is_multi_value_field(const Corpus& corpus, const std::string& field) {
+    std::string attr_spec = field;
+    if (field.rfind("match.", 0) == 0 && field.size() > 6) {
+        attr_spec = field.substr(6);
+    } else {
+        auto dot = field.find('.');
+        if (dot != std::string::npos && dot > 0)
+            attr_spec = field.substr(dot + 1);
+    }
+    // Multivalue positional attr (e.g. wsd with "artist|writer")
+    if (corpus.is_multivalue(attr_spec))
+        return true;
+    // Overlapping/nested region attr
+    RegionAttrParts parts;
+    if (split_region_attr_name(attr_spec, parts) &&
+        corpus.has_structure(parts.struct_name)) {
+        return corpus.is_overlapping(parts.struct_name)
+            || corpus.is_nested(parts.struct_name);
+    }
+    return false;
+}
+
+// Emit a field value as JSON: array for multi-region fields, string otherwise.
+static void emit_field_json(std::ostream& out, const std::string& val, bool is_multi) {
+    if (is_multi && val.find('|') != std::string::npos) {
+        out << '[';
+        size_t start = 0;
+        bool first = true;
+        while (start < val.size()) {
+            size_t p = val.find('|', start);
+            if (p == std::string::npos) p = val.size();
+            if (!first) out << ", ";
+            out << jstr(val.substr(start, p - start));
+            first = false;
+            start = p + 1;
+        }
+        out << ']';
+    } else {
+        out << jstr(val);
+    }
 }
 
 // ── Aggregation helpers ─────────────────────────────────────────────────
@@ -580,29 +784,38 @@ static std::string read_field(const Corpus& corpus, const Match& m,
         return std::string(corpus.attr(attr).value_at(pos));
     }
 
-    // Region attribute? attr_spec matches one of corpus.region_attr_names(),
-    // e.g. "text_langcode" or "par_id".
-    const auto& ra_all = corpus.region_attr_names();
-    for (const auto& ra_name : ra_all) {
-        if (ra_name == attr_spec) {
-            auto us = ra_name.find('_');
-            if (us == std::string::npos || us + 1 >= ra_name.size())
-                return "";
-            std::string struct_name = ra_name.substr(0, us);
-            std::string region_attr = ra_name.substr(us + 1);
-            if (!corpus.has_structure(struct_name))
-                return "";
-            const auto& sa = corpus.structure(struct_name);
-            if (!sa.has_region_attr(region_attr))
-                return "";
+    // Region attribute? e.g. "text_langcode" splits to struct "text", attr "langcode".
+    RegionAttrParts parts;
+    if (split_region_attr_name(attr_spec, parts) &&
+        corpus.has_structure(parts.struct_name)) {
+        const auto& sa = corpus.structure(parts.struct_name);
+        if (sa.has_region_attr(parts.attr_name)) {
+            // For overlapping/nested structures, collect all distinct values.
+            bool multi = corpus.is_overlapping(parts.struct_name)
+                       || corpus.is_nested(parts.struct_name);
+            if (multi) {
+                std::string result;
+                sa.for_each_region_at(pos, [&](size_t rgn_idx) -> bool {
+                    std::string_view v = sa.region_value(parts.attr_name, rgn_idx);
+                    if (v.empty()) return true;
+                    // Deduplicate: skip if already present (pipe-separated list)
+                    std::string vs(v);
+                    if (result.empty()) {
+                        result = vs;
+                    } else if (result.find(vs) == std::string::npos) {
+                        result += '|';
+                        result += vs;
+                    }
+                    return true;
+                });
+                return result;
+            }
             int64_t rgn = sa.find_region(pos);
-            if (rgn < 0)
-                return "";
-            return std::string(sa.region_value(region_attr, static_cast<size_t>(rgn)));
+            if (rgn < 0) return "";
+            return std::string(sa.region_value(parts.attr_name, static_cast<size_t>(rgn)));
         }
     }
 
-    // Not a region attr; attr already normalized above, but has_attr was false
     return "";
 }
 
@@ -640,6 +853,28 @@ static void emit_count(const Corpus& corpus, const MatchSet& ms,
     } else {
         for (const auto& m : ms.matches)
             ++counts[make_key(corpus, m, name_map, cmd.fields)];
+    }
+
+    // RG-5f: For single-column grouping on a multivalue attribute,
+    // explode pipe-separated keys so "artist|writer" contributes to
+    // both "artist" and "writer" buckets.
+    if (!opts.no_mv_explode && cmd.fields.size() == 1 && corpus.is_multivalue(cmd.fields[0])) {
+        std::map<std::string, size_t> exploded;
+        for (const auto& [key, count] : counts) {
+            if (key.find('|') != std::string::npos) {
+                size_t start = 0;
+                while (start < key.size()) {
+                    size_t p = key.find('|', start);
+                    if (p == std::string::npos) p = key.size();
+                    std::string comp = key.substr(start, p - start);
+                    if (!comp.empty()) exploded[comp] += count;
+                    start = p + 1;
+                }
+            } else {
+                exploded[key] += count;
+            }
+        }
+        counts = std::move(exploded);
     }
 
     // Sort by count descending
@@ -741,6 +976,11 @@ static void emit_tabulate(const Corpus& corpus, const MatchSet& ms,
     const size_t total_hits = ms.total_count > 0 ? ms.total_count : n;
 
     if (opts.json) {
+        // Precompute which fields are from overlapping/nested structures
+        std::vector<bool> field_is_multi(cmd.fields.size(), false);
+        for (size_t f = 0; f < cmd.fields.size(); ++f)
+            field_is_multi[f] = is_multi_value_field(corpus, cmd.fields[f]);
+
         std::cout << "{\"ok\": true, \"operation\": \"tabulate\", \"result\": {\n";
         std::cout << "  \"fields\": [";
         for (size_t i = 0; i < cmd.fields.size(); ++i) {
@@ -757,7 +997,8 @@ static void emit_tabulate(const Corpus& corpus, const MatchSet& ms,
             std::cout << "    [";
             for (size_t f = 0; f < cmd.fields.size(); ++f) {
                 if (f > 0) std::cout << ", ";
-                std::cout << jstr(read_field(corpus, ms.matches[i], name_map, cmd.fields[f]));
+                std::string val = read_field(corpus, ms.matches[i], name_map, cmd.fields[f]);
+                emit_field_json(std::cout, val, field_is_multi[f]);
             }
             std::cout << "]";
         }
@@ -792,13 +1033,7 @@ static void emit_freq(const Corpus& corpus, const MatchSet& ms,
         return;
     }
 
-    // Group matches by key, and for each match record which region it belongs to
-    // so we can compute the region-group token count as denominator for IPM.
-    //
-    // For simplicity, freq uses the first field to determine the grouping and
-    // computes instances per million (IPM) using the full corpus size as denominator.
-    // A more refined version would use per-subcorpus sizes when grouping by region attrs.
-
+    // Group matches by key.
     std::map<std::string, size_t> counts;
     if (ms.aggregate_buckets) {
         for (const auto& [k, c] : ms.aggregate_buckets->counts)
@@ -808,6 +1043,26 @@ static void emit_freq(const Corpus& corpus, const MatchSet& ms,
             ++counts[make_key(corpus, m, name_map, cmd.fields)];
     }
 
+    // RG-5f: Explode multivalue keys for single-column grouping.
+    if (!opts.no_mv_explode && cmd.fields.size() == 1 && corpus.is_multivalue(cmd.fields[0])) {
+        std::map<std::string, size_t> exploded;
+        for (const auto& [key, count] : counts) {
+            if (key.find('|') != std::string::npos) {
+                size_t s = 0;
+                while (s < key.size()) {
+                    size_t p = key.find('|', s);
+                    if (p == std::string::npos) p = key.size();
+                    std::string comp = key.substr(s, p - s);
+                    if (!comp.empty()) exploded[comp] += count;
+                    s = p + 1;
+                }
+            } else {
+                exploded[key] += count;
+            }
+        }
+        counts = std::move(exploded);
+    }
+
     std::vector<std::pair<std::string, size_t>> sorted(counts.begin(), counts.end());
     std::sort(sorted.begin(), sorted.end(),
               [](const auto& a, const auto& b) { return a.second > b.second; });
@@ -815,10 +1070,47 @@ static void emit_freq(const Corpus& corpus, const MatchSet& ms,
     double corpus_size = static_cast<double>(corpus.size());
     size_t total_matches = ms.aggregate_buckets ? ms.aggregate_buckets->total_hits : ms.matches.size();
 
+    // Per-subcorpus IPM: when grouping by a single region attribute (e.g. text_langcode),
+    // use the token count of each subcorpus as the IPM denominator instead of the full
+    // corpus size. This gives meaningful relative frequencies per group.
+    const StructuralAttr* freq_sa = nullptr;
+    std::string freq_region_attr;
+    if (cmd.fields.size() == 1) {
+        RegionAttrParts parts;
+        if (split_region_attr_name(cmd.fields[0], parts) &&
+            corpus.has_structure(parts.struct_name)) {
+            const auto& sa = corpus.structure(parts.struct_name);
+            if (sa.has_region_attr(parts.attr_name)) {
+                freq_sa = &sa;
+                freq_region_attr = parts.attr_name;
+            }
+        }
+    }
+
+    // Precompute per-key subcorpus sizes when grouping by region attr.
+    std::unordered_map<std::string, double> subcorpus_sizes;
+    if (freq_sa) {
+        for (const auto& [key, count] : sorted) {
+            size_t span = freq_sa->token_span_sum_for_attr_eq(freq_region_attr, key);
+            subcorpus_sizes[key] = (span > 0 && span != SIZE_MAX)
+                ? static_cast<double>(span) : corpus_size;
+        }
+    }
+
+    // Helper: get IPM denominator for a given key.
+    auto ipm_denom = [&](const std::string& key) -> double {
+        if (freq_sa) {
+            auto it = subcorpus_sizes.find(key);
+            if (it != subcorpus_sizes.end()) return it->second;
+        }
+        return corpus_size;
+    };
+
     if (opts.json) {
         std::cout << "{\"ok\": true, \"operation\": \"freq\", \"result\": {\n";
         std::cout << "  \"corpus_size\": " << corpus.size() << ",\n";
         std::cout << "  \"total_matches\": " << total_matches << ",\n";
+        std::cout << "  \"per_subcorpus_ipm\": " << (freq_sa ? "true" : "false") << ",\n";
         std::cout << "  \"fields\": [";
         for (size_t i = 0; i < cmd.fields.size(); ++i) {
             if (i > 0) std::cout << ", ";
@@ -827,26 +1119,33 @@ static void emit_freq(const Corpus& corpus, const MatchSet& ms,
         std::cout << "],\n  \"rows\": [\n";
         for (size_t i = 0; i < sorted.size(); ++i) {
             if (i > 0) std::cout << ",\n";
-            double ipm = 1e6 * static_cast<double>(sorted[i].second) / corpus_size;
+            double denom = ipm_denom(sorted[i].first);
+            double ipm = 1e6 * static_cast<double>(sorted[i].second) / denom;
             double pct = total_matches > 0
                 ? 100.0 * static_cast<double>(sorted[i].second) / static_cast<double>(total_matches)
                 : 0.0;
             std::cout << "    {\"key\": " << jstr(sorted[i].first)
                       << ", \"count\": " << sorted[i].second
                       << ", \"pct\": " << pct
-                      << ", \"ipm\": " << std::fixed << std::setprecision(2) << ipm << "}";
+                      << ", \"ipm\": " << std::fixed << std::setprecision(2) << ipm;
+            if (freq_sa)
+                std::cout << ", \"subcorpus_size\": " << static_cast<size_t>(denom);
+            std::cout << "}";
         }
         std::cout << "\n  ]\n}}\n";
     } else {
         for (const auto& f : cmd.fields) std::cout << f << "\t";
-        std::cout << "count\t%\tipm\n";
+        std::cout << "count\t%\tipm" << (freq_sa ? "\tsubcorpus" : "") << "\n";
         for (const auto& [key, count] : sorted) {
             double pct = total_matches > 0
                 ? 100.0 * static_cast<double>(count) / static_cast<double>(total_matches)
                 : 0.0;
-            double ipm = 1e6 * static_cast<double>(count) / corpus_size;
+            double denom = ipm_denom(key);
+            double ipm = 1e6 * static_cast<double>(count) / denom;
             std::cout << key << "\t" << count << "\t" << std::fixed << std::setprecision(1) << pct
-                      << "%\t" << std::setprecision(2) << ipm << "\n";
+                      << "%\t" << std::setprecision(2) << ipm;
+            if (freq_sa) std::cout << "\t" << static_cast<size_t>(denom);
+            std::cout << "\n";
         }
     }
 }
@@ -1549,6 +1848,8 @@ static void run_query(const Corpus& corpus, const std::string& input,
                 else if (name == "max-items" || name == "max_items")  to_size(opts.coll_max_items);
                 else if (name == "min-freq" || name == "min_freq")    to_size(opts.coll_min_freq);
                 else if (name == "group-limit" || name == "group_limit") to_size(opts.group_limit);
+                else if (name == "no-mv-explode" || name == "no_mv_explode")
+                    opts.no_mv_explode = (val == "true" || val == "1" || val == "on");
                 else if (name == "max-gap" || name == "max_gap")      to_int(opts.max_gap);
                 else if (name == "measures")  opts.coll_measures = split_csv(val);
                 else if (name == "attrs") {
@@ -1590,6 +1891,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                     std::cout << "  \"max_items\": " << opts.coll_max_items << ",\n";
                     std::cout << "  \"min_freq\": " << opts.coll_min_freq << ",\n";
                     std::cout << "  \"group_limit\": " << opts.group_limit << ",\n";
+                    std::cout << "  \"no_mv_explode\": " << (opts.no_mv_explode ? "true" : "false") << ",\n";
                     std::cout << "  \"max_gap\": " << opts.max_gap << ",\n";
                     std::cout << "  \"total\": " << (opts.total ? "true" : "false") << ",\n";
                     std::cout << "  \"timing\": " << (opts.timing ? "true" : "false") << ",\n";
@@ -1610,6 +1912,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                     std::cout << "max-items   = " << opts.coll_max_items << "\n";
                     std::cout << "min-freq    = " << opts.coll_min_freq << "\n";
                     std::cout << "group-limit = " << opts.group_limit << "\n";
+                    std::cout << "no-mv-explode = " << (opts.no_mv_explode ? "on" : "off") << "\n";
                     std::cout << "max-gap     = " << opts.max_gap << "\n";
                     std::cout << "total       = " << (opts.total ? "on" : "off") << "\n";
                     std::cout << "timing      = " << (opts.timing ? "on" : "off") << "\n";
@@ -1762,22 +2065,12 @@ static void run_query(const Corpus& corpus, const std::string& input,
             if (stmt.command.type == CommandType::SHOW_VALUES) {
                 const std::string& attr_name = stmt.command.query_name;
 
-                // Check positional attributes first
+                // Check positional attributes first (pipe-split MV: RG-5f / multivalue_eq)
                 if (corpus.has_attr(attr_name)) {
                     const auto& pa = corpus.attr(attr_name);
-                    const auto& lex = pa.lexicon();
-                    LexiconId n = lex.size();
-
-                    // Build value+count pairs, sort by count descending
-                    std::vector<std::pair<std::string, size_t>> entries;
-                    entries.reserve(static_cast<size_t>(n));
-                    for (LexiconId id = 0; id < n; ++id) {
-                        size_t cnt = pa.count_of_id(id);
-                        if (cnt > 0)
-                            entries.emplace_back(std::string(lex.get(id)), cnt);
-                    }
-                    std::sort(entries.begin(), entries.end(),
-                              [](const auto& a, const auto& b) { return a.second > b.second; });
+                    bool is_mv = corpus.is_multivalue(attr_name);
+                    std::vector<std::pair<std::string, size_t>> entries =
+                        positional_attr_show_values_mv(pa, is_mv);
 
                     size_t limit = std::min(entries.size(), opts.group_limit > 0 ? opts.group_limit : entries.size());
 
@@ -1786,6 +2079,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                         std::cout << "  \"result\": {\n";
                         std::cout << "    \"attr\": " << jstr(attr_name) << ",\n";
                         std::cout << "    \"type\": \"positional\",\n";
+                        if (is_mv) std::cout << "    \"multivalue\": true,\n";
                         std::cout << "    \"unique\": " << entries.size() << ",\n";
                         std::cout << "    \"returned\": " << limit << ",\n";
                         std::cout << "    \"values\": [\n";
@@ -1816,16 +2110,9 @@ static void run_query(const Corpus& corpus, const std::string& input,
                     if (corpus.has_structure(struct_name)) {
                         const auto& sa = corpus.structure(struct_name);
                         if (sa.has_region_attr(region_attr)) {
-                            size_t n = sa.region_count();
-                            std::map<std::string, size_t> counts;
-                            for (size_t i = 0; i < n; ++i) {
-                                std::string v(sa.region_value(region_attr, i));
-                                counts[v]++;
-                            }
-                            // Sort by count descending
-                            std::vector<std::pair<std::string, size_t>> entries(counts.begin(), counts.end());
-                            std::sort(entries.begin(), entries.end(),
-                                      [](const auto& a, const auto& b) { return a.second > b.second; });
+                            bool is_mv = corpus.is_multivalue(attr_name);
+                            std::vector<std::pair<std::string, size_t>> entries =
+                                region_attr_show_values_mv(sa, region_attr, is_mv);
 
                             size_t limit = std::min(entries.size(), opts.group_limit > 0 ? opts.group_limit : entries.size());
 
@@ -1911,6 +2198,9 @@ static void run_query(const Corpus& corpus, const std::string& input,
                             }
                             std::cout << "]";
                         }
+                        if (corpus.is_nested(s_names[i]))    std::cout << ", \"nested\": true";
+                        if (corpus.is_overlapping(s_names[i])) std::cout << ", \"overlapping\": true";
+                        if (corpus.is_zerowidth(s_names[i]))  std::cout << ", \"zerowidth\": true";
                         std::cout << "}";
                     }
                     std::cout << "]\n  }\n}\n";
@@ -1933,6 +2223,9 @@ static void run_query(const Corpus& corpus, const std::string& input,
                                 std::cout << " attrs:";
                                 for (const auto& a : ra) std::cout << " " << a;
                             }
+                            if (corpus.is_nested(s))     std::cout << " [nested]";
+                            if (corpus.is_overlapping(s)) std::cout << " [overlapping]";
+                            if (corpus.is_zerowidth(s))   std::cout << " [zerowidth]";
                             std::cout << "\n";
                         }
                     }
@@ -2096,6 +2389,7 @@ static Options parse_args(int argc, char* argv[]) {
             opts.pmltq_export_sql = true;
         }
                 else if (arg == "--preload") { opts.preload = true; }
+        else if (arg == "--no-mv-explode") { opts.no_mv_explode = true; }
         else if (arg == "--max-gap" && i + 1 < argc) { opts.max_gap = std::stoi(argv[++i]); }
         else if (arg == "--window" && i + 1 < argc) {
             int w = std::stoi(argv[++i]);
@@ -2140,6 +2434,9 @@ static Options parse_args(int argc, char* argv[]) {
 
     if (positional.empty()) {
         std::cerr << "Usage: pando [options] <corpus_dir> [query]\n\n"
+                  << "If the first argument is not a corpus directory but ./pando/ contains corpus.info "
+                     "(TEITOK-style layout), the corpus defaults to ./pando and all arguments are the query. "
+                     "If the current directory is already a corpus (./corpus.info), it is used the same way.\n\n"
                   << "If [query] is omitted, CQL is read from stdin. With a terminal (stdin is a TTY), "
                      "an interactive REPL runs with a pando> prompt; with a pipe, queries are read "
                      "line by line with no prompt.\n\n"
@@ -2168,6 +2465,7 @@ static Options parse_args(int argc, char* argv[]) {
                   << "  --seed N         RNG seed for --sample (reproducible runs)\n"
                   << "  --threads N      Parallel seed processing for multi-token queries (default: 1)\n"
                   << "  --max-gap N      Cap for + and * quantifiers (default: " << REPEAT_UNBOUNDED << ")\n"
+                  << "  --no-mv-explode  count/freq: keep pipe-joined multivalue keys (no per-component buckets)\n"
                   << "\nCollocation options (coll/dcoll commands):\n"
                   << "  --window N       Symmetric window size (default: 5)\n"
                   << "  --left N         Left window size (overrides --window)\n"
@@ -2178,14 +2476,39 @@ static Options parse_args(int argc, char* argv[]) {
         std::exit(1);
     }
 
-    opts.corpus_dir = positional[0];
-    if (positional.size() > 1) {
-        for (size_t i = 1; i < positional.size(); ++i) {
-            if (i > 1) opts.query += " ";
+    // Resolve corpus path: explicit dir, or TEITOK ./pando, or cwd when already inside an index.
+    if (is_corpus_dir(positional[0])) {
+        opts.corpus_dir = positional[0];
+        if (positional.size() > 1) {
+            for (size_t i = 1; i < positional.size(); ++i) {
+                if (i > 1) opts.query += " ";
+                opts.query += positional[i];
+            }
+        } else {
+            opts.interactive = true;
+        }
+    } else if (is_corpus_dir("pando")) {
+        opts.corpus_dir = "pando";
+        for (size_t i = 0; i < positional.size(); ++i) {
+            if (i > 0) opts.query += " ";
+            opts.query += positional[i];
+        }
+    } else if (is_corpus_dir(".")) {
+        opts.corpus_dir = ".";
+        for (size_t i = 0; i < positional.size(); ++i) {
+            if (i > 0) opts.query += " ";
             opts.query += positional[i];
         }
     } else {
-        opts.interactive = true;
+        opts.corpus_dir = positional[0];
+        if (positional.size() > 1) {
+            for (size_t i = 1; i < positional.size(); ++i) {
+                if (i > 1) opts.query += " ";
+                opts.query += positional[i];
+            }
+        } else {
+            opts.interactive = true;
+        }
     }
 
     return opts;

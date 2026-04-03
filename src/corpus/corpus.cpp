@@ -39,6 +39,26 @@ static CorpusInfo read_info(const std::string& path) {
                 if (!tok.empty()) info.region_attrs.push_back(tok);
         } else if (key == "default_within") {
             info.default_within = val;
+        } else if (key == "nested") {
+            std::istringstream ss(val);
+            std::string tok;
+            while (std::getline(ss, tok, ','))
+                if (!tok.empty()) info.nested_structs.push_back(tok);
+        } else if (key == "overlapping") {
+            std::istringstream ss(val);
+            std::string tok;
+            while (std::getline(ss, tok, ','))
+                if (!tok.empty()) info.overlapping_structs.push_back(tok);
+        } else if (key == "zerowidth") {
+            std::istringstream ss(val);
+            std::string tok;
+            while (std::getline(ss, tok, ','))
+                if (!tok.empty()) info.zerowidth_structs.push_back(tok);
+        } else if (key == "multivalue") {
+            std::istringstream ss(val);
+            std::string tok;
+            while (std::getline(ss, tok, ','))
+                if (!tok.empty()) info.multivalue_attrs.push_back(tok);
         }
     }
     return info;
@@ -51,6 +71,8 @@ void Corpus::open(const std::string& dir, bool preload) {
     for (const auto& name : info_.positional_attrs) {
         auto pa = std::make_unique<PositionalAttr>();
         pa->open(dir + "/" + name, info_.size, preload);
+        if (is_multivalue(name))
+            pa->open_mv(dir + "/" + name, preload);
         attrs_[name] = std::move(pa);
     }
 
@@ -101,6 +123,36 @@ const StructuralAttr& Corpus::structure(const std::string& name) const {
 
 bool Corpus::has_structure(const std::string& name) const {
     return structs_.count(name) > 0;
+}
+
+bool Corpus::is_nested(const std::string& name) const {
+    for (const auto& s : info_.nested_structs)
+        if (s == name) return true;
+    return false;
+}
+
+bool Corpus::is_overlapping(const std::string& name) const {
+    for (const auto& s : info_.overlapping_structs)
+        if (s == name) return true;
+    return false;
+}
+
+bool Corpus::is_zerowidth(const std::string& name) const {
+    for (const auto& s : info_.zerowidth_structs)
+        if (s == name) return true;
+    return false;
+}
+
+bool Corpus::is_multivalue(const std::string& name) const {
+    // Support both bare "wsd" and named-token-qualified "a.wsd" forms.
+    // Strip the prefix up to the first '.' if present.
+    std::string_view bare = name;
+    auto dot = bare.find('.');
+    if (dot != std::string_view::npos)
+        bare = bare.substr(dot + 1);
+    for (const auto& s : info_.multivalue_attrs)
+        if (bare == s) return true;
+    return false;
 }
 
 } // namespace manatree

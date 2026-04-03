@@ -68,19 +68,32 @@ static std::string read_field(const Corpus& corpus, const Match& m,
     if (corpus.has_attr(attr))
         return std::string(corpus.attr(attr).value_at(pos));
 
-    const auto& ra_all = corpus.region_attr_names();
-    for (const auto& ra_name : ra_all) {
-        if (ra_name == attr_spec) {
-            auto us = ra_name.find('_');
-            if (us == std::string::npos || us + 1 >= ra_name.size()) return "";
-            std::string struct_name = ra_name.substr(0, us);
-            std::string region_attr = ra_name.substr(us + 1);
-            if (!corpus.has_structure(struct_name)) return "";
-            const auto& sa = corpus.structure(struct_name);
-            if (!sa.has_region_attr(region_attr)) return "";
+    RegionAttrParts parts;
+    if (split_region_attr_name(attr_spec, parts) &&
+        corpus.has_structure(parts.struct_name)) {
+        const auto& sa = corpus.structure(parts.struct_name);
+        if (sa.has_region_attr(parts.attr_name)) {
+            bool multi = corpus.is_overlapping(parts.struct_name)
+                       || corpus.is_nested(parts.struct_name);
+            if (multi) {
+                std::string result;
+                sa.for_each_region_at(pos, [&](size_t rgn_idx) -> bool {
+                    std::string_view v = sa.region_value(parts.attr_name, rgn_idx);
+                    if (v.empty()) return true;
+                    std::string vs(v);
+                    if (result.empty()) {
+                        result = vs;
+                    } else if (result.find(vs) == std::string::npos) {
+                        result += '|';
+                        result += vs;
+                    }
+                    return true;
+                });
+                return result;
+            }
             int64_t rgn = sa.find_region(pos);
             if (rgn < 0) return "";
-            return std::string(sa.region_value(region_attr, static_cast<size_t>(rgn)));
+            return std::string(sa.region_value(parts.attr_name, static_cast<size_t>(rgn)));
         }
     }
     return "";
@@ -188,6 +201,25 @@ static void emit_count_json(std::ostream& out, const Corpus& corpus, const Match
     } else {
         for (const auto& m : ms.matches) ++counts[make_key(corpus, m, name_map, cmd.fields)];
     }
+    // RG-5f: Explode multivalue keys for single-column grouping.
+    if (cmd.fields.size() == 1 && corpus.is_multivalue(cmd.fields[0])) {
+        std::map<std::string, size_t> exploded;
+        for (const auto& [key, count] : counts) {
+            if (key.find('|') != std::string::npos) {
+                size_t s = 0;
+                while (s < key.size()) {
+                    size_t p = key.find('|', s);
+                    if (p == std::string::npos) p = key.size();
+                    std::string comp = key.substr(s, p - s);
+                    if (!comp.empty()) exploded[comp] += count;
+                    s = p + 1;
+                }
+            } else {
+                exploded[key] += count;
+            }
+        }
+        counts = std::move(exploded);
+    }
     std::vector<std::pair<std::string, size_t>> sorted(counts.begin(), counts.end());
     std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
     size_t total = ms.aggregate_buckets ? ms.aggregate_buckets->total_hits : ms.matches.size();
@@ -228,26 +260,83 @@ static void emit_freq_json(std::ostream& out, const Corpus& corpus, const MatchS
     } else {
         for (const auto& m : ms.matches) ++counts[make_key(corpus, m, name_map, cmd.fields)];
     }
+    // RG-5f: Explode multivalue keys for single-column grouping.
+    if (cmd.fields.size() == 1 && corpus.is_multivalue(cmd.fields[0])) {
+        std::map<std::string, size_t> exploded;
+        for (const auto& [key, count] : counts) {
+            if (key.find('|') != std::string::npos) {
+                size_t s = 0;
+                while (s < key.size()) {
+                    size_t p = key.find('|', s);
+                    if (p == std::string::npos) p = key.size();
+                    std::string comp = key.substr(s, p - s);
+                    if (!comp.empty()) exploded[comp] += count;
+                    s = p + 1;
+                }
+            } else {
+                exploded[key] += count;
+            }
+        }
+        counts = std::move(exploded);
+    }
     std::vector<std::pair<std::string, size_t>> sorted(counts.begin(), counts.end());
     std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
     double corpus_size = static_cast<double>(corpus.size());
     size_t total_matches = ms.aggregate_buckets ? ms.aggregate_buckets->total_hits : ms.matches.size();
 
+    // Per-subcorpus IPM: when grouping by a single region attribute, use per-group
+    // token counts as IPM denominator for meaningful relative frequencies.
+    const StructuralAttr* freq_sa = nullptr;
+    std::string freq_region_attr;
+    if (cmd.fields.size() == 1) {
+        RegionAttrParts parts;
+        if (split_region_attr_name(cmd.fields[0], parts) &&
+            corpus.has_structure(parts.struct_name)) {
+            const auto& sa = corpus.structure(parts.struct_name);
+            if (sa.has_region_attr(parts.attr_name)) {
+                freq_sa = &sa;
+                freq_region_attr = parts.attr_name;
+            }
+        }
+    }
+
+    std::unordered_map<std::string, double> subcorpus_sizes;
+    if (freq_sa) {
+        for (const auto& [key, count] : sorted) {
+            size_t span = freq_sa->token_span_sum_for_attr_eq(freq_region_attr, key);
+            subcorpus_sizes[key] = (span > 0 && span != SIZE_MAX)
+                ? static_cast<double>(span) : corpus_size;
+        }
+    }
+
+    auto ipm_denom = [&](const std::string& key) -> double {
+        if (freq_sa) {
+            auto it = subcorpus_sizes.find(key);
+            if (it != subcorpus_sizes.end()) return it->second;
+        }
+        return corpus_size;
+    };
+
     out << "{\"ok\": true, \"operation\": \"freq\", \"result\": {\n";
     out << "  \"corpus_size\": " << corpus.size() << ",\n";
     out << "  \"total_matches\": " << total_matches << ",\n";
+    out << "  \"per_subcorpus_ipm\": " << (freq_sa ? "true" : "false") << ",\n";
     out << "  \"fields\": [";
     for (size_t i = 0; i < cmd.fields.size(); ++i) { if (i > 0) out << ", "; out << jstr(cmd.fields[i]); }
     out << "],\n  \"rows\": [\n";
     for (size_t i = 0; i < sorted.size(); ++i) {
         if (i > 0) out << ",\n";
-        double ipm = 1e6 * static_cast<double>(sorted[i].second) / corpus_size;
+        double denom = ipm_denom(sorted[i].first);
+        double ipm = 1e6 * static_cast<double>(sorted[i].second) / denom;
         double pct = total_matches > 0
             ? 100.0 * static_cast<double>(sorted[i].second) / static_cast<double>(total_matches)
             : 0.0;
         out << "    {\"key\": " << jstr(sorted[i].first) << ", \"count\": " << sorted[i].second
             << ", \"pct\": " << pct
-            << ", \"ipm\": " << std::fixed << std::setprecision(2) << ipm << "}";
+            << ", \"ipm\": " << std::fixed << std::setprecision(2) << ipm;
+        if (freq_sa)
+            out << ", \"subcorpus_size\": " << static_cast<size_t>(denom);
+        out << "}";
     }
     out << "\n  ]\n}}\n";
 }
@@ -255,6 +344,47 @@ static void emit_freq_json(std::ostream& out, const Corpus& corpus, const MatchS
 static void emit_size_json(std::ostream& out, const MatchSet& ms) {
     size_t n = ms.aggregate_buckets ? ms.aggregate_buckets->total_hits : ms.matches.size();
     out << "{\"ok\": true, \"operation\": \"size\", \"result\": " << n << "}\n";
+}
+
+static bool is_multi_value_field(const Corpus& corpus, const std::string& field) {
+    std::string attr_spec = field;
+    if (field.rfind("match.", 0) == 0 && field.size() > 6) {
+        attr_spec = field.substr(6);
+    } else {
+        auto dot = field.find('.');
+        if (dot != std::string::npos && dot > 0)
+            attr_spec = field.substr(dot + 1);
+    }
+    // Multivalue positional attr
+    if (corpus.is_multivalue(attr_spec))
+        return true;
+    // Overlapping/nested region attr
+    RegionAttrParts parts;
+    if (split_region_attr_name(attr_spec, parts) &&
+        corpus.has_structure(parts.struct_name)) {
+        return corpus.is_overlapping(parts.struct_name)
+            || corpus.is_nested(parts.struct_name);
+    }
+    return false;
+}
+
+static void emit_field_json(std::ostream& out, const std::string& val, bool is_multi) {
+    if (is_multi && val.find('|') != std::string::npos) {
+        out << '[';
+        size_t start = 0;
+        bool first = true;
+        while (start < val.size()) {
+            size_t p = val.find('|', start);
+            if (p == std::string::npos) p = val.size();
+            if (!first) out << ", ";
+            out << jstr(val.substr(start, p - start));
+            first = false;
+            start = p + 1;
+        }
+        out << ']';
+    } else {
+        out << jstr(val);
+    }
 }
 
 static void emit_tabulate_json(std::ostream& out, const Corpus& corpus, const MatchSet& ms,
@@ -267,6 +397,11 @@ static void emit_tabulate_json(std::ostream& out, const Corpus& corpus, const Ma
     const size_t start = std::min(cmd.tabulate_offset, n);
     const size_t end = std::min(start + cmd.tabulate_limit, n);
     const size_t total_hits = ms.total_count > 0 ? ms.total_count : n;
+
+    std::vector<bool> field_is_multi(cmd.fields.size(), false);
+    for (size_t f = 0; f < cmd.fields.size(); ++f)
+        field_is_multi[f] = is_multi_value_field(corpus, cmd.fields[f]);
+
     out << "{\"ok\": true, \"operation\": \"tabulate\", \"result\": {\n";
     out << "  \"fields\": [";
     for (size_t i = 0; i < cmd.fields.size(); ++i) { if (i > 0) out << ", "; out << jstr(cmd.fields[i]); }
@@ -279,7 +414,8 @@ static void emit_tabulate_json(std::ostream& out, const Corpus& corpus, const Ma
         out << "    [";
         for (size_t f = 0; f < cmd.fields.size(); ++f) {
             if (f > 0) out << ", ";
-            out << jstr(read_field(corpus, ms.matches[i], name_map, cmd.fields[f]));
+            std::string val = read_field(corpus, ms.matches[i], name_map, cmd.fields[f]);
+            emit_field_json(out, val, field_is_multi[f]);
         }
         out << "]";
     }

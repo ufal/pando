@@ -35,7 +35,17 @@ std::string to_info_json(const Corpus& corpus);
 
 // Build JSON string listing unique values + counts for a positional or region attribute.
 // Returns empty string if attribute not found.
+// Positional and region strings are split on '|' (RG-5f): each component receives the
+// parent row's count (same convention as multivalue_eq / membership queries).
 std::string to_values_json(const Corpus& corpus, const std::string& attr_name, size_t limit = 0);
+
+// Sorted by count descending; for CLI / reuse alongside to_values_json.
+// When `split_mv` is true, pipe-separated components are counted individually (RG-5f).
+std::vector<std::pair<std::string, size_t>> positional_attr_show_values_mv(const PositionalAttr& pa,
+                                                                           bool split_mv = false);
+std::vector<std::pair<std::string, size_t>> region_attr_show_values_mv(const StructuralAttr& sa,
+                                                                       const std::string& region_attr,
+                                                                       bool split_mv = false);
 
 // Build JSON string listing all regions of a given type with their attributes.
 // Returns empty string if structure type not found.
