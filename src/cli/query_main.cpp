@@ -22,6 +22,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <set>
+#include <stdexcept>
 #include <filesystem>
 
 using namespace manatree;
@@ -702,6 +703,7 @@ static void emit_info_json(const Corpus& corpus) {
 // Check whether a field's value may be pipe-separated (multivalue positional
 // attr OR overlapping/nested region attribute).
 static bool is_multi_value_field(const Corpus& corpus, const std::string& field) {
+    if (field.size() >= 5 && field.compare(0, 5, "tcnt(") == 0) return false;
     std::string attr_spec = field;
     if (field.rfind("match.", 0) == 0 && field.size() > 6) {
         attr_spec = field.substr(6);
@@ -745,87 +747,13 @@ static void emit_field_json(std::ostream& out, const std::string& val, bool is_m
 
 // ── Aggregation helpers ─────────────────────────────────────────────────
 
-static std::string read_field(const Corpus& corpus, const Match& m,
-                              const NameIndexMap& name_map,
-                              const std::string& field) {
-    // #15: field can be:
-    //   - "upos", "feats.Number" (positional)
-    //   - "a.upos" (named token)
-    //   - "match.text_langcode" (region attr)
-    //   - "a.text_langcode" (region attr anchored at named token)
-
-    CorpusPos pos = m.first_pos();
-    std::string attr_spec = field;
-
-    // Special-case "match." prefix for region attrs: match.<region_attr>
-    if (field.rfind("match.", 0) == 0 && field.size() > 6) {
-        attr_spec = field.substr(6);
-    } else {
-        // Named token prefix: a.attr
-        auto dot = field.find('.');
-        if (dot != std::string::npos && dot > 0) {
-            std::string name = field.substr(0, dot);
-            CorpusPos np = resolve_name(m, name_map, name);
-            if (np != NO_HEAD) {
-                pos = np;
-                attr_spec = field.substr(dot + 1);
-            } else {
-                attr_spec = field;
-            }
-        }
-    }
-
-    // Fast path (6g): if attr_spec is a known positional attribute, skip
-    // region_attr scan — avoids O(region_attrs) work per match for count by lemma etc.
-    std::string attr = attr_spec;
-    if (attr.size() > 5 && attr.substr(0, 5) == "feats" && attr.find('.') != std::string::npos)
-        attr[attr.find('.')] = '_';
-    if (corpus.has_attr(attr)) {
-        return std::string(corpus.attr(attr).value_at(pos));
-    }
-
-    // Region attribute? e.g. "text_langcode" splits to struct "text", attr "langcode".
-    RegionAttrParts parts;
-    if (split_region_attr_name(attr_spec, parts) &&
-        corpus.has_structure(parts.struct_name)) {
-        const auto& sa = corpus.structure(parts.struct_name);
-        if (sa.has_region_attr(parts.attr_name)) {
-            // For overlapping/nested structures, collect all distinct values.
-            bool multi = corpus.is_overlapping(parts.struct_name)
-                       || corpus.is_nested(parts.struct_name);
-            if (multi) {
-                std::string result;
-                sa.for_each_region_at(pos, [&](size_t rgn_idx) -> bool {
-                    std::string_view v = sa.region_value(parts.attr_name, rgn_idx);
-                    if (v.empty()) return true;
-                    // Deduplicate: skip if already present (pipe-separated list)
-                    std::string vs(v);
-                    if (result.empty()) {
-                        result = vs;
-                    } else if (result.find(vs) == std::string::npos) {
-                        result += '|';
-                        result += vs;
-                    }
-                    return true;
-                });
-                return result;
-            }
-            int64_t rgn = sa.find_region(pos);
-            if (rgn < 0) return "";
-            return std::string(sa.region_value(parts.attr_name, static_cast<size_t>(rgn)));
-        }
-    }
-
-    return "";
-}
-
 static std::string make_key(const Corpus& corpus, const Match& m,
                             const NameIndexMap& name_map,
                             const std::vector<std::string>& fields) {
     std::string key;
     for (size_t i = 0; i < fields.size(); ++i) {
         if (i > 0) key += '\t';
-        key += read_field(corpus, m, name_map, fields[i]);
+        key += read_tabulate_field(corpus, m, name_map, fields[i]);
     }
     return key;
 }
@@ -970,6 +898,8 @@ static void emit_tabulate(const Corpus& corpus, const MatchSet& ms,
         return;
     }
 
+    try {
+
     const size_t n = ms.matches.size();
     const size_t start = std::min(cmd.tabulate_offset, n);
     const size_t end = std::min(start + cmd.tabulate_limit, n);
@@ -981,29 +911,35 @@ static void emit_tabulate(const Corpus& corpus, const MatchSet& ms,
         for (size_t f = 0; f < cmd.fields.size(); ++f)
             field_is_multi[f] = is_multi_value_field(corpus, cmd.fields[f]);
 
-        std::cout << "{\"ok\": true, \"operation\": \"tabulate\", \"result\": {\n";
-        std::cout << "  \"fields\": [";
+        std::ostringstream json;
+        json << "{\"ok\": true, \"operation\": \"tabulate\", \"result\": {\n";
+        json << "  \"fields\": [";
         for (size_t i = 0; i < cmd.fields.size(); ++i) {
-            if (i > 0) std::cout << ", ";
-            std::cout << jstr(cmd.fields[i]);
+            if (i > 0) json << ", ";
+            json << jstr(cmd.fields[i]);
         }
-        std::cout << "],\n  \"total_matches\": " << total_hits << ",\n";
-        std::cout << "  \"offset\": " << cmd.tabulate_offset << ",\n";
-        std::cout << "  \"limit\": " << cmd.tabulate_limit << ",\n";
-        std::cout << "  \"rows_returned\": " << (end - start) << ",\n";
-        std::cout << "  \"rows\": [\n";
+        json << "],\n  \"total_matches\": " << total_hits << ",\n";
+        json << "  \"offset\": " << cmd.tabulate_offset << ",\n";
+        json << "  \"limit\": " << cmd.tabulate_limit << ",\n";
+        json << "  \"rows_returned\": " << (end - start) << ",\n";
+        json << "  \"rows\": [\n";
         for (size_t i = start; i < end; ++i) {
-            if (i > start) std::cout << ",\n";
-            std::cout << "    [";
+            if (i > start) json << ",\n";
+            json << "    [";
             for (size_t f = 0; f < cmd.fields.size(); ++f) {
-                if (f > 0) std::cout << ", ";
-                std::string val = read_field(corpus, ms.matches[i], name_map, cmd.fields[f]);
-                emit_field_json(std::cout, val, field_is_multi[f]);
+                if (f > 0) json << ", ";
+                std::string val = read_tabulate_field(corpus, ms.matches[i], name_map, cmd.fields[f]);
+                emit_field_json(json, val, field_is_multi[f]);
             }
-            std::cout << "]";
+            json << "]";
         }
-        std::cout << "\n  ]\n}}\n";
+        json << "\n  ]\n}}\n";
+        std::cout << json.str();
     } else {
+        if (start < end) {
+            for (size_t f = 0; f < cmd.fields.size(); ++f)
+                read_tabulate_field(corpus, ms.matches[start], name_map, cmd.fields[f]);
+        }
         // Header
         for (size_t i = 0; i < cmd.fields.size(); ++i) {
             if (i > 0) std::cout << '\t';
@@ -1015,13 +951,20 @@ static void emit_tabulate(const Corpus& corpus, const MatchSet& ms,
             const auto& m = ms.matches[i];
             for (size_t f = 0; f < cmd.fields.size(); ++f) {
                 if (f > 0) std::cout << '\t';
-                std::cout << read_field(corpus, m, name_map, cmd.fields[f]);
+                std::cout << read_tabulate_field(corpus, m, name_map, cmd.fields[f]);
             }
             std::cout << '\n';
         }
         if (end < n || (total_hits > n && end == n))
             std::cout << "# (" << total_hits << " matches in query; showing " << (end - start)
                       << " at offset " << cmd.tabulate_offset << ")\n";
+    }
+    } catch (const std::exception& e) {
+        if (opts.json) {
+            std::cout << "{\"ok\": false, \"error\": " << jstr(e.what()) << "}\n";
+        } else {
+            std::cerr << "Error: " << e.what() << "\n";
+        }
     }
 }
 
@@ -1754,7 +1697,9 @@ static void run_query(const Corpus& corpus, const std::string& input,
                                           aggregate_by);
             }
             session.has_last = true;
-            session.last_name_map = build_name_map(stmt.query);
+            session.last_name_map = stmt.is_parallel
+                ? build_name_map(stmt.query)
+                : QueryExecutor::build_name_map_for_stripped_query(stmt.query);
 
             // Always store as "Last" (CQP convention)
             session.named_results["Last"] = session.last_ms;
@@ -2440,6 +2385,10 @@ static Options parse_args(int argc, char* argv[]) {
                   << "If [query] is omitted, CQL is read from stdin. With a terminal (stdin is a TTY), "
                      "an interactive REPL runs with a pando> prompt; with a pipe, queries are read "
                      "line by line with no prompt.\n\n"
+                  << "Shell quoting: CQL string literals often use double quotes (e.g. form=\"can't\"). "
+                     "Wrap the whole query in double quotes and backslash-escape those inner quotes:\n"
+                  << "  ./pando CORP \"[form=\\\"can't\\\" | contr_form=\\\"can't\\\"]+\"\n"
+                  << "Avoid nesting single quotes like '\"can''t\"' — the shell drops the apostrophe.\n\n"
                   << "Options:\n"
                   << "  --json           Output as JSON (human-/tool-friendly)\n"
                   << "  --conllu         Text hits: full sentence per match as CoNLL-U (needs sentence structure s)\n"

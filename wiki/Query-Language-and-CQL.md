@@ -22,6 +22,7 @@ These pages summarize **how the engine behaves** for specific features and point
 | Alignment, `with`, `tuid` | [Aligned corpora and parallel queries](Aligned-Corpora-and-Parallel-Queries.md) |
 | TEITOK project layout, flexicorp, `pando/` beside other engines | [TEITOK integration](TEITOK-Integration.md) |
 | `>`, `<`, `child`, … | [Dependency queries](Dependency-Queries.md) |
+| `coll`, `dcoll`, `keyness` | [Collocations and keyness](Collocations-and-Keyness.md) |
 
 ## Optional dialects
 

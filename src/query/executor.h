@@ -11,6 +11,7 @@
 #include <memory>
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
 
 #include "index/fold_map.h"
 
@@ -23,9 +24,17 @@
 
 namespace manatree {
 
+/// Resolved structural region instance (RG-REG-2): type name + row index in that .rgn table.
+struct RegionRef {
+    std::string struct_name;
+    size_t region_idx = 0;
+};
+
 struct Match {
     std::vector<CorpusPos> positions;    // start position of each query token's span
     std::vector<CorpusPos> span_ends;    // end position (inclusive) of each token's span
+    /// Names from `np:<node …>`-style anchors → region row (filled when anchor constraints run).
+    std::unordered_map<std::string, RegionRef> named_regions;
 
     // Overall match extent: min/max across ALL positions and span_ends.
     // Safe for dependency queries where positions may not be in corpus order.
@@ -81,6 +90,46 @@ inline CorpusPos resolve_name(const Match& m, const NameIndexMap& names,
     if (it == names.end() || it->second >= m.positions.size()) return NO_HEAD;
     return m.positions[it->second];
 }
+
+/// If `field` is `tcnt(region_label)`, returns the number of token positions in that named
+/// region binding as a decimal string. Returns `std::nullopt` if `field` is not `tcnt(...)`.
+/// Throws if the label names a query token, or is not bound to a region anchor.
+inline std::optional<std::string> evaluate_tcnt_tabulate_field(
+    const Corpus& corpus, const Match& m, const NameIndexMap& name_map,
+    const std::string& field) {
+    if (field.size() < 7 || field.compare(0, 5, "tcnt(") != 0 || field.back() != ')')
+        return std::nullopt;
+    const std::string inner = field.substr(5, field.size() - 6);
+    if (inner.empty() || inner.find('.') != std::string::npos)
+        throw std::runtime_error("Invalid tcnt(...) field: expected tcnt(region_name)");
+
+    auto nr = m.named_regions.find(inner);
+    if (nr != m.named_regions.end()) {
+        const RegionRef& rr = nr->second;
+        if (!corpus.has_structure(rr.struct_name))
+            return std::string("0");
+        const auto& sa = corpus.structure(rr.struct_name);
+        Region rg = sa.get(rr.region_idx);
+        if (rg.start > rg.end)
+            return std::string("0");
+        return std::to_string(static_cast<long long>(rg.end - rg.start + 1));
+    }
+    if (resolve_name(m, name_map, inner) != NO_HEAD) {
+        throw std::runtime_error(
+            "tcnt(...) counts tokens inside a named region anchor; '" + inner +
+            "' refers to a query token, not a region binding");
+    }
+    throw std::runtime_error(
+        "tcnt(...) requires a named region binding; '" + inner +
+        "' does not refer to a region anchor from the query");
+}
+
+/// Project one tabulate / group-by field. Throws `std::runtime_error` for unknown attribute
+/// names (token, region, or named-region binding); empty string is only returned when the
+/// attribute exists but has no value at this match (e.g. position outside a region).
+std::string read_tabulate_field(const Corpus& corpus, const Match& m,
+                                const NameIndexMap& name_map,
+                                const std::string& field);
 
 class PositionalAttr;
 class StructuralAttr;
@@ -216,6 +265,9 @@ public:
                               size_t max_matches = 0,
                               bool count_total = false);
 
+    /// Same token-name indices as execute() / Match.positions (strips region anchors first).
+    static NameIndexMap build_name_map_for_stripped_query(const TokenQuery& query);
+
 private:
     // ── Cardinality estimation (O(1) per EQ condition via rev.idx) ──────
 
@@ -298,22 +350,30 @@ private:
     // Expand one seed position through all plan steps and within-clause filter.
     // Calls emit(pm) for each complete partial match vector (size 2*n).
     // emit returns true to continue expanding, false to stop early.
-    // within_hint: cursor for find_region_from (#28); updated on return.
+    // within_span_semantics: true when corpus declares `nested=` or `overlapping=`
+    // for this structure — use span-in-some-region check; false = fast path (one
+    // `find_region` identity per match, correct for typical flat regions).
     void expand_seed(const TokenQuery& query, const QueryPlan& plan,
                      const StructuralAttr* within_sa, CorpusPos seed_p,
                      std::function<bool(std::vector<CorpusPos>&&)> emit,
-                     int64_t* within_hint = nullptr) const;
+                     bool within_span_semantics) const;
 
     // Expand one seed position to all full matches (for parallel execution).
     // Convenience wrapper around expand_seed that builds Match objects.
     std::vector<Match> expand_one_seed(const TokenQuery& query,
                                        const QueryPlan& plan,
                                        const StructuralAttr* within_sa,
-                                       CorpusPos seed_p) const;
+                                       CorpusPos seed_p,
+                                       bool within_span_semantics) const;
 
     // #25: Pre-resolve EQ string values to LexiconIds for integer comparison in check_leaf.
     void compile_conditions(const ConditionPtr& cond) const;
     void compile_query(const TokenQuery& query) const;
+
+    /// Fail fast when a **token or region label** inside the query is used in the wrong role
+    /// (see dev/VARIABLE-BINDINGS-CHECKLIST.md). Not related to session-level **named queries**
+    /// (`GroupCommand.query_name`). Call on the pre–anchor-strip query.
+    void validate_query_name_bindings(const TokenQuery& query) const;
 
     std::string normalize_attr(const std::string& attr) const;
 
@@ -332,7 +392,28 @@ private:
         std::string region;        // region name (e.g. "s")
         bool is_start;             // true = token must be at region start, false = at region end
         std::vector<std::pair<std::string, std::string>> attrs;  // optional attr constraints
+        /// Non-empty → bind this region row to `named_regions[name]` (e.g. `np:<node …>`).
+        std::string binding_name;
+        /// True: region-start anchor with no following token — enumerate all rows of `region`.
+        bool region_enumeration = false;
     };
+
+    /// Verify anchor constraints on m, fill m.named_regions for bindings; false = reject match.
+    bool resolve_anchor_constraints(Match& m,
+                                    const std::vector<AnchorConstraint>& constraints) const;
+
+    /// True if all `q.global_region_filters` hold (inline path; same as add_match filter).
+    bool match_passes_inline_region_filters(const Match& m, const TokenQuery& q,
+                                            const NameIndexMap& name_map) const;
+
+    /// `np:<s> :: np.s_* = …` with no query tokens: scan region rows, bind name, apply :: filters.
+    MatchSet execute_region_enumeration(const std::vector<AnchorConstraint>& anchor_constraints,
+                                        const TokenQuery& q,
+                                        size_t max_matches,
+                                        bool count_total,
+                                        size_t max_total_cap,
+                                        size_t sample_size,
+                                        uint32_t random_seed) const;
 
     // Strip anchor tokens from a query, returning the cleaned query and constraints
     static TokenQuery strip_anchors(const TokenQuery& query,

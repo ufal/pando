@@ -261,7 +261,17 @@ GroupCommand Parser::parse_command() {
             while (lexer_.peek().type == TokType::IDENT || lexer_.peek().type == TokType::COMMA) {
                 if (lexer_.peek().type == TokType::COMMA) lexer_.consume();
                 if (lexer_.peek().type != TokType::IDENT) break;
-                std::string field = lexer_.next().text;
+                std::string first = lexer_.next().text;
+                std::string low = first;
+                std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+                if (low == "tcnt" && lexer_.peek().type == TokType::LPAREN) {
+                    lexer_.consume();
+                    std::string inner = lexer_.expect(TokType::IDENT).text;
+                    lexer_.expect(TokType::RPAREN);
+                    cmd.fields.push_back("tcnt(" + inner + ")");
+                    continue;
+                }
+                std::string field = std::move(first);
                 if (lexer_.peek().type == TokType::DOT) {
                     lexer_.consume();
                     field += "." + lexer_.expect(TokType::IDENT).text;
@@ -280,6 +290,18 @@ GroupCommand Parser::parse_command() {
 
         if (lexer_.peek().type == TokType::IDENT) {
             std::string first = lexer_.next().text;
+            {
+                std::string low = first;
+                std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+                if (low == "tcnt" && lexer_.peek().type == TokType::LPAREN) {
+                    lexer_.consume();
+                    std::string inner = lexer_.expect(TokType::IDENT).text;
+                    lexer_.expect(TokType::RPAREN);
+                    cmd.fields.push_back("tcnt(" + inner + ")");
+                    parse_field_tail();
+                    return cmd;
+                }
+            }
             if (lexer_.peek().type == TokType::DOT) {
                 lexer_.consume();
                 cmd.fields.push_back(first + "." + lexer_.expect(TokType::IDENT).text);
@@ -301,6 +323,19 @@ GroupCommand Parser::parse_command() {
                     cmd.fields.push_back(second + "." + lexer_.expect(TokType::IDENT).text);
                     parse_field_tail();
                     return cmd;
+                }
+                {
+                    std::string low2 = second;
+                    std::transform(low2.begin(), low2.end(), low2.begin(), ::tolower);
+                    if (low2 == "tcnt" && lexer_.peek().type == TokType::LPAREN) {
+                        cmd.query_name = first;
+                        lexer_.consume();
+                        std::string inner = lexer_.expect(TokType::IDENT).text;
+                        lexer_.expect(TokType::RPAREN);
+                        cmd.fields.push_back("tcnt(" + inner + ")");
+                        parse_field_tail();
+                        return cmd;
+                    }
                 }
                 cmd.fields.push_back(first);
                 cmd.fields.push_back(second);
@@ -538,8 +573,7 @@ QueryToken Parser::parse_token_expr() {
         lexer_.expect(TokType::RBRACKET);
     } else if (t.type == TokType::STRING) {
         // "aux" → [form="aux" | contr_form="aux"]+
-        // The + repetition ensures contraction matches span all sub-tokens.
-        // For a single-token match (form="aux"), the + matches exactly 1.
+        // + matches maximal contiguous runs (one hit per run); see executor single-token path.
         lexer_.consume();
         AttrCondition ac;
         ac.attr = "form";
@@ -1001,6 +1035,7 @@ void Parser::parse_global_filters(TokenQuery& tq) {
                 else if (name == "depth")        fc.func = GlobalFunctionType::DEPTH;
                 else if (name == "ndescendants") fc.func = GlobalFunctionType::NDESCENDANTS;
                 else if (name == "nvals")         fc.func = GlobalFunctionType::NVALS;
+                else if (name == "contains")      fc.func = GlobalFunctionType::CONTAINS;
                 else throw std::runtime_error("Unknown function in global filter: " + name);
                 lexer_.consume(); // consume LPAREN
                 while (lexer_.peek().type != TokType::RPAREN) {

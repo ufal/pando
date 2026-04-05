@@ -19,6 +19,7 @@
 #include <set>
 #include <cmath>
 #include <iomanip>
+#include <stdexcept>
 
 namespace manatree {
 
@@ -40,72 +41,13 @@ ProgramSession& ProgramSession::operator=(ProgramSession&&) noexcept = default;
 // ── Helpers ──────────────────────────────────────────────────────────────
 // build_name_map is already inline in executor.h — just use it directly.
 
-static std::string read_field(const Corpus& corpus, const Match& m,
-                              const NameIndexMap& name_map,
-                              const std::string& field) {
-    CorpusPos pos = m.first_pos();
-    std::string attr_spec = field;
-
-    if (field.rfind("match.", 0) == 0 && field.size() > 6) {
-        attr_spec = field.substr(6);
-    } else {
-        auto dot = field.find('.');
-        if (dot != std::string::npos && dot > 0) {
-            std::string name = field.substr(0, dot);
-            CorpusPos np = resolve_name(m, name_map, name);
-            if (np != NO_HEAD) {
-                pos = np;
-                attr_spec = field.substr(dot + 1);
-            } else {
-                attr_spec = field;
-            }
-        }
-    }
-
-    std::string attr = attr_spec;
-    if (attr.size() > 5 && attr.substr(0, 5) == "feats" && attr.find('.') != std::string::npos)
-        attr[attr.find('.')] = '_';
-    if (corpus.has_attr(attr))
-        return std::string(corpus.attr(attr).value_at(pos));
-
-    RegionAttrParts parts;
-    if (split_region_attr_name(attr_spec, parts) &&
-        corpus.has_structure(parts.struct_name)) {
-        const auto& sa = corpus.structure(parts.struct_name);
-        if (sa.has_region_attr(parts.attr_name)) {
-            bool multi = corpus.is_overlapping(parts.struct_name)
-                       || corpus.is_nested(parts.struct_name);
-            if (multi) {
-                std::string result;
-                sa.for_each_region_at(pos, [&](size_t rgn_idx) -> bool {
-                    std::string_view v = sa.region_value(parts.attr_name, rgn_idx);
-                    if (v.empty()) return true;
-                    std::string vs(v);
-                    if (result.empty()) {
-                        result = vs;
-                    } else if (result.find(vs) == std::string::npos) {
-                        result += '|';
-                        result += vs;
-                    }
-                    return true;
-                });
-                return result;
-            }
-            int64_t rgn = sa.find_region(pos);
-            if (rgn < 0) return "";
-            return std::string(sa.region_value(parts.attr_name, static_cast<size_t>(rgn)));
-        }
-    }
-    return "";
-}
-
 static std::string make_key(const Corpus& corpus, const Match& m,
                             const NameIndexMap& name_map,
                             const std::vector<std::string>& fields) {
     std::string key;
     for (size_t i = 0; i < fields.size(); ++i) {
         if (i > 0) key += '\t';
-        key += read_field(corpus, m, name_map, fields[i]);
+        key += read_tabulate_field(corpus, m, name_map, fields[i]);
     }
     return key;
 }
@@ -194,6 +136,7 @@ static void emit_count_json(std::ostream& out, const Corpus& corpus, const Match
         out << "{\"ok\": false, \"error\": \"count/group requires 'by' clause\"}\n";
         return;
     }
+    try {
     std::map<std::string, size_t> counts;
     if (ms.aggregate_buckets) {
         for (const auto& [k, c] : ms.aggregate_buckets->counts)
@@ -245,6 +188,9 @@ static void emit_count_json(std::ostream& out, const Corpus& corpus, const Match
         }
         out << "\n  ]\n}}\n";
     }
+    } catch (const std::exception& e) {
+        out << "{\"ok\": false, \"error\": " << jstr(e.what()) << "}\n";
+    }
 }
 
 static void emit_freq_json(std::ostream& out, const Corpus& corpus, const MatchSet& ms,
@@ -253,6 +199,7 @@ static void emit_freq_json(std::ostream& out, const Corpus& corpus, const MatchS
         out << "{\"ok\": false, \"error\": \"freq requires 'by' clause\"}\n";
         return;
     }
+    try {
     std::map<std::string, size_t> counts;
     if (ms.aggregate_buckets) {
         for (const auto& [k, c] : ms.aggregate_buckets->counts)
@@ -339,6 +286,9 @@ static void emit_freq_json(std::ostream& out, const Corpus& corpus, const MatchS
         out << "}";
     }
     out << "\n  ]\n}}\n";
+    } catch (const std::exception& e) {
+        out << "{\"ok\": false, \"error\": " << jstr(e.what()) << "}\n";
+    }
 }
 
 static void emit_size_json(std::ostream& out, const MatchSet& ms) {
@@ -347,6 +297,7 @@ static void emit_size_json(std::ostream& out, const MatchSet& ms) {
 }
 
 static bool is_multi_value_field(const Corpus& corpus, const std::string& field) {
+    if (field.size() >= 5 && field.compare(0, 5, "tcnt(") == 0) return false;
     std::string attr_spec = field;
     if (field.rfind("match.", 0) == 0 && field.size() > 6) {
         attr_spec = field.substr(6);
@@ -393,6 +344,7 @@ static void emit_tabulate_json(std::ostream& out, const Corpus& corpus, const Ma
         out << "{\"ok\": false, \"error\": \"tabulate requires at least one field\"}\n";
         return;
     }
+    try {
     const size_t n = ms.matches.size();
     const size_t start = std::min(cmd.tabulate_offset, n);
     const size_t end = std::min(start + cmd.tabulate_limit, n);
@@ -414,12 +366,15 @@ static void emit_tabulate_json(std::ostream& out, const Corpus& corpus, const Ma
         out << "    [";
         for (size_t f = 0; f < cmd.fields.size(); ++f) {
             if (f > 0) out << ", ";
-            std::string val = read_field(corpus, ms.matches[i], name_map, cmd.fields[f]);
+            std::string val = read_tabulate_field(corpus, ms.matches[i], name_map, cmd.fields[f]);
             emit_field_json(out, val, field_is_multi[f]);
         }
         out << "]";
     }
     out << "\n  ]\n}}\n";
+    } catch (const std::exception& e) {
+        out << "{\"ok\": false, \"error\": " << jstr(e.what()) << "}\n";
+    }
 }
 
 static void emit_raw_json(std::ostream& out, const Corpus& corpus, const MatchSet& ms) {
@@ -803,7 +758,9 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
             double query_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
             S.has_last = true;
-            S.last_name_map = build_name_map(stmt.query);
+            S.last_name_map = stmt.is_parallel
+                ? build_name_map(stmt.query)
+                : QueryExecutor::build_name_map_for_stripped_query(stmt.query);
             S.named_results["Last"] = S.last_ms;
             S.named_name_maps["Last"] = S.last_name_map;
             if (!stmt.name.empty()) {
@@ -980,15 +937,18 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                     break;
                 }
                 case CommandType::SORT: {
-                    // Sort modifies the match set, then emit as query result
-                    if (!stmt.command.fields.empty()) {
-                        std::sort(ms_to_use->matches.begin(), ms_to_use->matches.end(),
-                                  [&](const Match& a, const Match& b) {
-                                      return make_key(corpus, a, *nm_to_use, stmt.command.fields)
-                                           < make_key(corpus, b, *nm_to_use, stmt.command.fields);
-                                  });
+                    try {
+                        if (!stmt.command.fields.empty()) {
+                            std::sort(ms_to_use->matches.begin(), ms_to_use->matches.end(),
+                                      [&](const Match& a, const Match& b) {
+                                          return make_key(corpus, a, *nm_to_use, stmt.command.fields)
+                                               < make_key(corpus, b, *nm_to_use, stmt.command.fields);
+                                      });
+                        }
+                        emit_query_json(out, corpus, "(sorted)", *ms_to_use, opts, 0);
+                    } catch (const std::exception& e) {
+                        out << "{\"ok\": false, \"error\": " << jstr(e.what()) << "}\n";
                     }
-                    emit_query_json(out, corpus, "(sorted)", *ms_to_use, opts, 0);
                     break;
                 }
                 default:

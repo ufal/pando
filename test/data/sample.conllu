@@ -1547,3 +1547,17 @@
 32	el	el	DET	da0ms0	Definite=Def|Gender=Masc|Number=Sing|PronType=Art	33	det	_	TokenRange=950:952|tuid=sample-p5-s6.32
 33	deseo	deseo	NOUN	ncms000	Gender=Masc|Number=Sing	30	conj	_	SpaceAfter=No|TokenRange=953:958|tuid=sample-p5-s6.33
 34	.	.	PUNCT	fp	PunctType=Peri	1	punct	_	SpaceAfter=No|TokenRange=958:959|tuid=sample-p5-s6.34
+
+# newregion p
+# p_tuid = sample-p6
+# newregion s
+# sent_id = sample-en_p6-s1
+# tuid = p6-s1
+# text = I can't believe it.
+1	I	I	PRON	PRP	Case=Nom|Number=Sing|Person=1|PronType=Prs	4	nsubj	_	TokenRange=960:961|tuid=sample-p6-s1.1
+2-3	can't	_	_	_	_	_	_	_	TokenRange=962:967
+2	can	can	AUX	MD	VerbForm=Fin	4	aux	_	TokenRange=962:965|tuid=sample-p6-s1.2
+3	n't	not	PART	RB	Polarity=Neg	2	fixed	_	TokenRange=965:967|tuid=sample-p6-s1.3
+4	believe	believe	VERB	VB	VerbForm=Inf	0	root	_	TokenRange=968:975|tuid=sample-p6-s1.4
+5	it	it	PRON	PRP	Case=Acc|Gender=Neut|Number=Sing|Person=3|PronType=Prs	4	obj	_	TokenRange=976:978|tuid=sample-p6-s1.5
+6	.	.	PUNCT	.	_	4	punct	_	SpaceAfter=No|TokenRange=978:979|tuid=sample-p6-s1.6

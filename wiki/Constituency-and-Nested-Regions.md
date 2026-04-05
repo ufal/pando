@@ -51,11 +51,11 @@ A corpus can carry **both**: UD tokens + `deprel`/`head` for syntax-as-graph, an
 
 [`dev/sample-rich-events.jsonl`](../dev/sample-rich-events.jsonl) declares `nested: ["node"]` and includes several `node` regions with `attrs.type` (e.g. `NP`, `S`, `VP`, `CLAUSE`) over the first sentence. Use it to align the header fields and the `region` records with this documentation.
 
-## Limitations
+## Modeling scope
 
-- **`nvals(node_type)`** (see [PANDO-CQL.md](../docs/PANDO-CQL.md)) counts **distinct** pipe-separated components across covering `node` regions at a token when the structure is nested or overlapping; it is **not** the same as “list every constituent” for arbitrary tree walks. Prefer `within` / `containing` for “inside an NP” style queries when region geometry is what you need.
+- **`nvals(node_type)`** (see [PANDO-CQL.md](../docs/PANDO-CQL.md)) reports the number of distinct pipe-separated **components** across covering `node` regions at a token when the structure is nested or overlapping. For **geometric** containment (“inside an NP”), `within` / `containing` over region spans match how Pando represents constituency.
 
-- **Discontinuous constituents** (a single node spanning non-adjacent tokens) are not modeled as a single contiguous region; you would need a different representation (e.g. multiple regions or another layer).
+- **Discontinuous constituents** (one logical node over non-adjacent tokens) are not a single contiguous span in the index; model them with **multiple** regions or another annotation layer that fits your pipeline.
 
 ## See also
 

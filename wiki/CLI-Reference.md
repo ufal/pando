@@ -14,7 +14,7 @@ Exact options change over time; always run **`pando --help`**, **`pando-index --
 | `--debug` | Query plan / timing info |
 | `--threads` | Parallelism for multi-token queries |
 | `--cql` | Dialect front-end (native / optional modules) |
-| Collocation | `--window`, `--left`, `--right`, `--min-freq`, `--measures`, `--max-items` |
+| Collocation / `dcoll` | `--window`, `--left`, `--right`, `--min-freq`, `--measures`, `--max-items` (see [Collocations and keyness](Collocations-and-Keyness.md)) |
 
 Interactive REPL supports `set`, `show settings`, etc.
 

@@ -181,8 +181,19 @@ struct GlobalAlignmentFilter {
     std::string name2, attr2;
 };
 
-// :: distance(a, b) < 5, :: f(a.lemma) >= 100, :: depth(a) > depth(b)
-enum class GlobalFunctionType { DISTANCE, DISTABS, STRLEN, FREQ, NCHILDREN, DEPTH, NDESCENDANTS, NVALS };
+// :: distance(a, b) < 5, :: f(a.lemma) >= 100, :: depth(a) > depth(b), :: contains(s, np) = 1
+enum class GlobalFunctionType {
+    DISTANCE,
+    DISTABS,
+    STRLEN,
+    FREQ,
+    NCHILDREN,
+    DEPTH,
+    NDESCENDANTS,
+    NVALS,
+    /// Layer A: B's token span ⊆ A's span (both args = named region bindings).
+    CONTAINS
+};
 
 // A single function call: func(args...)
 struct GlobalFuncCall {

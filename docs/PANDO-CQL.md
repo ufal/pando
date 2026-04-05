@@ -69,6 +69,19 @@ Inversely, we can also say that a the match need to contain a given region, whic
 
 Both within and containing can also be negated: `[] not within s`.
 
+## Named region bindings
+
+You can **label** a region-start anchor like a token name: **`np:<s>`** binds the label **`np`** to the **sentence region row** that contains the match (structure type **`s`** in this example). Optional attributes on the anchor work as usual: **`<s sent_id="s01">`**.
+
+- **Global filters** can use that label with the usual **`struct_attr`** spelling (underscore between structure and attribute): **`:: np.s_sent_id = "s01"`** resolves the region via **`np`**, not via a token position.
+- **Region-only query** (no token in the query — only the anchor + `::`): **`np:<s> :: np.s_sent_id = "s01"`** enumerates sentence regions and keeps those that pass the filter. When you add tokens (e.g. **`np:<s> []`**) the anchor binds to the first real token as before.
+- **`tabulate`** (and similar commands on the last result) can project **short** region-attribute names on the bound structure: **`tabulate np.id`** or **`tabulate np.sent_id`** — the part after **`np.`** must match a **region attribute** on that structure (as in the index), not the combined `s_sent_id` token form used inside token restrictions.
+- **Anchors + named tokens:** Queries like **`<s> sent:[]`** strip the anchor before execution; **named token indices** in the session align with **`Match.positions`** (so **`tabulate sent.form`** resolves **`sent`** correctly).
+
+**Layer A global `::` geometry:** **`contains(outer, inner)`** — both arguments must be **named region bindings** (e.g. `s:<s> np:<node type="NP">`). True iff the inner region’s inclusive token span lies inside the outer’s (`inner.start ≥ outer.start` and `inner.end ≤ outer.end`). Example: **`:: contains(s, np) = 1`** (or **`> 0`**). Tabulate / aggregate fields support **`tcnt(label)`** for token counts inside a named region (separate from **`contains`**).
+
+**Still open (see [dev/REGIONS-FIRST-CQL-PLAN.md](../dev/REGIONS-FIRST-CQL-PLAN.md) §9):** Layer A **`overlap`**, tree **`rchild` / `rcontains`**, and **`count`/`group` by `np.*`** in the fast aggregate path may not match **`tabulate`** in every case until extended.
+
 ## Named tokens and aligned corpora
 
 You can give a name to the tokens in your query, so that you can then refer back to it: `a:[] b:[] :: a.form = b.form` will find all sequence of two identical words in a row like in *I knew that that book was yours*. When a global condition refers to a named token (`eng.text_lang`, alignment, etc.), that name is required; restrictions that only concern the match as a whole can use `match.` or the `struct_attr = value` shorthand (`text_lang = "Dutch"`).
@@ -108,7 +121,19 @@ It is possible to use comparisons between the corpus positions of tokens to ensu
 
 Like in other dialects of CQL, you can use `"the"` as a shorthand to mean `[form="the"]`. But there are two differences with respect to for instance CWB-CQL. Firstly, we can also write `/the.*/` to get a regular-expression variant of a simple queries. And secondly, there is a special handling for contractions.
 
-In both TEITOK and UD, a contraction like the French *aux* is treated as multi-layered, encoding both *aux* as a word, and the words *à* and *les* that it consists of. Pando does not have a multi-layered set-up, so instead, it treats the individual words as tokens, and the contracted form as a reserved region *contr*, with obligatorily a *form* attribute. And a simple query `"aux"` will look either for a token or a all the tokens of a contraction, so it will look for `[ form="aux" | contr_form="aux" ]+`.
+In TEITOK and UD, a contraction is often described with multiple analysis layers (surface *aux* vs underlying *à* + *les*). **Pando does not duplicate that layered token graph:** the indexer stores normal **tokens** for the parts and, when the CoNLL-U has a multi-word token (MWT) range line, a reserved **`contr`** region over those token positions with a mandatory **`form`** attribute set to the **surface** string (e.g. *can't*, *aux*). No second “virtual” token tier is required for querying—only this **dual representation** (tokens + one region row) is enough.
+
+A **quoted raw word** expands to a **one-or-more repetition** of a disjunction so that a single hit can cover several token positions when matching a contraction:
+
+```text
+"can't"  →  [form="can't" | contr_form="can't"]+
+```
+
+Repetition (**`+`**, **`*`**, **`{n,m}`**, …) on a **single** token uses **maximal contiguous** stretches: one hit per uninterrupted run of tokens that each satisfy the token condition (including the `form` \| `contr_form` OR). Shorter sub-spans inside that run are **not** returned as separate hits. **`*`** uses the **same** maximal-run logic as **`+`** for non-empty spans; `min_repeat == 0` only affects the **lower** bound (e.g. the last tile may be shorter when splitting a run longer than `max_repeat`). A **pure** zero-token match (matching nowhere in the corpus) is not emitted as a separate hit yet—`match_end` / `NO_HEAD` conventions need a dedicated representation first.
+
+If a run is longer than `max_repeat` (the engine’s practical cap, e.g. 100 for bare `+`/`*`), the run is split into consecutive tiles of at most `max_repeat` tokens. The same expansion applies to regex shorthands: `/can.*t/` → `[form=/can.*t/ | contr_form=/can.*t/]+`.
+
+The sample corpus sentence **`sample-en_p6-s1`** (*I can't believe it.*) indexes *can't* as an MWT: lemmas **`can`** + **`not`** on the sub-tokens (surface **`can`** + **`n't`**), with **`contr.form="can't"`** on the spanning region. Searching **`"can't"`** finds that contraction; searching for **`can`** and **`not`** as tokens still hits the respective positions inside it.
 
 ## Multivalue fields and overlapping regions
 

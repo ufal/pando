@@ -123,6 +123,17 @@ std::string to_query_result_json(const Corpus& corpus,
         out << ", \"match_start\": " << match_start << ", \"match_end\": " << match_end;
         out << ", \"context\": {\"left\": " << jstr(ctx.left)
             << ", \"match\": " << jstr(ctx.match) << ", \"right\": " << jstr(ctx.right) << "}";
+        if (!m.named_regions.empty()) {
+            out << ", \"named_regions\": {";
+            bool first_nr = true;
+            for (const auto& [nm, rr] : m.named_regions) {
+                if (!first_nr) out << ", ";
+                first_nr = false;
+                out << jstr(nm) << ": {\"struct\": " << jstr(rr.struct_name)
+                    << ", \"region_idx\": " << rr.region_idx << "}";
+            }
+            out << "}";
+        }
         out << ", \"tokens\": [";
         const auto& attr_names = opts.attrs.empty()
             ? corpus.attr_names() : opts.attrs;

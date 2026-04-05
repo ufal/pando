@@ -23,7 +23,7 @@ The repository includes small samples and docs:
 ./build/pando /path/to/corpus '[lemma="book"]' --limit 5
 ```
 
-If the first argument is not a corpus path, the CLI may fall back to `./pando` or `.` when `corpus.info` exists (TEITOK-style layout); see `pando --help` for the exact rules.
+If the first argument is not a corpus path, the CLI resolves the corpus from `./pando` or `.` when `corpus.info` exists (TEITOK-style layout); see `pando --help` for the resolution order.
 
 Useful flags:
 

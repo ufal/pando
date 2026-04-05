@@ -53,7 +53,7 @@ After indexing, CQL can relate named tokens across languages via those attribute
 
 ## Contractions and multiword tokens
 
-TEITOK and UD often represent **contractions** with multiple analysis layers. Pando does **not** duplicate that layered token graph: it indexes **surface tokens** and can emit a reserved **`contr`** region spanning sub-tokens with a **`form`** attribute. Shorthand queries like `"aux"` expand to token or contraction matches as described in [../docs/PANDO-CQL.md](../docs/PANDO-CQL.md) (“Raw queries and contractions”).
+TEITOK and UD often represent **contractions** with multiple analysis layers. Pando does **not** duplicate that layered token graph: it indexes **surface tokens** and can emit a reserved **`contr`** region spanning sub-tokens with a **`form`** attribute (surface string). Shorthand **`"word"`** expands to **`[form="word" | contr_form="word"]+`** (see [../docs/PANDO-CQL.md](../docs/PANDO-CQL.md) — “Raw queries and contractions”); **`+`** matches a **maximal** contiguous run of satisfying tokens (including the full contraction span).
 
 ## Default `within` and text structure
 
@@ -61,7 +61,7 @@ TEITOK corpora are often segmented by **text** / **document**. Pando’s **`defa
 
 ## Overlap and standoff
 
-TEITOK can represent **overlapping or crossing** spans (e.g. standoff layers). Pando supports **overlapping** region *types* when declared in the corpus header; full standoff parity is a broader topic (see **`extensions.md`** in the repo for design notes). For overlap semantics in queries, see [Overlapping and nested regions](Overlapping-and-Nested-Regions.md).
+TEITOK can represent **overlapping or crossing** spans (e.g. standoff layers). Pando supports **overlapping** region *types* when declared in the corpus header. Additional standoff layering options are discussed in **`extensions.md`** (repository design note). For overlap semantics in queries, see [Overlapping and nested regions](Overlapping-and-Nested-Regions.md).
 
 ## Related wiki pages
 

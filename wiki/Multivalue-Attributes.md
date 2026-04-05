@@ -16,7 +16,7 @@ Multivalue (MV) attributes store **sets** of atomic values as a single string us
 - `corpus.info` line `multivalue=attr1,attr2,...`
 - For each listed positional MV attr, MV sidecar files next to the main lexicon.
 
-If MV files are missing, some paths fall back to slower scans; semantics for matching should remain consistent where implemented.
+The indexer writes these files for each declared multivalue attribute; queries resolve EQ and component lookups through them.
 
 ## `count` / `freq` and pipe explosion
 

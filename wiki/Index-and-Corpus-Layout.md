@@ -12,7 +12,7 @@ A **Pando corpus** is a **directory** containing:
 
 ## Reverse indexes
 
-Region attributes may have **`.lex` / `.rev`** sidecars for fast equality on `::` filters and planning. Older corpora without them still answer queries but may use slower paths.
+Optional **`.lex` / `.rev`** sidecars on region attributes support fast equality and membership for `::` filters and query planning.
 
 ## Further reading
 

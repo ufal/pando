@@ -706,8 +706,9 @@ void StreamingBuilder::finalize() {
         if (det.overlap_seen && declared_overlapping_.count(stype) == 0)
             std::cerr << "Warning: structure '" << stype << "' has crossing/overlapping regions ("
                       << det.overlap_count << " overlap pairs). "
-                      << "Add overlapping=" << stype << " to the corpus header; some paths still use a "
-                      << "single covering region (see SM-ROAD-3).\n";
+                      << "Add overlapping=" << stype << " to the input header if you want it declared "
+                      << "up front; the built corpus.info will still list overlapping=" << stype
+                      << " so queries use overlap-aware paths.\n";
         if (det.zerowidth_seen && declared_zerowidth_.count(stype) == 0)
             std::cerr << "Warning: structure '" << stype << "' has zero-width regions ("
                       << det.zerowidth_count << " detected). "

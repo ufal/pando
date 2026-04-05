@@ -1,6 +1,6 @@
 # Aligned corpora and parallel queries
 
-This page explains **how to model parallel / bitext data** in Pando, how **translation unit ids (`tuid`)** work, and how **n:n (many-to-many) alignment** is represented. It complements [TEITOK integration](TEITOK-Integration.md) (CoNLL-U comments, MISC) and the CQL tutorial in [../docs/PANDO-CQL.md](../docs/PANDO-CQL.md) (“Named tokens and aligned corpora”).
+This page explains **how to model parallel / bitext data** in Pando, how **translation unit ids (`tuid`)** work, and how **n:n (many-to-many) alignment** is represented. It complements [TEITOK integration](TEITOK-Integration.md) (CoNLL-U comments, MISC) and the CQL tutorial in [../docs/PANDO-CQL.md](../docs/PANDO-CQL.md) (“Named tokens and aligned corpora”, “Named queries and frequencies”).
 
 ---
 
@@ -40,29 +40,17 @@ Store **multiple** translation unit ids in one attribute as a **pipe-separated**
 s001|s002|s007
 ```
 
-- Order may be arbitrary, but **for any join that compares full strings**, both sides should use the **same canonical ordering** (e.g. sorted ids) if they must match **exactly**.
-- In the JSONL / index header, list `tuid` (and `s_tuid` / region attrs as needed) in **`multivalue`** so the index knows to build multivalue indexes and apply **component** semantics where applicable (see [Multivalue attributes](Multivalue-Attributes.md)).
+- Component order inside a pipe list does not affect **set-style** matching; for reporting or exports that compare whole stored strings, use a **canonical ordering** (e.g. sorted ids) if you need deterministic string equality outside the query engine.
+- In the JSONL / index header, list `tuid` (and `s_tuid` / region attrs as needed) in **`multivalue`** so the index builds multivalue sidecars and queries use **component / set** semantics (see [Multivalue attributes](Multivalue-Attributes.md)).
 
 ### Semantics (query side)
 
 For attributes declared **multivalue**, Pando-CQL uses **set-style** interpretation for many constructs (see [../docs/PANDO-CQL.md](../docs/PANDO-CQL.md), “Multivalue fields and overlapping regions”):
 
 - `[s_tuid="s001"]` — the sentence’s `tuid` **set** contains `s001`.
-- For comparisons **between** two bindings `a.X` and `b.Y` on multivalue fields, the tutorial describes **non-empty intersection** (e.g. `a.genre = b.genre`).
+- For comparisons **between** two bindings `a.X` and `b.Y` on multivalue fields, the engine uses **non-empty intersection** of component sets. So `a.s_tuid = b.s_tuid` holds when the two sides share at least one translation-unit id.
 
-**Practical rule:** two regions/tokens are “alignment-compatible” if their **sets of ids overlap** — i.e. they share **at least one** translation unit id.
-
-### Implementation note (exact equality paths)
-
-Some **global** filters that tie two named anchors together compare **stored strings** with **exact equality** in the current engine (e.g. `:: a.tuid = b.tuid` in alignment-filter form, and the join inside **`query1 with query2`**). For those paths, **both sides must carry the same string** if the join is expressed that way.
-
-**Guidelines when you rely on those paths:**
-
-1. Prefer a **single canonical alignment id** shared **verbatim** on every token/sentence in the same equivalence class (simplest for `with` and strict joins).
-2. If you **must** store multiple ids per side, use **identical** pipe-strings on both sides when a strict equality join is required, **or**
-3. Prefer **query structure** that evaluates alignment through **multivalue-aware** condition checks (token/region restrictions) as in the CQL spec table, **or** run **two** queries in a session and filter by hand for exploratory work.
-
-As the engine evolves, re-check behavior for your corpus; the **data model** (pipe-separated ids + `multivalue` declaration) stays the same.
+**Scalar** attributes remain single-valued. For attributes declared **`multivalue`**, leaf conditions, `::` filters, aggregates, and parallel / `with` alignment all follow the same **multivalue table** in [PANDO-CQL.md](../docs/PANDO-CQL.md) (set / component semantics).
 
 ---
 
@@ -124,7 +112,7 @@ A workable encoding is:
 - **T**: `s_tuid = id-T|id-A`
 - **A**: `s_tuid = id-S|id-T|id-A` …
 
-The **guideline** is: **every id that participates in a link appears on every segment that belongs to that link’s clique**, so that **intersection** tests recover “these two segments co-occur in the alignment graph”. For strict string-equality joins, introduce a **single synthetic id** `bundle-001` duplicated on all four segments instead.
+The **guideline** is: **every id that participates in a link appears on every segment that belongs to that link’s clique**, so that **intersection** tests recover “these two segments co-occur in the alignment graph”. When you want one shared key for every segment in a clique, a **synthetic bundle id** (repeated on all those segments) is a common modeling choice.
 
 ---
 
@@ -136,15 +124,45 @@ For **sentence-aligned** search without naming tokens, you can write:
 [form="property"] with [form="bezit"]
 ```
 
-The parser builds a **parallel** query; the engine runs **source** and **target** subqueries and **pairs** matches subject to **`::`** alignment constraints (typically `tuid` equality on anchors you provide — see parser / CLI help for the exact form your build expects).
+The parser builds a **parallel** query; the engine runs **source** and **target** subqueries and **pairs** matches subject to **`::`** alignment constraints (typically equality on `tuid` / `s_tuid` or other attrs — see [PANDO-CQL.md](../docs/PANDO-CQL.md) and `pando --help`).
 
-Use this when alignment is **simple** (often 1:1 or shared canonical id per pair). For **complex n:n**, prefer **named tokens** + explicit `::` conditions or multivalue-aware expressions.
+Use **`with`** for straightforward sentence-aligned search. For **n:n** graphs, **named tokens** and explicit `::` conditions over `s_tuid` / `tuid` (multivalue intersection as usual) express the alignment you need.
 
-**JSON:** parallel results may expose **source/target** spans (`parallel` in JSON output) rather than a single KWIC row.
+**JSON:** parallel results use **source/target** spans (`parallel` in JSON output) alongside or instead of a single KWIC row.
 
 ---
 
-## 5. Checklist for indexers
+## 5. Aggregations: `count`, `freq`, and translation equivalents
+
+As in [Named queries and frequencies](../docs/PANDO-CQL.md#named-queries-and-frequencies), **query names persist** across statements in a session, so you can anchor an **English (source) slice** and then **aggregate over aligned Dutch (target) tokens**—the same idea as `Matches = …; count Matches by a.form;`, but with `eng` / `nld` and `s_tuid` / `tuid` alignment.
+
+**Sentence alignment** — after you have run a query that binds the name `eng` to English hits for *property*, count **how often each Dutch form** appears in sentences that share a `tuid` with those English sentences:
+
+```text
+eng:[lemma="property"] :: eng.text_lang = "English"
+```
+
+```text
+DutchWords = nld:[] :: match.text_lang = "Dutch" & eng.s_tuid = nld.s_tuid; count DutchWords by nld.form;
+```
+
+The most frequent row in that table answers “most common Dutch **surface** form in the aligned sentences” (e.g. *bezit*, *eigendom*, … depending on the corpus). Use **`nld.lemma`** instead of **`nld.form`** for lemma frequencies.
+
+**Token alignment** — when word-level `tuid` links translation units, restrict to Dutch tokens aligned to the same unit as the English *property* token:
+
+```text
+eng:[lemma="property"] :: eng.text_lang = "English"
+```
+
+```text
+DutchAligned = nld:[] :: match.text_lang = "Dutch" & eng.tuid = nld.tuid; count DutchAligned by nld.form;
+```
+
+**Multi-attribute breakdowns** work the same as elsewhere: e.g. `count DutchWords by nld.lemma, nld.upos` for a cross-tab of lemma and part of speech. Use **`freq`** instead of **`count`** when you want normalized frequencies. Output sorting and limits are controlled from the CLI (see [CLI reference](CLI-Reference.md)).
+
+---
+
+## 6. Checklist for indexers
 
 1. **Decide levels** — sentence-only, token-only, or both.
 2. **Choose id scheme** — stable, unique per translation unit you care about.
@@ -154,9 +172,9 @@ Use this when alignment is **simple** (often 1:1 or shared canonical id per pair
 
 ---
 
-## 6. See also
+## 7. See also
 
 - [TEITOK integration](TEITOK-Integration.md) — TEITOK layout, flexicorp, CoNLL-U ingestion
 - [Multivalue attributes](Multivalue-Attributes.md) — pipe semantics, indexes, `count` / `freq`
-- [../docs/PANDO-CQL.md](../docs/PANDO-CQL.md) — full CQL, multivalue table, named queries
+- [../docs/PANDO-CQL.md](../docs/PANDO-CQL.md) — full CQL, multivalue table, [named queries and frequencies](../docs/PANDO-CQL.md#named-queries-and-frequencies)
 - [Index and corpus layout](Index-and-Corpus-Layout.md) — `corpus.info`, region attrs
