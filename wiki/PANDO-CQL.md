@@ -11,6 +11,15 @@ We can add multiple restrictions an a token, putting a **&** between the restric
 
 CQL is a sequence-based query language, meaning we can look for sequences of tokens. This is done by putting several tokens in a row in our query. So if we want to only find occurrences of *book* that are preceded by a determiner, we express that as follows: `[upos="DET"] [lemma="book"]`.
 
+## Regular expressions
+
+To look for patterns inside words, CQL allows regular expressions in token restrictions. In regular expressions, you can look for optional letters, repeated letters, etc. In pando-CQL, the explicit regex form uses slash delimiters: `[form = /pan.*tion/]`.
+
+**Quoted strings and CWB compatibility:** If a double-quoted value contains **no** regex metacharacters (`. * + ? [ ] ( ) { } | ^ $ \\`), `attr = "value"` is a **literal** string test. If it **does** contain any of those characters, it is treated like **CWB / Manatee**: the pattern is matched against the **whole token** using `RE2::FullMatch` (or `std::regex_match` when RE2 is disabled)—the same rule as the `--cql cwb` translator, without embedding `^`/`$` in the pattern string. So `[form = ".*tion"]` matches words that end in *-tion*, like CWB. To keep the **older pando behavior** where only `/pattern/` is a regex and quotes are always literal, pass **`--strict-quoted-strings`** to the CLI, or set `strict_quoted_strings` in API / JSON options. **Inequality** with metacharacters in quotes (`!=`) is not supported in this heuristic mode (use `=` with `/.../` or enable strict quotes).
+
+Slash-regex values are passed to the engine **as written** (not auto-anchored). For example `[form = /.*tion/]` matches any substring *tion* inside the token (e.g. *conditional*), not only *-tion* suffixes; anchoring is up to your pattern (e.g. `[form = /tion$/]`).
+
+
 ## Token repetitions
 
 Since the original CQL is purely sequence based, the last query above will not find examples where there is anything between the determiner and the noun, like in *the green book*, which we probably intended to find. That is why CQL introduces token repetitions operators, that are placed directly after the closing bracket. For instance, `[]?` means any optional token (technically 0 or 1 occurrences of the token with in this case no restrictions). So the query `a:[upos="DET"] []? [lemma="book"]` will still find *the book*, but allows a single token in between the determiner and book, so *the green book*, *some interesting book*, etc. But it will also include probably unintented results like *some people book* (their hotel early). We could prevent that by tightening the query to only allow adjectives, and saying there can be multiple adjectives `a:[upos="DET"] [upos="ADJ"]* [lemma="book"]`, where the * stands for "0 or more". 
@@ -26,6 +35,10 @@ There are four different repititions, depending on how many tokens are allowed o
 | []{m} | exactly m tokens |
 | []{m,} | m or more tokens |
 
+Repetition (**`+`**, **`*`**, **`{n,m}`**, …) on a **single** token uses **maximal contiguous** stretches: one hit per uninterrupted run of tokens that each satisfy the token condition (including the `form` \| `contr_form` OR). Shorter sub-spans inside that run are **not** returned as separate hits. **`*`** uses the **same** maximal-run logic as **`+`** for non-empty spans; `min_repeat == 0` only affects the **lower** bound (e.g. the last tile may be shorter when splitting a run longer than `max_repeat`). A **pure** zero-token match (matching nowhere in the corpus) is not emitted as a separate hit yet—`match_end` / `NO_HEAD` conventions need a dedicated representation first.
+
+If a run is longer than `max_repeat` (the engine’s practical cap, e.g. 100 for bare `+`/`*`), the run is split into consecutive tiles of at most `max_repeat` tokens. The same expansion applies to regex shorthands: `/can.*t/` → `[form=/can.*t/ | contr_form=/can.*t/]+`.
+
 ## Dependency relations
 
 Our query `[upos="DET"] []* [lemma="book"]` was probably intended to look for any word *book* modified by a determiner, something that you cannot really express in CWB/CQL, only approximate by expressing what exactly can occur between a determiner and a noun inside an NP. That is why pando-CQL introduces the option to look for dependency relations. Dependency relations are expressed by two query tokens with an operator in between: < or > depending on which is the head. Or >> and << for descendants and ancestors.
@@ -38,9 +51,6 @@ Intead of using sequence notation, it is also possible to define dependency rela
 
 Also for depenencies as token restrictions, we can use negations: `[upos="VERB" & not child [deprel="nsubj"]]` to look for any verbs without a nominal subject. 
 
-## Zero-width and overlapping regions
-
-Pando explicitly allows for zero-width regions: regions that have no tokens inside. Those are helpful in for instance spoken corpora, where pauses are often very relevant, but are between tokens, not tokens themselves. By treating pauses as zero-width regions, we can use them in corpus queries, so `[form="the" ] <pause>` will look for the word *the* followed by the beginning (as well as the end) of a pause "region".
 
 
 ## Regions
@@ -60,6 +70,8 @@ We can restrict our query by properties of the region it is in. The notation for
 When the corpus is indexed with **`pando-index`**, region-attribute columns can carry optional **reverse index** sidecars (next to the `.val` files). That speeds up equality on global `::` filters and improves query planning for region-attribute token restrictions, without changing which strings match. Older index directories without those files keep the same semantics with slower paths.
 
 And of course, those can be combined in queries, so if we want to look for the lemma *cat* with an adjective, where *cat* has to appear in an English text, and the whole things has to be inside a text of genre *Book*, we can express that as `[lemma="cat" & text_lang="Book"] > [upos="ADJ"] within text_genre="Book"`. Since there are no texts within texts, the two restrictions in practice work in exactly the same way.
+
+Pando explicitly allows for zero-width regions: regions that have no tokens inside. Those are helpful in for instance spoken corpora, where pauses are often very relevant, but are between tokens, not tokens themselves. By treating pauses as zero-width regions, we can use them in corpus queries, so `[form="the" ] <pause>` will look for the word *the* followed by the beginning (as well as the end) of a pause "region".
 
 ## Within and containing
 
@@ -84,7 +96,14 @@ You can **label** a region-start anchor like a token name: **`np:<s>`** binds th
 
 **Peer clauses on region anchors (whitespace-separated, any order):** **`rchild(vp)`** — same test as **`:: rchild(vp, …)`** on this binding (immediate parent row must be **`vp`**’s row; **`.par`** required). Use **`rchild`**, not **`child`**, so **`child`** stays reserved for **dependency** relations in **`[]`**. **`contains(vp)`** — this row’s span must geometrically **contain** **`vp`**’s span (Layer A). Example: **`np:<node contains(vp) type="NP" rchild(pp)>`**. Each peer label must be bound by an **earlier** anchor. At least one **non-anchor** token is required so anchors can bind to token positions.
 
-**Still open (see [dev/REGIONS-FIRST-CQL-PLAN.md](../dev/REGIONS-FIRST-CQL-PLAN.md) §9):** Layer A **`overlap`**, tree **`rcontains`**, and **`count`/`group` by `np.*`** in the fast aggregate path may not match **`tabulate`** in every case until extended.
+With named regions, there are some functions to compare and count regions. For two named regions *a* and *b*, there are the following functions
+
+| query | interpretation |
+| ------ | ------ | 
+| contains(a,b)  | the region *a* contains the region *b* |
+| rchild(a,b)  | only for nested regions: *b* is a direct child of *a*, so no other regions of this type with intermediate space |
+| tcnt(a)  | renders the amount of tokens inside the region a |
+
 
 ## Named tokens and aligned corpora
 
@@ -100,13 +119,6 @@ Corpora that are aligned with *tuid* there can be alignments on various levels a
 
 For a more efficient but more limited way of searching through sentence-aligned corpora, pando also offers an easier syntax: `[form="property"] with [form="bezit"]` will only find occurrences of *property* that are in a sentence that is aligned with a sentence in which the word *bezit* occurs.
 
-## Regular expressions
-
-To look for patterns inside words, CQL allows regular expressions in token restrictions. In regular expressions, you can look for optional letters, repeated letters, etc. In pando-CQL, the explicit regex form uses slash delimiters: `[form = /pan.*tion/]`.
-
-**Quoted strings and CWB compatibility:** If a double-quoted value contains **no** regex metacharacters (`. * + ? [ ] ( ) { } | ^ $ \\`), `attr = "value"` is a **literal** string test. If it **does** contain any of those characters, it is treated like **CWB / Manatee**: the pattern is matched against the **whole token** using `RE2::FullMatch` (or `std::regex_match` when RE2 is disabled)—the same rule as the `--cql cwb` translator, without embedding `^`/`$` in the pattern string. So `[form = ".*tion"]` matches words that end in *-tion*, like CWB. To keep the **older pando behavior** where only `/pattern/` is a regex and quotes are always literal, pass **`--strict-quoted-strings`** to the CLI, or set `strict_quoted_strings` in API / JSON options. **Inequality** with metacharacters in quotes (`!=`) is not supported in this heuristic mode (use `=` with `/.../` or enable strict quotes).
-
-Slash-regex values are passed to the engine **as written** (not auto-anchored). For example `[form = /.*tion/]` matches any substring *tion* inside the token (e.g. *conditional*), not only *-tion* suffixes; anchoring is up to your pattern (e.g. `[form = /tion$/]`).
 
 
 ## Matching strategy flags
@@ -137,11 +149,7 @@ A **quoted raw word** expands to a **one-or-more repetition** of a disjunction s
 "can't"  →  [form="can't" | contr_form="can't"]+
 ```
 
-Repetition (**`+`**, **`*`**, **`{n,m}`**, …) on a **single** token uses **maximal contiguous** stretches: one hit per uninterrupted run of tokens that each satisfy the token condition (including the `form` \| `contr_form` OR). Shorter sub-spans inside that run are **not** returned as separate hits. **`*`** uses the **same** maximal-run logic as **`+`** for non-empty spans; `min_repeat == 0` only affects the **lower** bound (e.g. the last tile may be shorter when splitting a run longer than `max_repeat`). A **pure** zero-token match (matching nowhere in the corpus) is not emitted as a separate hit yet—`match_end` / `NO_HEAD` conventions need a dedicated representation first.
-
-If a run is longer than `max_repeat` (the engine’s practical cap, e.g. 100 for bare `+`/`*`), the run is split into consecutive tiles of at most `max_repeat` tokens. The same expansion applies to regex shorthands: `/can.*t/` → `[form=/can.*t/ | contr_form=/can.*t/]+`.
-
-The sample corpus sentence **`sample-en_p6-s1`** (*I can't believe it.*) indexes *can't* as an MWT: lemmas **`can`** + **`not`** on the sub-tokens (surface **`can`** + **`n't`**), with **`contr.form="can't"`** on the spanning region. Searching **`"can't"`** finds that contraction; searching for **`can`** and **`not`** as tokens still hits the respective positions inside it.
+The sample corpus sentence **`sample-en_p6-s1`** (*I can't believe it.*) indexes *can't* as an MWT: lemmas **`can`** + **`not`** on the sub-tokens (surface **`can`** + **`n't`**), with **`contr.form="can't"`** on the spanning region. Searching **`"can't"`** finds all the tokens within that contraction, as well as occurrences of *can't* that are in the corpus as single tokens. There is one side-effect: `"had"` in a sentence like *John had had enough* will find the two sequential occurrences of *had* as a single result, not as two separate ones. 
 
 ## Multivalue fields and overlapping regions
 
@@ -159,7 +167,7 @@ This does not really affect the query much, mostly how queries get interpreted. 
 | node_type="NP"  | the token is in any node region that has type NP |
 | within node_type="NP"  | the match has to stay within some NP |
 | count by genre | each value in the set of genres is counted separately |
-| tabulate a.genre | values joined by | in text output, arrays in JSON |
+| tabulate a.genre | values joined by `|` in text output, arrays in JSON |
 
 Since aggregation functions count each item separately, the total counts for token-level attributes can exceed the number of tokens in the corpus, so percentages become more tricky to calculate.
 
@@ -210,7 +218,7 @@ We can add counts as global queries in, adding additional restrictions on tokens
 | f | f(a.form) >= 100 | a.form occurs at least 100 times in the corpus |
 | nchildren | nchildren(a) > 3 | node a has more than 3 children |
 | ndescendants | ndescendants(a) < 3 | node a has less than 3 children |
-| depth | depth(a) < 4 | node a appears at most 4 levels below the root |
+| depth | depth(a) < 4 | node a appears less than 4 levels below the root |
 | nvals | nvals(a.wsd) > 1 | pipe-separated component count of `a`’s attribute (see multivalue `nvals` in token conditions) |
 
 <!--{% comment %}
@@ -271,4 +279,3 @@ corpus management:
 | show info | show corpus overview: name, size, structures, attributes |
 | show settings | show current values of all interactive settings |
 
-Mol
