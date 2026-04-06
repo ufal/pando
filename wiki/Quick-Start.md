@@ -14,7 +14,7 @@ Pando reads a **directory** of mmap files plus `corpus.info`, not raw CoNLL-U di
 The repository includes small samples; see [Sample corpora](Sample-Corpora.md) for all three: bundled CoNLL-U, JSONL fixture, and the full-UD download script.
 
 - `test/data/` — example inputs for tests and experiments (including `sample.conllu`).
-- `dev/sample-rich-events.jsonl` — richer structural / multivalue fixture (see [Sample corpora](Sample-Corpora.md)).
+- Rich JSONL fixture: run **`python scripts/gen_sample_rich_jsonl.py`**, then index the file it writes (see [Sample corpora](Sample-Corpora.md)).
 
 ## 3. Run a query
 
@@ -38,11 +38,3 @@ The full tutorial is [PANDO-CQL.md](PANDO-CQL.md) (in this folder). Topic wikis:
 - [Multivalue attributes](Multivalue-Attributes.md)
 - [Overlapping and nested regions](Overlapping-and-Nested-Regions.md)
 - [Aligned corpora and parallel queries](Aligned-Corpora-and-Parallel-Queries.md)
-
-## 5. Preview this wiki locally
-
-```bash
-python scripts/serve-wiki-preview.py
-```
-
-Open http://localhost:8765/

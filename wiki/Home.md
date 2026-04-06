@@ -2,7 +2,7 @@
 
 **Pando** is a C++ corpus query engine related to Manatee, CWB/CQP, and similar tools: positional and structural (region) attributes, dependency-aware search, multivalue fields, overlapping regions where declared, and parallel / aligned-corpus queries.
 
-**Beta:** Pando is under active development. This wiki and [PANDO-CQL.md](PANDO-CQL.md) describe **intended** behavior. If something does not match the specification, treat it as a bug and report it. Implementation gaps and priorities are tracked in the repository’s `dev/` roadmaps, not here.
+**Beta:** Pando is under active development. This wiki and [PANDO-CQL.md](PANDO-CQL.md) describe **intended** behavior. If something does not match the specification, treat it as a bug and report it.
 
 If you build from source, the main binaries are `pando` (query CLI), `pando-index` (build corpora), `pando-check`, and `pando-server` (HTTP API). See [Installation](Installation.md).
 

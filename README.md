@@ -9,16 +9,13 @@ Pando is a C++ corpus query engine in the same family as Manatee and CWB/CQP: it
 
 This README is intentionally minimal and documents how to build and run the current prototype for private/use-at-your-own-risk purposes.
 
-**Documentation:** see [wiki/Home.md](wiki/Home.md) for an overview, [wiki/PANDO-CQL.md](wiki/PANDO-CQL.md) for the query language, and **[wiki/README.md](wiki/README.md)** for topic pages (same layout as flexipipe/flexiconv). Preview the wiki locally: `python scripts/serve-wiki-preview.py` → http://localhost:8765/
+**Documentation:** see [wiki/Home.md](wiki/Home.md) for an overview, [wiki/PANDO-CQL.md](wiki/PANDO-CQL.md) for the query language, and **[wiki/README.md](wiki/README.md)** for topic pages (same layout as flexipipe/flexiconv).
 
 ## Status
 
 - **Scope**: Internal / experimental. APIs, on-disk formats, and CLI flags may change without notice.
 - **Maturity**: The engine and CLI are usable enough to run real benchmarks and experiments, but not yet ready for public release or long-term format stability guarantees.
-- **Companion repos**: Pando is designed to work with:
-  - `flexipipe` – corpus preparation pipelines.
-  - `flexiconv` – query conversion and related tooling.
-  - `flexicorp` – auxiliary tools and integration with other backends.
+- **Companion repos**: Pando is designed to work with `flexicorp` an corpus manager for the integration of TEITOK with corpus managers.
 
 ## Prerequisites
 

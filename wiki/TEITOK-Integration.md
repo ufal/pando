@@ -10,7 +10,7 @@ Typical data flow:
 TEITOK (PHP UI)  →  flexicorp (export / indexing CLI)  →  JSONL or API  →  pando-index / StreamingBuilder  →  pando/ (mmap corpus)
 ```
 
-The same conceptual events (tokens, sentence boundaries, regions) can also drive **Manatee** and **CWB** indexes from a **single corpus walk**. Details of that orchestration live in **`dev/PANDO-INDEX-INTEGRATION.md`** (flexicorp goals, streaming API, JSONL fallback).
+The same conceptual events (tokens, sentence boundaries, regions) can also drive **Manatee** and **CWB** indexes from a **single corpus walk**. Orchestration (flexicorp goals, streaming API, JSONL fallback) is documented with the **flexicorp** / TEITOK tooling rather than in this wiki.
 
 **Principle:** Pando remains **engine-generic**. TEITOK-specific paths (PHP, legacy CWB sockets, xidx coupling) belong in flexicorp/TEITOK, not in the core C++ tree.
 
@@ -40,7 +40,7 @@ pando '[lemma="example"]' --limit 5
 
 when `./pando/corpus.info` is present, without passing `./pando` explicitly. See `pando --help` for the exact resolution order.
 
-The benchmark harness **`dev/run_benchmark.py`** uses the same idea: `--corpus-root` points at a tree that may contain `pando/`, `manatee/`, `cqp/` side by side (see [README](../README.md) “Benchmark harness”).
+The repository’s benchmark harness uses the same idea: `--corpus-root` points at a tree that may contain `pando/`, `manatee/`, `cqp/` side by side (see [README](../README.md) “Benchmark harness”).
 
 ## Alignment: `tuid` (translation unit id)
 
@@ -61,7 +61,7 @@ TEITOK corpora are often segmented by **text** / **document**. Pando’s **`defa
 
 ## Overlap and standoff
 
-TEITOK can represent **overlapping or crossing** spans (e.g. standoff layers). Pando supports **overlapping** region *types* when declared in the corpus header. Additional standoff layering options are discussed in **`extensions.md`** (repository design note). For overlap semantics in queries, see [Overlapping and nested regions](Overlapping-and-Nested-Regions.md).
+TEITOK can represent **overlapping or crossing** spans (e.g. standoff layers). Pando supports **overlapping** region *types* when declared in the corpus header. For overlap semantics in queries, see [Overlapping and nested regions](Overlapping-and-Nested-Regions.md).
 
 ## Related wiki pages
 
@@ -71,7 +71,6 @@ TEITOK can represent **overlapping or crossing** spans (e.g. standoff layers). P
 | Alignment queries | [Aligned corpora and parallel queries](Aligned-Corpora-and-Parallel-Queries.md) |
 | CLI corpus path resolution | [CLI reference](CLI-Reference.md) |
 
-## Deeper design notes (repository)
+## Deeper design notes
 
-- **`dev/PANDO-INDEX-INTEGRATION.md`** — flexicorp integration, streaming builder, JSONL path.
-- **`extensions.md`** — TEITOK standoff / crossing regions (future or partial scope).
+Integration-specific notes (flexicorp, streaming builder, standoff layers) ship with the **flexicorp** / TEITOK projects and extended repository checkouts, not in this wiki.

@@ -140,7 +140,8 @@ static bool is_cqp_shell_keyword(CwbTok k) {
     throw std::runtime_error(
         "CQP command '" + name +
         "' is not implemented in the CWB dialect yet (offset " + std::to_string(off) +
-        "). Supported CWB-style commands here include `count by <attr>` (see IMS SortCmd). "
+        "). Supported CWB-style commands here include `count by <attr>` and `group by <field>[, ...]` "
+        "(see IMS SortCmd). "
         "Use `--cql native` for full pando commands.");
 }
 
@@ -569,6 +570,69 @@ void parse_search_pattern_tail(TokStream& ts) {
         throw std::runtime_error("Unsupported: show match … ellipsis clause after pattern");
 }
 
+// One field in `group by` clauses: undotted attr, dotted QID, or FIELD + ID (CWB space → dot).
+static std::string parse_cwb_by_field(TokStream& ts, const char* ctx_after_by) {
+    if (ts.eof())
+        throw std::runtime_error(std::string("Expected field name ") + ctx_after_by);
+    switch (ts.peek().kind) {
+    case CwbTok::QID: {
+        std::string s = ts.peek().text;
+        ts.bump();
+        return s;
+    }
+    case CwbTok::ID: {
+        std::string s = ts.peek().text;
+        ts.bump();
+        return s;
+    }
+    case CwbTok::FIELD: {
+        std::string anchor = ts.peek().text;
+        ts.bump();
+        if (ts.eof() || ts.peek().kind != CwbTok::ID)
+            throw std::runtime_error(
+                "CWB `group by` expected attribute after anchor '" + anchor +
+                "' (e.g. `group by match lemma` or `group by match.lemma`). "
+                "Use `--cql native` for other field syntax.");
+        std::string attr = ts.peek().text;
+        ts.bump();
+        return anchor + "." + attr;
+    }
+    default:
+        throw std::runtime_error(std::string("Expected attribute or field path ") + ctx_after_by);
+    }
+}
+
+static void parse_cwb_sort_cmd_tail(TokStream& ts, std::ostringstream* trace, const char* cmd_label) {
+    if (!ts.eof() && ts.peek().kind == CwbTok::FLAG) {
+        if (trace)
+            *trace << "  (CWB " << cmd_label << ": ignoring % flags on field — not mapped yet)\n";
+        ts.bump();
+    }
+
+    if (!ts.eof() && ts.peek().kind == CwbTok::ON_SYM)
+        throw std::runtime_error(
+            "Unsupported in CWB dialect: sort/group boundaries (`on match` / anchor ranges). "
+            "Use `--cql native` for richer sort/group options.");
+
+    if (!ts.eof() &&
+        (ts.peek().kind == CwbTok::ASC_SYM || ts.peek().kind == CwbTok::DESC_SYM)) {
+        if (trace)
+            *trace << "  (CWB " << cmd_label << ": ignoring asc/desc — not applied to pando output)\n";
+        ts.bump();
+    }
+    if (!ts.eof() && ts.peek().kind == CwbTok::REVERSE_SYM) {
+        if (trace)
+            *trace << "  (CWB " << cmd_label << ": ignoring reverse — not applied to pando output)\n";
+        ts.bump();
+    }
+
+    if (!ts.eof() && ts.peek().kind == CwbTok::CUT_SYM)
+        throw std::runtime_error(std::string("Unsupported: `cut` in CWB ") + cmd_label + " command");
+
+    if (!ts.eof() && ts.peek().kind == CwbTok::GT)
+        throw std::runtime_error(std::string("Unsupported: shell redirection (`>`) in CWB ") + cmd_label);
+}
+
 // IMS parser.y: SortCmd → COUNT_SYM OptionalCID SortClause CutStatement OptionalRedir
 // SortClause → BY_SYM ID OptionalFlag SortBoundaries SortDirection OptReverse
 Statement parse_cwb_count_cmd(TokStream& ts, std::ostringstream* trace) {
@@ -605,37 +669,45 @@ Statement parse_cwb_count_cmd(TokStream& ts, std::ostringstream* trace) {
     stmt.command.fields.push_back(ts.peek().text);
     ts.bump();
 
-    if (!ts.eof() && ts.peek().kind == CwbTok::FLAG) {
-        if (trace)
-            *trace << "  (CWB count: ignoring % flags on attribute — not mapped yet)\n";
-        ts.bump();
-    }
-
-    if (!ts.eof() && ts.peek().kind == CwbTok::ON_SYM)
-        throw std::runtime_error(
-            "Unsupported in CWB dialect: sort/count boundaries (`on match` / anchor ranges). "
-            "Use `--cql native` for richer sort/group options.");
-
-    if (!ts.eof() &&
-        (ts.peek().kind == CwbTok::ASC_SYM || ts.peek().kind == CwbTok::DESC_SYM)) {
-        if (trace)
-            *trace << "  (CWB count: ignoring asc/desc — not applied to pando count output)\n";
-        ts.bump();
-    }
-    if (!ts.eof() && ts.peek().kind == CwbTok::REVERSE_SYM) {
-        if (trace)
-            *trace << "  (CWB count: ignoring reverse — not applied to pando count output)\n";
-        ts.bump();
-    }
-
-    if (!ts.eof() && ts.peek().kind == CwbTok::CUT_SYM)
-        throw std::runtime_error("Unsupported: `cut` in CWB count command");
-
-    if (!ts.eof() && ts.peek().kind == CwbTok::GT)
-        throw std::runtime_error("Unsupported: shell redirection (`>`) in CWB count");
+    parse_cwb_sort_cmd_tail(ts, trace, "count");
 
     if (trace)
         *trace << "  statement: CWB count by " << stmt.command.fields[0] << "\n";
+
+    return stmt;
+}
+
+// IMS: group mirrors SortCmd-style `by` lists; map to native GroupCommand with dotted fields.
+Statement parse_cwb_group_cmd(TokStream& ts, std::ostringstream* trace) {
+    expect_tok(ts, CwbTok::GROUP_SYM, "group");
+
+    if (!ts.eof() && ts.peek().kind == CwbTok::ID && peek2_kind(ts) == CwbTok::BY_SYM) {
+        if (trace)
+            *trace << "  (CWB group: corpus id '" << ts.peek().text
+                   << "' skipped — pando uses the open corpus)\n";
+        ts.bump();
+    }
+
+    expect_tok(ts, CwbTok::BY_SYM, "'by' after group");
+
+    Statement stmt;
+    stmt.has_command = true;
+    stmt.command.type = CommandType::GROUP;
+    stmt.command.fields.push_back(parse_cwb_by_field(ts, "after 'group by'"));
+
+    while (!ts.eof() && ts.peek().kind == CwbTok::COMMA) {
+        ts.bump();
+        stmt.command.fields.push_back(parse_cwb_by_field(ts, "after ',' in group by"));
+    }
+
+    parse_cwb_sort_cmd_tail(ts, trace, "group");
+
+    if (trace) {
+        *trace << "  statement: CWB group by";
+        for (const std::string& f : stmt.command.fields)
+            *trace << " " << f;
+        *trace << "\n";
+    }
 
     return stmt;
 }
@@ -651,6 +723,13 @@ Statement parse_statement_tokens(std::vector<CwbToken>& toks, std::ostringstream
         Statement st = parse_cwb_count_cmd(ts, trace);
         if (!ts.eof() && ts.peek().kind != CwbTok::END && ts.peek().kind != CwbTok::SEMI)
             throw std::runtime_error("Unexpected tokens after CWB count command");
+        return st;
+    }
+
+    if (ts.peek().kind == CwbTok::GROUP_SYM) {
+        Statement st = parse_cwb_group_cmd(ts, trace);
+        if (!ts.eof() && ts.peek().kind != CwbTok::END && ts.peek().kind != CwbTok::SEMI)
+            throw std::runtime_error("Unexpected tokens after CWB group command");
         return st;
     }
 

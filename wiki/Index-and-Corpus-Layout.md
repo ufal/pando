@@ -8,7 +8,7 @@ A **Pando corpus** is a **directory** containing:
 ## Building
 
 - **`pando-index`** (CLI) reads JSONL streams and writes the directory layout.
-- **Streaming integration** (e.g. flexicorp) feeds the same `StreamingBuilder` API; see `dev/PANDO-INDEX-INTEGRATION.md`.
+- **Streaming integration** (e.g. flexicorp) feeds the same `StreamingBuilder` API; orchestration is documented alongside the flexicorp / TEITOK stack (see [TEITOK integration](TEITOK-Integration.md)).
 
 ## Reverse indexes
 
@@ -16,7 +16,5 @@ Optional **`.lex` / `.rev`** sidecars on region attributes support fast equality
 
 ## Further reading
 
-- `dev/PANDO-INDEX-INTEGRATION.md` — integration modes and event API
-- [TEITOK integration](TEITOK-Integration.md) — TEITOK project layout, `pando/` folder, flexicorp
-- `dev/PANDO-SEGMENTS.md` — segment design (if present)
-- [README](../README.md) — benchmark and dev layout
+- [TEITOK integration](TEITOK-Integration.md) — project layout, `pando/` folder, flexicorp
+- [README](../README.md) — benchmark harness and repository layout

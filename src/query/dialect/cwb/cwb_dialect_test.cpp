@@ -50,8 +50,40 @@ int main() {
         assert(p[1].command.fields[0] == "form");
     }
 
+    {
+        auto p = manatree::translate_cwb_program("[upos=\"NOUN\"]; group by lemma", 0, nullptr);
+        assert(p.size() == 2);
+        assert(p[1].has_command);
+        assert(p[1].command.type == manatree::CommandType::GROUP);
+        assert(p[1].command.fields.size() == 1);
+        assert(p[1].command.fields[0] == "lemma");
+    }
+
+    {
+        auto p = manatree::translate_cwb_program("group by match lemma", 0, nullptr);
+        assert(p.size() == 1);
+        assert(p[0].command.type == manatree::CommandType::GROUP);
+        assert(p[0].command.fields.size() == 1);
+        assert(p[0].command.fields[0] == "match.lemma");
+    }
+
+    {
+        auto p = manatree::translate_cwb_program("group by match.lemma", 0, nullptr);
+        assert(p.size() == 1);
+        assert(p[0].command.fields[0] == "match.lemma");
+    }
+
+    {
+        auto p = manatree::translate_cwb_program("group by lemma, form", 0, nullptr);
+        assert(p[0].command.fields.size() == 2);
+        assert(p[0].command.fields[0] == "lemma");
+        assert(p[0].command.fields[1] == "form");
+    }
+
     expect_throw("count by lemma.sub");
     expect_throw("count by match");
+
+    expect_throw("group by match");
 
     return 0;
 }

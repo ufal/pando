@@ -1,10 +1,8 @@
 # Pando wiki
 
-Documentation for the Pando corpus query engine: **intended behavior** as specified in the linked CQL reference. See [Home](Home.md) for the beta notice. Roadmaps and known gaps live under `dev/` in the repository, not in these pages.
+Documentation for the Pando corpus query engine: **intended behavior** as specified in the linked CQL reference. See [Home](Home.md) for the beta notice.
 
 All pages are Markdown in this folder (same convention as **flexipipe** / **flexiconv** sibling repos).
-
-**Preview locally:** from the repo root run `python scripts/serve-wiki-preview.py` and open http://localhost:8765/ to browse before pushing. The preview server serves this `wiki/` tree only (same-folder links like [PANDO-CQL.md](PANDO-CQL.md) work as expected).
 
 | Page | Description |
 | --- | --- |
@@ -21,7 +19,7 @@ All pages are Markdown in this folder (same convention as **flexipipe** / **flex
 | [Collocations and keyness](Collocations-and-Keyness.md) | `coll`, `dcoll`, `keyness`, windows and measures |
 | [Index and corpus layout](Index-and-Corpus-Layout.md) | `corpus.info`, mmap files, streaming build |
 | [CLI reference](CLI-Reference.md) | Common `pando` flags and related tools |
-| [Contributing](Contributing.md) | Repo layout, deeper design docs in `dev/` |
+| [Contributing](Contributing.md) | Repo layout |
 | [TEITOK integration](TEITOK-Integration.md) | TEITOK layout, flexicorp, `tuid`, `pando/` next to other engines |
 
 Start with [Home](Home.md), or [Installation](Installation.md) + [Quick Start](Quick-Start.md).
