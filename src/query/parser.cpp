@@ -55,8 +55,8 @@ Statement Parser::parse_statement() {
             // A token query starts with [, ", or IDENT (label)
             lexer_.consume(); // consume =
             Token t3 = lexer_.peek();
-            if (t3.type == TokType::LBRACKET ||
-                t3.type == TokType::STRING || t3.type == TokType::IDENT) {
+            if (t3.type == TokType::LBRACKET || t3.type == TokType::STRING
+                || t3.type == TokType::IDENT || t3.type == TokType::REGION_START) {
                 stmt.name = t1.text;
                 stmt.has_query = true;
                 stmt.query = parse_token_query();
@@ -591,6 +591,22 @@ QueryToken Parser::parse_token_expr() {
                 value = content.substr(val_start, i - val_start);
             }
             qt.anchor_attrs.emplace_back(std::move(key), std::move(value));
+        }
+
+        // `<err code="SPLIT"> where MM, NN` — discontinuous-aware filter on
+        // a previously bound match set. AND semantics across refs. Resolved
+        // by the CLI driver before execute().
+        if (lexer_.peek().type == TokType::IDENT && lexer_.peek().text == "where") {
+            lexer_.consume();
+            while (true) {
+                Token ref = lexer_.expect(TokType::IDENT);
+                qt.where_refs.push_back(ref.text);
+                if (lexer_.peek().type == TokType::COMMA) {
+                    lexer_.consume();
+                    continue;
+                }
+                break;
+            }
         }
 
         return qt;

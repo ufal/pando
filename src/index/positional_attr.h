@@ -81,6 +81,7 @@ public:
     // Call open_mv() after open() for attrs declared as multivalue.
     void open_mv(const std::string& base_path, bool preload = false);
     bool has_mv() const { return mv_rev_idx_.valid(); }
+    const Lexicon& mv_lexicon() const { return mv_lexicon_; }
 
     // Lookup a single component value (e.g. "artist") in the MV lexicon.
     // Returns UNKNOWN_LEX if not found.
@@ -135,6 +136,52 @@ private:
     MmapFile mv_rev_;          // .mv.rev — positions per component
     MmapFile mv_rev_idx_;      // .mv.rev.idx — int64 offsets
     int mv_rev_width_ = 8;
+
+    // Stage 1 of PANDO-MULTIVALUE-FIELDS: forward MV index.
+    // Spec: dev/PANDO-MVAL-FORMAT.md (v0.2). Optional sidecar; if absent
+    // (older corpora) has_mv_fwd() returns false and consumers fall back.
+    MmapFile mv_fwd_;          // .mv.fwd     — sorted MV component ids per position
+    MmapFile mv_fwd_idx_;      // .mv.fwd.idx — int64[corpus_size+1] offsets
+    int mv_fwd_width_ = 4;     // 2 or 4 bytes per element
+
+public:
+    // Open the forward MV index. No-op if base.mv.fwd.idx is missing (older corpora);
+    // missing path must not throw — MmapFile::open fails on ENOENT otherwise.
+    void open_mv_fwd(const std::string& base_path, bool preload = false);
+    bool has_mv_fwd() const { return mv_fwd_idx_.valid(); }
+
+    // Number of MV components at this position. Returns 0 when has_mv_fwd()
+    // is false or the position carries the empty set (zero-length run).
+    size_t mv_fwd_count_at(CorpusPos pos) const;
+
+    // Lazy iteration over the sorted, deduplicated MV component ids at pos.
+    // f(LexiconId mv_id) → bool; returning false stops early.
+    template<typename F>
+    bool for_each_mv_fwd_at(CorpusPos pos, F&& f) const {
+        if (!has_mv_fwd()) return true;
+        const auto* idx = mv_fwd_idx_.as<int64_t>();
+        int64_t start = idx[pos];
+        int64_t end   = idx[pos + 1];
+        const size_t count = static_cast<size_t>(end - start);
+        switch (mv_fwd_width_) {
+            case 2: {
+                const auto* p = mv_fwd_.as<int16_t>() + start;
+                for (size_t i = 0; i < count; ++i)
+                    if (!f(static_cast<LexiconId>(p[i]))) return false;
+                break;
+            }
+            default: {
+                const auto* p = mv_fwd_.as<int32_t>() + start;
+                for (size_t i = 0; i < count; ++i)
+                    if (!f(static_cast<LexiconId>(p[i]))) return false;
+                break;
+            }
+        }
+        return true;
+    }
+
+    // Convenience: copy MV component ids at pos into a small vector.
+    std::vector<LexiconId> mv_fwd_at(CorpusPos pos) const;
 };
 
 } // namespace manatree

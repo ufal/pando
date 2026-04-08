@@ -1,10 +1,15 @@
 #include "corpus/builder.h"
+#include "core/types.h"
+#include <chrono>
+#include <cstdio>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 #include <algorithm>
-#include <filesystem>
-#include <chrono>
 
 namespace fs = std::filesystem;
 
@@ -51,16 +56,63 @@ static std::vector<std::string> find_vertical_files(const std::string& path) {
     return files;
 }
 
+static manatree::CorpusPos read_corpus_size_from_info(const std::string& main_dir) {
+    std::ifstream in(main_dir + "/corpus.info");
+    if (!in) throw std::runtime_error("Cannot open " + main_dir + "/corpus.info");
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.rfind("size=", 0) == 0) {
+            long long n = std::stoll(line.substr(5));
+            if (n < 0) throw std::runtime_error("Invalid size= in corpus.info");
+            return static_cast<manatree::CorpusPos>(n);
+        }
+    }
+    throw std::runtime_error("corpus.info missing size= line in " + main_dir);
+}
+
+static void write_overlay_info(const std::string& overlay_dir,
+                               const std::string& main_dir,
+                               const std::string& input_path) {
+    std::string path = overlay_dir + "/overlay.info";
+    std::ofstream out(path);
+    if (!out) throw std::runtime_error("Cannot create " + path);
+    auto now = std::chrono::system_clock::now();
+    std::time_t t = std::chrono::system_clock::to_time_t(now);
+    std::tm tm_buf{};
+#if defined(_WIN32)
+    gmtime_s(&tm_buf, &t);
+#else
+    gmtime_r(&t, &tm_buf);
+#endif
+    char iso[32];
+    if (std::strftime(iso, sizeof(iso), "%Y-%m-%dT%H:%M:%SZ", &tm_buf) == 0)
+        std::snprintf(iso, sizeof(iso), "(unknown)");
+    out << "indexed_at=" << iso << "\n";
+    out << "main_corpus=" << main_dir << "\n";
+    out << "input_jsonl=" << input_path << "\n";
+    {
+        namespace fs = std::filesystem;
+        fs::path p(overlay_dir);
+        if (p.has_filename())
+            out << "layer_id=" << p.filename().string() << "\n";
+    }
+    out << "note=standoff-only overlay; merge at query time with main index (see dev/USER-OVERLAY-ANNOTATIONS.md)\n";
+}
+
 int main(int argc, char* argv[]) {
     bool split_feats = false;
     bool format_vertical = false;
     bool format_jsonl = false;
+    bool overlay_index = false;
+    std::string index_dir;
 
     // Collect flags
     std::vector<std::string> args;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--split-feats") split_feats = true;
+        else if (a == "--overlay-index") overlay_index = true;
+        else if (a == "--index-dir" && i + 1 < argc) index_dir = argv[++i];
         else if (a == "--format" && i + 1 < argc) {
             std::string fmt = argv[++i];
             if (fmt == "vertical") format_vertical = true;
@@ -81,14 +133,40 @@ int main(int argc, char* argv[]) {
                   << "  .lex / .rev / .rev.idx (value → region ids) for fast :: metadata filters.\n\n"
                   << "  --split-feats     Split FEATS into feats_X (default: combined)\n"
                   << "  --format vertical Read CWB-style vertical (one token/line, <s> </s>)\n"
-                  << "  --format jsonl    Read streaming JSONL events (tokens/regions)\n";
+                  << "  --format jsonl    Read streaming JSONL events (tokens/regions)\n"
+                  << "  --overlay-index   Standoff-only JSONL: emit token-group columns + groups/ into\n"
+                  << "                    output_dir (no full corpus). Requires --format jsonl and\n"
+                  << "                    --index-dir <main_corpus_dir> (must contain corpus.info).\n"
+                  << "  --index-dir       Main indexed corpus directory (for overlay size / stamp)\n";
         return 1;
     }
 
     std::string input_path = args[0];
     std::string output_dir = args[1];
 
+    if (overlay_index && !format_jsonl) {
+        std::cerr << "Error: --overlay-index requires --format jsonl\n";
+        return 1;
+    }
+    if (overlay_index && index_dir.empty()) {
+        std::cerr << "Error: --overlay-index requires --index-dir <main_corpus_dir>\n";
+        return 1;
+    }
+
     try {
+        if (overlay_index) {
+            manatree::CorpusPos main_size = read_corpus_size_from_info(index_dir);
+            std::cerr << "Overlay index: main corpus size=" << main_size << " (from "
+                      << index_dir << "/corpus.info)\n";
+            std::cerr << "Reading overlay JSONL from " << input_path << "\n";
+            manatree::CorpusBuilder builder(output_dir, true);
+            builder.read_jsonl_overlay(input_path, main_size);
+            builder.finalize();
+            write_overlay_info(output_dir, index_dir, input_path);
+            std::cerr << "Wrote overlay manifest " << output_dir << "/overlay.info\n";
+            return 0;
+        }
+
         manatree::CorpusBuilder builder(output_dir);
         builder.set_split_feats(split_feats);
 

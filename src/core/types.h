@@ -41,3 +41,7 @@ inline bool split_region_attr_name(const std::string& field, RegionAttrParts& ou
 }
 
 } // namespace manatree
+
+// Public namespace migration shim: prefer `pando::` in new code while we
+// incrementally rename internal declarations away from `manatree::`.
+namespace pando = manatree;

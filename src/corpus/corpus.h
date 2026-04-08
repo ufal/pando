@@ -26,12 +26,41 @@ struct CorpusInfo {
 
     // RG-5f: Attributes declared as pipe-separated multivalue.
     std::vector<std::string> multivalue_attrs;       // e.g. "wsd","vowels"
+
+    // REQ-TOKEN-GROUPS: structural names routed to standoff (no .rgn index).
+    std::vector<std::string> token_group_structs;
+};
+
+// Phase A: in-memory representation of one record from `groups/<struct>.jsonl`.
+// `spans` lists the disjoint sub-spans (insertion order); `props` carries
+// declared prop attrs captured at annotation time. `first`/`last` is the
+// envelope (used for doc-order iteration and KWIC context windows).
+struct GroupRecord {
+    std::string gid;
+    CorpusPos first = 0;
+    CorpusPos last  = 0;
+    std::vector<std::pair<CorpusPos, CorpusPos>> spans;
+    std::vector<std::pair<std::string, std::string>> props;
+};
+
+class GroupIndex {
+public:
+    void load(const std::string& path);
+    const std::vector<GroupRecord>& records() const { return records_; }
+    bool loaded() const { return loaded_; }
+private:
+    std::vector<GroupRecord> records_;
+    bool loaded_ = false;
 };
 
 // Loads and provides access to all indexes for a corpus directory.
 class Corpus {
 public:
-    void open(const std::string& dir, bool preload = false);
+    /// Load main index from `dir`. Optional `overlay_dirs` are stand-off mini-indices (from
+    /// `pando-index --overlay-index`); their attributes and token-group structs are merged
+    /// with names prefixed `overlay-<layer>-…` (see USER-OVERLAY-ANNOTATIONS.md).
+    void open(const std::string& dir, bool preload = false,
+              const std::vector<std::string>& overlay_dirs = {});
 
     CorpusPos size() const { return info_.size; }
 
@@ -56,6 +85,19 @@ public:
     bool is_multivalue(const std::string& name) const;
     const std::vector<std::string>& multivalue_attrs() const { return info_.multivalue_attrs; }
 
+    // REQ-TOKEN-GROUPS: token-group structs are non-contiguous standoff annotations
+    // and must be rejected by operators that assume contiguous regions.
+    bool is_token_group(const std::string& name) const {
+        for (const auto& s : info_.token_group_structs)
+            if (s == name) return true;
+        return false;
+    }
+    const std::vector<std::string>& token_group_structs() const { return info_.token_group_structs; }
+
+    // Lazily loaded `groups/<struct>.jsonl` sidecar (Phase A) — exposes the
+    // disjoint sub-spans + props of every group, indexed by doc order.
+    const GroupIndex& group_index(const std::string& name) const;
+
     // Dependency index (may be absent for CWB-imported corpora)
     bool has_deps() const { return has_deps_; }
     const DependencyIndex& deps() const { return deps_; }
@@ -69,6 +111,9 @@ private:
     std::unordered_map<std::string, std::unique_ptr<StructuralAttr>> structs_;
     DependencyIndex deps_;
     bool has_deps_ = false;
+    mutable std::unordered_map<std::string, std::unique_ptr<GroupIndex>> group_indexes_;
+    /// Merged overlay token-group name → path to `groups/<orig>.jsonl` in overlay dir.
+    std::unordered_map<std::string, std::string> group_index_path_override_;
 };
 
 } // namespace manatree

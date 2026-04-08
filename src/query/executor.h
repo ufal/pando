@@ -35,6 +35,8 @@ struct Match {
     std::vector<CorpusPos> span_ends;    // end position (inclusive) of each token's span
     /// Names from `np:<node …>`-style anchors → region row (filled when anchor constraints run).
     std::unordered_map<std::string, RegionRef> named_regions;
+    /// Token-group sidecar props (`groups/<struct>.jsonl`), set for `<err>` / overlay group matches.
+    std::vector<std::pair<std::string, std::string>> token_group_props;
 
     // Overall match extent: min/max across ALL positions and span_ends.
     // Safe for dependency queries where positions may not be in corpus order.
@@ -146,7 +148,9 @@ struct AggregateBucketData {
     };
 
     struct Column {
-        enum class Kind { Positional, Region } kind = Kind::Positional;
+        /// RegionFromBinding: `n.form` where `n` labels `<contr>` — same disambiguation as
+        /// read_tabulate_field (named region before positional when both exist).
+        enum class Kind { Positional, Region, RegionFromBinding } kind = Kind::Positional;
         const PositionalAttr* pa = nullptr;
         const StructuralAttr* sa = nullptr;
         std::string region_attr_name;
@@ -256,7 +260,8 @@ public:
                      size_t sample_size = 0,
                      uint32_t random_seed = 0,
                      unsigned num_threads = 1,
-                     const std::vector<std::string>* aggregate_by_fields = nullptr);
+                     const std::vector<std::string>* aggregate_by_fields = nullptr,
+                     bool skip_name_validation = false);
 
     // #16: Source | Target: run source and target queries, join on source_query.global_alignment_filters.
     // Returns MatchSet with parallel_matches filled; matches is empty.
@@ -268,7 +273,21 @@ public:
     /// Same token-name indices as execute() / Match.positions (strips region anchors first).
     static NameIndexMap build_name_map_for_stripped_query(const TokenQuery& query);
 
+    /// RG-REG-5: how to bind named regions when a single anchor position is contained
+    /// in multiple candidate rows (nested / overlapping / zero-width structural types).
+    ///
+    /// * Fanout (default): yield one Match per row that matches attrs/peer clauses.
+    ///   For multiple anchor constraints, the Cartesian product is produced and each
+    ///   fanned-out Match counts toward limits/caps as an independent match.
+    /// * Innermost: pick the single tightest-enclosing row (smallest span containing
+    ///   the anchor position); deterministic tiebreak on region_idx. Flat types behave
+    ///   identically under both modes.
+    enum class AnchorBindingMode { Fanout, Innermost };
+    void set_anchor_binding_mode(AnchorBindingMode m) { anchor_binding_mode_ = m; }
+    AnchorBindingMode anchor_binding_mode() const { return anchor_binding_mode_; }
+
 private:
+    AnchorBindingMode anchor_binding_mode_ = AnchorBindingMode::Fanout;
     // ── Cardinality estimation (O(1) per EQ condition via rev.idx) ──────
 
     size_t estimate_cardinality(const ConditionPtr& cond) const;
@@ -373,7 +392,10 @@ private:
     /// Fail fast when a **token or region label** inside the query is used in the wrong role
     /// (see dev/VARIABLE-BINDINGS-CHECKLIST.md). Not related to session-level **named queries**
     /// (`GroupCommand.query_name`). Call on the pre–anchor-strip query.
-    void validate_query_name_bindings(const TokenQuery& query) const;
+    /// When `merge_labels_from` is set (parallel `source with target`), include that query's
+    /// labels so `:: a.attr = b.attr` can name tokens from either side.
+    void validate_query_name_bindings(const TokenQuery& query,
+                                    const TokenQuery* merge_labels_from = nullptr) const;
 
     std::string normalize_attr(const std::string& attr) const;
 
@@ -401,8 +423,20 @@ private:
     };
 
     /// Verify anchor constraints on m, fill m.named_regions for bindings; false = reject match.
+    /// Single-binding convenience: in Fanout mode picks the first resolution, in
+    /// Innermost mode picks the innermost row. Prefer `expand_anchor_constraints`
+    /// on hot paths where fan-out should produce multiple output matches.
     bool resolve_anchor_constraints(Match& m,
                                     const std::vector<AnchorConstraint>& constraints) const;
+
+    /// RG-REG-5 fan-out: enumerate every valid anchor-binding assignment for `base`
+    /// (Cartesian product across constraints). `emit(m)` is called once per resolved
+    /// Match; return false from emit to stop early. In Innermost mode at most one
+    /// Match is emitted per input. Returns the number of emissions.
+    size_t expand_anchor_constraints(
+        const Match& base,
+        const std::vector<AnchorConstraint>& constraints,
+        const std::function<bool(Match&)>& emit) const;
 
     /// True if all `q.global_region_filters` hold (inline path; same as add_match filter).
     bool match_passes_inline_region_filters(const Match& m, const TokenQuery& q,
@@ -449,9 +483,13 @@ private:
     // bypass Match construction entirely. Iterates seed positions and
     // computes bucket keys using integer array lookups only.
     // Named anchors in aggregate fields must resolve to token index 0 (same as fill_aggregate_key).
+    // RG-REG-7: `RegionFromBinding` columns are supported when every anchor constraint is
+    // "simple" (token_idx=0, non-multi structural type, no peer clauses), in which case the
+    // fast path resolves each anchor inline per seed position and reads the bound region row.
     bool try_fast_aggregate(const TokenQuery& q,
                             AggregateBucketData& agg,
                             const std::vector<ResolvedRegionFilter>& resolved_filters,
+                            const std::vector<AnchorConstraint>& token_anchor_constraints,
                             size_t max_total_cap,
                             MatchSet& result,
                             const NameIndexMap& name_map) const;

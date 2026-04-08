@@ -12,7 +12,8 @@ namespace manatree {
 // Convenience wrapper: reads CoNLL-U and feeds StreamingBuilder.
 class CorpusBuilder {
 public:
-    explicit CorpusBuilder(const std::string& output_dir);
+    /// When `overlay_standoff_only` is true, only `read_jsonl_overlay` is supported (standoff-only JSONL).
+    explicit CorpusBuilder(const std::string& output_dir, bool overlay_standoff_only = false);
 
     void read_conllu(const std::string& path);
     /// Read CWB-style vertical: one token per line, tab-separated; <s> </s> for sentence boundaries.
@@ -21,7 +22,12 @@ public:
 
     /// Read JSONL event stream (from file or "-" = stdin) and feed StreamingBuilder.
     /// Events follow the schema in dev/PANDO-INDEX-INTEGRATION.md.
-    void read_jsonl(const std::string& path);
+    /// If `overlay_expected_size` is non-null, only token-group `region` events are read (no tokens);
+    /// corpus length is fixed to `*overlay_expected_size` (overlay index build).
+    void read_jsonl(const std::string& path, CorpusPos* overlay_expected_size = nullptr);
+
+    /// Convenience: `read_jsonl(path, &n)` after constructing `CorpusBuilder(dir, true)`.
+    void read_jsonl_overlay(const std::string& path, CorpusPos expected_tokens);
     void finalize();
 
     // When true, split feats into individual feats_X attributes (old behavior).
@@ -42,6 +48,7 @@ private:
 
     StreamingBuilder builder_;
     bool split_feats_ = false;
+    bool overlay_standoff_only_ = false;
 
     // Region tracking for CoNLL-U input (3b/4c):
     bool        in_sentence_ = false;

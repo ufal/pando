@@ -6,7 +6,9 @@
 #include <iostream>
 #include <string_view>
 #include <cctype>
+#include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace manatree {
 
@@ -121,8 +123,14 @@ static bool close_last_region_of_type(RegionStack& stack,
 
 } // namespace
 
-CorpusBuilder::CorpusBuilder(const std::string& output_dir)
-    : builder_(output_dir) {}
+CorpusBuilder::CorpusBuilder(const std::string& output_dir, bool overlay_standoff_only)
+    : builder_(output_dir, overlay_standoff_only), overlay_standoff_only_(overlay_standoff_only) {}
+
+void CorpusBuilder::read_jsonl_overlay(const std::string& path, CorpusPos expected_tokens) {
+    if (!overlay_standoff_only_)
+        throw std::runtime_error("read_jsonl_overlay requires CorpusBuilder(output_dir, true)");
+    read_jsonl(path, &expected_tokens);
+}
 
 void CorpusBuilder::close_text_region_if_open() {
     if (!has_text_region_) return;
@@ -645,6 +653,10 @@ void CorpusBuilder::read_vertical(const std::string& path) {
 //   { "type": "sentence_end" }
 //   { "type": "region_start", ... }
 //   { "type": "region_end", ... }
+//   { "type": "region", "struct": "err", "spans": [[a,b],[c,d]], "attrs": {...} }
+//   — for token_groups (e.g. err), one event can list disjoint spans; same attrs apply.
+//   Header token_group_prop_attrs: { "err": ["code"] } + positional err_code + multivalue err_code
+//   indexes group attrs (e.g. code → err_code) on tokens for MV search.
 //
 // For now, region events are optional; when present, they are interpreted
 // as implicit [start = current corpus_size, end = corpus_size-1] spans.
@@ -728,6 +740,91 @@ static std::vector<std::string> json_get_string_array(const std::string& line,
     return out;
 }
 
+// "spans": [[10,12],[40,40]] — disjoint token spans for one token_group region (JSONL v2).
+static std::vector<std::pair<CorpusPos, CorpusPos>> json_get_spans_array(
+    const std::string& line, const std::string& key) {
+    std::vector<std::pair<CorpusPos, CorpusPos>> out;
+    std::string pattern = "\"" + key + "\"";
+    size_t kpos = line.find(pattern);
+    if (kpos == std::string::npos) return out;
+    size_t colon = line.find(':', kpos + pattern.size());
+    if (colon == std::string::npos) return out;
+    size_t p = colon + 1;
+    while (p < line.size() && (line[p] == ' ' || line[p] == '\t')) ++p;
+    if (p >= line.size() || line[p] != '[') return out;
+    ++p;
+    while (p < line.size()) {
+        while (p < line.size() && (line[p] == ' ' || line[p] == '\t' || line[p] == ',')) ++p;
+        if (p < line.size() && line[p] == ']') break;
+        if (p >= line.size() || line[p] != '[') return {};
+        ++p;
+        while (p < line.size() && (line[p] == ' ' || line[p] == '\t')) ++p;
+        size_t q = p;
+        while (q < line.size() && line[q] >= '0' && line[q] <= '9') ++q;
+        if (q == p) return {};
+        CorpusPos a = static_cast<CorpusPos>(std::stoll(line.substr(p, q - p)));
+        p = q;
+        while (p < line.size() && (line[p] == ' ' || line[p] == '\t')) ++p;
+        if (p >= line.size() || line[p] != ',') return {};
+        ++p;
+        while (p < line.size() && (line[p] == ' ' || line[p] == '\t')) ++p;
+        q = p;
+        while (q < line.size() && line[q] >= '0' && line[q] <= '9') ++q;
+        if (q == p) return {};
+        CorpusPos b = static_cast<CorpusPos>(std::stoll(line.substr(p, q - p)));
+        p = q;
+        while (p < line.size() && (line[p] == ' ' || line[p] == '\t')) ++p;
+        if (p >= line.size() || line[p] != ']') return {};
+        ++p;
+        out.push_back({a, b});
+    }
+    return out;
+}
+
+// "token_group_prop_attrs": { "err": ["code","severity"] }
+static std::unordered_map<std::string, std::vector<std::string>> json_get_object_string_arrays(
+    const std::string& line, const std::string& key) {
+    std::unordered_map<std::string, std::vector<std::string>> out;
+    std::string pattern = "\"" + key + "\"";
+    size_t kpos = line.find(pattern);
+    if (kpos == std::string::npos) return out;
+    size_t colon = line.find(':', kpos + pattern.size());
+    if (colon == std::string::npos) return out;
+    size_t p = colon + 1;
+    while (p < line.size() && (line[p] == ' ' || line[p] == '\t')) ++p;
+    if (p >= line.size() || line[p] != '{') return out;
+    ++p;
+    while (p < line.size()) {
+        while (p < line.size() && (line[p] == ' ' || line[p] == '\t' || line[p] == ',')) ++p;
+        if (p < line.size() && line[p] == '}') break;
+        size_t q1 = line.find('"', p);
+        if (q1 == std::string::npos) break;
+        size_t q2 = line.find('"', q1 + 1);
+        if (q2 == std::string::npos) break;
+        std::string k = line.substr(q1 + 1, q2 - q1 - 1);
+        size_t c2 = line.find(':', q2 + 1);
+        if (c2 == std::string::npos) break;
+        size_t br1 = line.find('[', c2 + 1);
+        if (br1 == std::string::npos) break;
+        size_t br2 = line.find(']', br1 + 1);
+        if (br2 == std::string::npos) break;
+        std::string arr = line.substr(br1 + 1, br2 - br1 - 1);
+        std::vector<std::string> vals;
+        size_t ap = 0;
+        while (ap < arr.size()) {
+            size_t sq1 = arr.find('"', ap);
+            if (sq1 == std::string::npos) break;
+            size_t sq2 = arr.find('"', sq1 + 1);
+            if (sq2 == std::string::npos) break;
+            vals.push_back(arr.substr(sq1 + 1, sq2 - sq1 - 1));
+            ap = sq2 + 1;
+        }
+        out[std::move(k)] = std::move(vals);
+        p = br2 + 1;
+    }
+    return out;
+}
+
 static bool json_get_bool(const std::string& line, const std::string& key, bool dflt) {
     std::string pattern = "\"" + key + "\"";
     size_t kpos = line.find(pattern);
@@ -788,7 +885,15 @@ static void json_get_all_string_pairs(const std::string& line,
 
 // ── JSONL reader ────────────────────────────────────────────────────────
 
-void CorpusBuilder::read_jsonl(const std::string& path) {
+void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expected_size) {
+    // Overlay mode: caller passed an expected main-corpus size and the
+    // builder was constructed in standoff-only mode. In this mode the JSONL
+    // stream must be header + "region" events only (no token / sentence /
+    // region_start / region_end lines); see USER-OVERLAY-ANNOTATIONS.md.
+    const bool in_overlay_mode = overlay_expected_size != nullptr;
+    if (in_overlay_mode && !overlay_standoff_only_)
+        throw std::runtime_error("read_jsonl with overlay size requires CorpusBuilder(output_dir, true)");
+
     std::istream* in_ptr = nullptr;
     std::ifstream file;
     if (path == "-") {
@@ -870,6 +975,16 @@ void CorpusBuilder::read_jsonl(const std::string& path) {
     // In v2 mode, "s" regions trigger flush_sentence() (dependency resolution).
     // In v1 mode, "s" regions are just ordinary regions (sentence_end handles flush).
 
+    auto emit_struct_span = [&](const std::string& sname, CorpusPos start, CorpusPos end,
+                                const std::vector<std::pair<std::string, std::string>>& attrs) {
+        if (builder_.is_token_group_struct(sname))
+            builder_.apply_token_group_annotation(sname, start, end, attrs);
+        else if (attrs.empty())
+            builder_.add_region(sname, start, end);
+        else
+            builder_.add_region(sname, start, end, attrs);
+    };
+
     auto handle_region_start = [&](const std::string& ln) {
         std::string sname = json_get_string(ln, "struct");
         if (sname.empty()) return;
@@ -902,7 +1017,7 @@ void CorpusBuilder::read_jsonl(const std::string& path) {
             flush_sentence();
         CorpusPos end = builder_.corpus_size() > 0 ? builder_.corpus_size() - 1 : 0;
         if (end >= it->second.start)
-            builder_.add_region(actual_struct, it->second.start, end, it->second.attrs);
+            emit_struct_span(actual_struct, it->second.start, end, it->second.attrs);
         open_regions.erase(it);
     };
 
@@ -923,6 +1038,25 @@ void CorpusBuilder::read_jsonl(const std::string& path) {
     auto handle_region = [&](const std::string& ln) {
         std::string sname = json_get_string(ln, "struct");
         if (sname.empty()) return;
+        std::vector<std::pair<CorpusPos, CorpusPos>> spans = json_get_spans_array(ln, "spans");
+        if (!spans.empty()) {
+            if (!builder_.is_token_group_struct(sname)) {
+                static bool warned_spans = false;
+                if (!warned_spans) {
+                    std::cerr << "Warning: \"spans\" on region is only supported for token_groups "
+                                 "(declared in header); ignoring spans for struct '" << sname
+                              << "'.\n";
+                    warned_spans = true;
+                }
+                spans.clear();
+            } else {
+                std::vector<std::pair<std::string, std::string>> attrs;
+                json_get_attrs_object(ln, "attrs", attrs);
+                for (const auto& ab : spans)
+                    emit_struct_span(sname, ab.first, ab.second, attrs);
+                return;
+            }
+        }
         CorpusPos start = builder_.corpus_size();
         CorpusPos end   = builder_.corpus_size() > 0 ? builder_.corpus_size() - 1 : 0;
         CorpusPos sp = get_num_from_line(ln, "start_pos");
@@ -951,7 +1085,7 @@ void CorpusBuilder::read_jsonl(const std::string& path) {
         // Accept both normal regions (end >= start) and zero-width regions (start > end).
         // Zero-width regions use the convention start_pos > end_pos to signal zero width.
         // StreamingBuilder::detect_structure_mode already handles them.
-        builder_.add_region(sname, start, end, attrs);
+        emit_struct_span(sname, start, end, attrs);
     };
 
     // ── Process header (first non-empty line) if present ───────────────
@@ -984,6 +1118,43 @@ void CorpusBuilder::read_jsonl(const std::string& path) {
             builder_.declare_zerowidth(s);
         for (const auto& s : json_get_string_array(ln, "multivalue"))
             builder_.declare_multivalue(s);
+
+        // REQ-TOKEN-GROUPS: TEITOK-style standoff — region type does not get .rgn rows.
+        {
+            std::vector<std::string> tgs = json_get_string_array(ln, "token_groups");
+            std::vector<std::string> tgms = json_get_string_array(ln, "token_group_membership");
+            auto tg_props = json_get_object_string_arrays(ln, "token_group_prop_attrs");
+            for (size_t i = 0; i < tgs.size(); ++i) {
+                std::string memb =
+                        (i < tgms.size() && !tgms[i].empty()) ? tgms[i] : (tgs[i] + "_gid");
+                std::vector<std::string> prop_keys;
+                auto pit = tg_props.find(tgs[i]);
+                if (pit != tg_props.end())
+                    prop_keys = pit->second;
+                // Collision check: derived '<struct>_<key>' columns must not shadow a
+                // positional column the user defined for some other purpose. The
+                // expected denormalized columns (those *in* prop_keys) are exempt — they
+                // are required to appear in `positional` so the MV index can be built.
+                std::unordered_set<std::string> expected_derived;
+                for (const auto& pk : prop_keys) {
+                    if (pk.empty() || pk == "id" || pk == "group_id") continue;
+                    expected_derived.insert(tgs[i] + "_" + pk);
+                }
+                for (const auto& pos_attr : positional_list) {
+                    if (pos_attr.size() <= tgs[i].size() + 1) continue;
+                    if (pos_attr.compare(0, tgs[i].size(), tgs[i]) != 0) continue;
+                    if (pos_attr[tgs[i].size()] != '_') continue;
+                    if (expected_derived.count(pos_attr)) continue;
+                    if (pos_attr == memb) continue;
+                    throw std::runtime_error(
+                        "JSONL header: positional column '" + pos_attr +
+                        "' collides with the namespace reserved for token-group '" +
+                        tgs[i] + "' derived prop columns. Either rename the positional "
+                        "column or declare it under token_group_prop_attrs.");
+                }
+                builder_.declare_token_group_layer(tgs[i], memb, prop_keys);
+            }
+        }
 
         return true;
     };
@@ -1074,23 +1245,43 @@ void CorpusBuilder::read_jsonl(const std::string& path) {
                 have_header = true;
                 std::cerr << "JSONL v2 header: " << positional_set.size()
                           << " positional attributes.\n";
+                if (overlay_expected_size) {
+                    long long tc = get_num_field(line, "token_count");
+                    if (tc > 0 &&
+                        static_cast<CorpusPos>(tc) != *overlay_expected_size) {
+                        throw std::runtime_error(
+                                "JSONL overlay header token_count=" + std::to_string(tc) +
+                                " does not match main corpus size=" +
+                                std::to_string(
+                                        static_cast<unsigned long long>(*overlay_expected_size)));
+                    }
+                    if (!builder_.has_token_group_layers())
+                        throw std::runtime_error(
+                                "JSONL overlay: header must declare token_groups=…");
+                    builder_.bootstrap_overlay_corpus_size(*overlay_expected_size);
+                }
                 continue;  // header consumed, next line
             }
+            if (in_overlay_mode)
+                throw std::runtime_error(
+                        "JSONL overlay: first line must be a v2 header with token_groups");
             // Not a header — fall through to process as data line in v1 mode
             std::cerr << "No JSONL header found; using v1 compatibility mode.\n";
         }
 
         std::string t = json_get_string(line, "type");
         if (t == "token") {
+            if (in_overlay_mode)
+                throw std::runtime_error("JSONL overlay: token lines are not allowed");
             if (have_header) handle_token_v2(line);
             else             handle_token_v1(line);
         } else if (t == "sentence_end") {
             // v1 only: explicit sentence boundary.  v2 uses "s" regions instead.
-            if (!have_header) flush_sentence();
+            if (!in_overlay_mode && !have_header) flush_sentence();
         } else if (t == "region_start") {
-            handle_region_start(line);
+            if (!in_overlay_mode) handle_region_start(line);
         } else if (t == "region_end") {
-            handle_region_end(line);
+            if (!in_overlay_mode) handle_region_end(line);
         } else if (t == "region") {
             handle_region(line);
         }
@@ -1105,7 +1296,7 @@ void CorpusBuilder::read_jsonl(const std::string& path) {
                                    ? kv.first : kv.second.struct_name;
         CorpusPos end = builder_.corpus_size() > 0 ? builder_.corpus_size() - 1 : 0;
         if (end >= kv.second.start)
-            builder_.add_region(sname, kv.second.start, end, kv.second.attrs);
+            emit_struct_span(sname, kv.second.start, end, kv.second.attrs);
     }
     open_regions.clear();
 }

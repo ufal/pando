@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(pando VERSION 0.1.6 LANGUAGES CXX)
+project(pando VERSION 0.1.7 LANGUAGES CXX)
 
 include(CTest)
 
@@ -96,6 +96,7 @@ add_library(pando_core STATIC
     src/query/parser.cpp
     src/query/dialect/tiger/tiger_translate.cpp
     src/query/executor.cpp
+    src/query/executor_tabulate.cpp
     src/api/index_api.cpp
 )
 target_include_directories(pando_core PUBLIC src)
@@ -164,6 +165,13 @@ if(BUILD_TESTING)
     add_executable(parser_quoted_test src/query/parser_quoted_test.cpp)
     target_link_libraries(parser_quoted_test PRIVATE pando_core)
     add_test(NAME parser_quoted COMMAND parser_quoted_test)
+    add_executable(mv_fwd_test src/index/mv_fwd_test.cpp)
+    target_link_libraries(mv_fwd_test PRIVATE pando_core)
+    add_test(NAME mv_fwd COMMAND mv_fwd_test)
+
+    add_executable(mv_stage1_executor_test src/index/mv_stage1_executor_test.cpp)
+    target_link_libraries(mv_stage1_executor_test PRIVATE pando_core)
+    add_test(NAME mv_stage1_executor COMMAND mv_stage1_executor_test)
 endif()
 
 install(TARGETS pando_cwb_dialect

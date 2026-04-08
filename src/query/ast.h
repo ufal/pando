@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/types.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -53,6 +54,11 @@ struct AttrCondition {
     // #25: Pre-resolved lexicon ID for EQ comparisons (populated by compile_conditions).
     // When >= 0, check_leaf uses integer comparison instead of string comparison.
     int32_t resolved_id = -1;  // -1 = UNKNOWN_LEX = not resolved
+
+    // RG-5f / Stage 1: multivalue component id (mv_lookup on .mv.lex) for EQ/NEQ.
+    // When >= 0 and .mv.fwd is loaded, check_leaf tests membership in the sorted
+    // forward set; when == UNKNOWN_LEX (-1), mv_lookup missed (unknown component).
+    int32_t resolved_mv_component_id = -1;
 
     // nvals(attr) op N — cardinality of explicit pipe-separated MV values (and region overlap).
     // When true, `op` compares the computed count to `nvals_compare` (integer RHS).
@@ -175,6 +181,12 @@ struct QueryToken {
     std::vector<std::pair<std::string, std::string>> anchor_attrs;  // <text genre="book"> → {{"genre","book"}}
     /// Optional peer clauses: <node contains(vp) type="NP" rchild(pp)> — AND of all.
     std::vector<AnchorRegionClause> anchor_region_clauses;
+    /// `<err …> where MM, NN`: names of previously-bound match sets that this
+    /// anchor must intersect. AND semantics. Resolved by the CLI driver before
+    /// the query is handed to the executor — the executor sees `where_positions`
+    /// (one sorted vector of token positions per ref).
+    std::vector<std::string> where_refs;
+    std::vector<std::vector<CorpusPos>> where_positions;
 
     bool has_repetition() const { return min_repeat != 1 || max_repeat != 1; }
     bool is_anchor() const { return anchor != RegionAnchorType::NONE; }

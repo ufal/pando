@@ -1,6 +1,9 @@
 #include "index/positional_attr.h"
 #include <algorithm>
+#include <filesystem>
 #include <stdexcept>
+
+namespace fs = std::filesystem;
 
 namespace manatree {
 
@@ -184,6 +187,69 @@ size_t PositionalAttr::mv_count_of(const std::string& component) const {
 size_t PositionalAttr::mv_count_of_id(LexiconId id) const {
     const auto* idx = mv_rev_idx_.as<int64_t>();
     return static_cast<size_t>(idx[id + 1] - idx[id]);
+}
+
+// ── Stage 1: forward MV index (.mv.fwd / .mv.fwd.idx) ───────────────────
+// Spec: dev/PANDO-MVAL-FORMAT.md (v0.2)
+
+void PositionalAttr::open_mv_fwd(const std::string& base, bool preload) {
+    std::string fwd_idx_path = base + ".mv.fwd.idx";
+    std::string fwd_path     = base + ".mv.fwd";
+
+    // Optional sidecar — silent no-op for older corpora (no file, or empty path).
+    // MmapFile::open throws on ENOENT; treat missing index as "no forward MV".
+    if (!fs::exists(fwd_idx_path)) return;
+
+    mv_fwd_idx_ = MmapFile::open(fwd_idx_path, preload);
+    if (!mv_fwd_idx_.valid()) return;
+
+    // Sanity: idx must be int64[corpus_size + 1].
+    size_t expected_idx_bytes =
+        (static_cast<size_t>(corpus_size_) + 1) * sizeof(int64_t);
+    if (mv_fwd_idx_.size() != expected_idx_bytes) {
+        // Reset and bail rather than crash — the corpus.info may be out of
+        // sync with files on disk; loaders should treat this as "no fwd".
+        mv_fwd_idx_ = MmapFile{};
+        throw std::runtime_error(
+            "Invalid .mv.fwd.idx size for " + base +
+            " (expected " + std::to_string(expected_idx_bytes) +
+            " bytes, got " + std::to_string(mv_fwd_idx_.size()) + ")");
+    }
+
+    mv_fwd_ = MmapFile::open(fwd_path, preload);
+
+    // Total elements = idx[corpus_size]. Detect width from .mv.fwd file size.
+    int64_t total = mv_fwd_idx_.as<int64_t>()[corpus_size_];
+    if (total > 0) {
+        if (!mv_fwd_.valid())
+            throw std::runtime_error(
+                ".mv.fwd missing but .mv.fwd.idx says non-empty for " + base);
+        size_t per = mv_fwd_.size() / static_cast<size_t>(total);
+        if (per != 2 && per != 4)
+            throw std::runtime_error(
+                "Invalid .mv.fwd element width (" + std::to_string(per) +
+                ") for " + base);
+        mv_fwd_width_ = static_cast<int>(per);
+    } else {
+        // Zero-entry case: .mv.fwd may be empty/absent — width is irrelevant.
+        mv_fwd_width_ = 4;
+    }
+}
+
+size_t PositionalAttr::mv_fwd_count_at(CorpusPos pos) const {
+    if (!has_mv_fwd()) return 0;
+    const auto* idx = mv_fwd_idx_.as<int64_t>();
+    return static_cast<size_t>(idx[pos + 1] - idx[pos]);
+}
+
+std::vector<LexiconId> PositionalAttr::mv_fwd_at(CorpusPos pos) const {
+    std::vector<LexiconId> out;
+    out.reserve(mv_fwd_count_at(pos));
+    for_each_mv_fwd_at(pos, [&](LexiconId id) {
+        out.push_back(id);
+        return true;
+    });
+    return out;
 }
 
 } // namespace manatree

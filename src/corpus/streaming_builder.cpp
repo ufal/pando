@@ -147,14 +147,56 @@ StreamingBuilder::AttrState::~AttrState() {
     if (dat_file) fclose(dat_file);
 }
 
+namespace {
+
+void merge_mv_gid(std::string& cell, const std::string& gid) {
+    if (gid.empty()) return;
+    if (cell.empty() || cell == "_") {
+        cell = gid;
+        return;
+    }
+    size_t start = 0;
+    while (start <= cell.size()) {
+        size_t p = cell.find('|', start);
+        size_t end = (p == std::string::npos) ? cell.size() : p;
+        if (end > start && cell.compare(start, end - start, gid) == 0) return;
+        if (p == std::string::npos) break;
+        start = p + 1;
+    }
+    cell += '|';
+    cell += gid;
+}
+
+} // namespace
+
 // ── StreamingBuilder lifecycle ──────────────────────────────────────────
 
-StreamingBuilder::StreamingBuilder(const std::string& output_dir)
-    : output_dir_(output_dir) {
+StreamingBuilder::StreamingBuilder(const std::string& output_dir, bool overlay_standoff_only)
+    : output_dir_(output_dir), overlay_standoff_only_(overlay_standoff_only) {
     fs::create_directories(output_dir);
-    sent_rgn_file_ = fopen((output_dir + "/s.rgn").c_str(), "wb");
-    if (!sent_rgn_file_)
-        throw std::runtime_error("Cannot create " + output_dir + "/s.rgn");
+    if (!overlay_standoff_only_) {
+        sent_rgn_file_ = fopen((output_dir + "/s.rgn").c_str(), "wb");
+        if (!sent_rgn_file_)
+            throw std::runtime_error("Cannot create " + output_dir + "/s.rgn");
+    }
+}
+
+void StreamingBuilder::bootstrap_overlay_corpus_size(CorpusPos n) {
+    if (!overlay_standoff_only_)
+        throw std::runtime_error("bootstrap_overlay_corpus_size: not in overlay standoff mode");
+    if (finalized_)
+        throw std::logic_error("bootstrap_overlay_corpus_size called after finalize");
+    if (n == 0)
+        throw std::runtime_error("bootstrap_overlay_corpus_size: size must be > 0");
+    corpus_size_ = n;
+    for (const auto& name : token_group_standoff_memory_attrs_) {
+        ensure_memory_attr(name);
+        auto& col = token_group_memory_column_[name];
+        col.assign(static_cast<size_t>(n), "_");
+        auto it = attrs_.find(name);
+        if (it != attrs_.end())
+            it->second->written = n;
+    }
 }
 
 StreamingBuilder::~StreamingBuilder() {
@@ -162,12 +204,45 @@ StreamingBuilder::~StreamingBuilder() {
     if (dep_euler_in_file_)  fclose(dep_euler_in_file_);
     if (dep_euler_out_file_) fclose(dep_euler_out_file_);
     if (sent_rgn_file_)      fclose(sent_rgn_file_);
+    if (group_table_file_)   fclose(group_table_file_);
 }
 
 // ── Attribute management ────────────────────────────────────────────────
 
+void StreamingBuilder::declare_token_group_layer(
+        const std::string& struct_name,
+        const std::string& membership_attr,
+        const std::vector<std::string>& prop_attr_keys) {
+    token_group_struct_.insert(struct_name);
+    token_group_membership_attr_[struct_name] = membership_attr;
+    token_group_membership_attrs_.insert(membership_attr);
+    token_group_standoff_memory_attrs_.insert(membership_attr);
+    token_group_prop_attrs_[struct_name] = prop_attr_keys;
+    for (const auto& pk : prop_attr_keys) {
+        if (pk.empty() || pk == "id" || pk == "group_id") continue;
+        token_group_standoff_memory_attrs_.insert(struct_name + "_" + pk);
+    }
+}
+
+void StreamingBuilder::ensure_memory_attr(const std::string& name) {
+    if (attr_set_.count(name)) return;
+    attr_set_.insert(name);
+    attr_order_.push_back(name);
+
+    auto state = std::make_unique<AttrState>();
+    state->memory_strings = &token_group_memory_column_[name];
+    state->str_to_id.reserve(256);
+    state->id_to_str.reserve(256);
+
+    attrs_[name] = std::move(state);
+}
+
 void StreamingBuilder::ensure_attr(const std::string& name) {
     if (attr_set_.count(name)) return;
+    if (token_group_standoff_memory_attrs_.count(name)) {
+        ensure_memory_attr(name);
+        return;
+    }
     attr_set_.insert(name);
     attr_order_.push_back(name);
 
@@ -186,6 +261,13 @@ void StreamingBuilder::ensure_attr(const std::string& name) {
 }
 
 void StreamingBuilder::backfill_attr(AttrState& state) {
+    if (state.memory_strings) {
+        while (state.memory_strings->size() < static_cast<size_t>(corpus_size_)) {
+            state.memory_strings->push_back("_");
+            ++state.written;
+        }
+        return;
+    }
     if (state.written >= corpus_size_) return;
     int32_t placeholder = state.get_or_assign("_");
     CorpusPos gap = corpus_size_ - state.written;
@@ -238,18 +320,28 @@ void StreamingBuilder::add_token(
     for (const auto& [name, value] : attrs) {
         auto& state = *attrs_[name];
         backfill_attr(state);
-        int32_t id = state.get_or_assign(value);
-        fwrite(&id, sizeof(int32_t), 1, state.dat_file);
-        ++state.written;
+        if (state.memory_strings) {
+            state.memory_strings->push_back(value.empty() ? "_" : value);
+            ++state.written;
+        } else {
+            int32_t id = state.get_or_assign(value);
+            fwrite(&id, sizeof(int32_t), 1, state.dat_file);
+            ++state.written;
+        }
     }
 
     // Write placeholder "_" for attributes NOT in this token (fast path)
     for (auto& [name, state] : attrs_) {
         if (state->written > corpus_size_) continue;  // already written above
         backfill_attr(*state);
-        int32_t id = state->get_placeholder();
-        fwrite(&id, sizeof(int32_t), 1, state->dat_file);
-        ++state->written;
+        if (state->memory_strings) {
+            state->memory_strings->push_back("_");
+            ++state->written;
+        } else {
+            int32_t id = state->get_placeholder();
+            fwrite(&id, sizeof(int32_t), 1, state->dat_file);
+            ++state->written;
+        }
     }
 
     sent_buf_.push_back({sentence_head_id});
@@ -400,6 +492,206 @@ void StreamingBuilder::add_region(const std::string& type,
     region_values_[type].push_back(value);
 }
 
+namespace {
+
+std::string json_escape_attr(const std::string& s) {
+    std::string o;
+    o.reserve(s.size() + 8);
+    for (char c : s) {
+        if (c == '"' || c == '\\') o += '\\';
+        o += c;
+    }
+    return o;
+}
+
+} // namespace
+
+void StreamingBuilder::append_group_table_row(
+        const std::string& struct_name,
+        const std::string& group_id,
+        const std::vector<std::pair<std::string, std::string>>& attrs) {
+    std::string key;
+    key.reserve(struct_name.size() + 1 + group_id.size());
+    key = struct_name;
+    key.push_back('\0');
+    key += group_id;
+    if (!group_table_row_keys_.insert(std::move(key)).second)
+        return;
+
+    if (!group_table_file_) {
+        std::string path = output_dir_ + "/group_table.jsonl";
+        group_table_file_ = fopen(path.c_str(), "wb");
+        if (!group_table_file_)
+            throw std::runtime_error("Cannot create " + path);
+    }
+    std::string line = "{\"struct\":\"" + json_escape_attr(struct_name) + "\",\"id\":\""
+                       + json_escape_attr(group_id) + "\"";
+    for (const auto& kv : attrs) {
+        if (kv.first == "id" || kv.first == "group_id") continue;
+        line += ",\"" + json_escape_attr(kv.first) + "\":\"" + json_escape_attr(kv.second) + "\"";
+    }
+    line += "}\n";
+    fwrite(line.data(), 1, line.size(), group_table_file_);
+}
+
+// Phase A: emit `groups/<struct>.jsonl`, one record per group, sorted by
+// (first_pos, gid) for deterministic doc-order iteration. Each record carries
+// the envelope, the list of sub-spans in the order they were emitted, and the
+// declared prop attrs captured from the original annotation events.
+void StreamingBuilder::write_token_group_indexes() {
+    if (token_group_records_.empty()) return;
+    fs::create_directories(output_dir_ + "/groups");
+    for (auto& kv : token_group_records_) {
+        const std::string& sname = kv.first;
+        std::vector<GroupRecord>& records = kv.second;
+        if (records.empty()) continue;
+        auto* rec_ptr = &records;
+        std::vector<size_t> perm(records.size());
+        std::iota(perm.begin(), perm.end(), size_t(0));
+        std::sort(perm.begin(), perm.end(), [rec_ptr](size_t a, size_t b) {
+            const auto& rs = *rec_ptr;
+            if (rs[a].first_pos != rs[b].first_pos)
+                return rs[a].first_pos < rs[b].first_pos;
+            return rs[a].gid < rs[b].gid;
+        });
+        std::string path = output_dir_ + "/groups/" + sname + ".jsonl";
+        FILE* f = fopen(path.c_str(), "wb");
+        if (!f) throw std::runtime_error("Cannot create " + path);
+        for (size_t i : perm) {
+            const GroupRecord& r = records[i];
+            std::string line = "{\"gid\":\"" + json_escape_attr(r.gid) + "\"";
+            line += ",\"first\":" + std::to_string(r.first_pos);
+            line += ",\"last\":"  + std::to_string(r.last_pos);
+            line += ",\"spans\":[";
+            for (size_t k = 0; k < r.spans.size(); ++k) {
+                if (k) line += ",";
+                line += "[" + std::to_string(r.spans[k].first) + ","
+                            + std::to_string(r.spans[k].second) + "]";
+            }
+            line += "]";
+            if (!r.props.empty()) {
+                line += ",\"props\":{";
+                for (size_t k = 0; k < r.props.size(); ++k) {
+                    if (k) line += ",";
+                    line += "\"" + json_escape_attr(r.props[k].first) + "\":\""
+                                 + json_escape_attr(r.props[k].second) + "\"";
+                }
+                line += "}";
+            }
+            line += "}\n";
+            fwrite(line.data(), 1, line.size(), f);
+        }
+        fclose(f);
+        std::cerr << "  wrote " << records.size() << " token-group records for "
+                  << sname << " -> groups/" << sname << ".jsonl\n";
+    }
+}
+
+void StreamingBuilder::apply_token_group_annotation(
+        const std::string& struct_name,
+        CorpusPos start,
+        CorpusPos end,
+        const std::vector<std::pair<std::string, std::string>>& attrs) {
+    auto it_m = token_group_membership_attr_.find(struct_name);
+    if (it_m == token_group_membership_attr_.end()) return;
+    if (corpus_size_ == 0 || start > end) return;
+    if (start >= corpus_size_ || end >= corpus_size_) {
+        static bool warned_oor = false;
+        if (!warned_oor) {
+            std::cerr << "Warning: token-group '" << struct_name
+                      << "' annotation refers to positions [" << start << ".." << end
+                      << "] beyond current corpus size (" << corpus_size_
+                      << "); annotation dropped. Further occurrences will be silenced.\n";
+            warned_oor = true;
+        }
+        if (start >= corpus_size_) return;
+        if (end >= corpus_size_) end = corpus_size_ - 1;
+    }
+
+    std::string gid;
+    for (const auto& kv : attrs) {
+        if (kv.first == "id" || kv.first == "group_id") {
+            gid = kv.second;
+            break;
+        }
+    }
+    if (gid.empty()) {
+        static bool warned_no_gid = false;
+        if (!warned_no_gid) {
+            std::cerr << "Warning: token-group '" << struct_name
+                      << "' annotation has no 'id'/'group_id' attribute; annotation dropped. "
+                         "Further occurrences will be silenced.\n";
+            warned_no_gid = true;
+        }
+        return;
+    }
+
+    const std::string& memb = it_m->second;
+    ensure_memory_attr(memb);
+    auto& col = token_group_memory_column_[memb];
+    if (col.size() < static_cast<size_t>(corpus_size_))
+        col.resize(static_cast<size_t>(corpus_size_), "_");
+
+    for (CorpusPos p = start; p <= end; ++p)
+        merge_mv_gid(col[static_cast<size_t>(p)], gid);
+
+    auto it_prop = token_group_prop_attrs_.find(struct_name);
+    if (it_prop != token_group_prop_attrs_.end()) {
+        for (const std::string& pk : it_prop->second) {
+            if (pk.empty() || pk == "id" || pk == "group_id") continue;
+            std::string v;
+            for (const auto& kv : attrs) {
+                if (kv.first == pk) {
+                    v = kv.second;
+                    break;
+                }
+            }
+            if (v.empty()) continue;
+            const std::string col_name = struct_name + "_" + pk;
+            ensure_memory_attr(col_name);
+            auto& pcol = token_group_memory_column_[col_name];
+            if (pcol.size() < static_cast<size_t>(corpus_size_))
+                pcol.resize(static_cast<size_t>(corpus_size_), "_");
+            for (CorpusPos p = start; p <= end; ++p)
+                merge_mv_gid(pcol[static_cast<size_t>(p)], v);
+        }
+    }
+
+    append_group_table_row(struct_name, gid, attrs);
+
+    // Phase A: per-group record (envelope + sub-spans + prop attrs), used by
+    // write_token_group_indexes() at finalize to emit groups/<struct>.jsonl.
+    {
+        auto& idx_map = token_group_record_idx_[struct_name];
+        auto& records = token_group_records_[struct_name];
+        size_t ridx;
+        auto rit = idx_map.find(gid);
+        if (rit == idx_map.end()) {
+            ridx = records.size();
+            idx_map.emplace(gid, ridx);
+            records.emplace_back();
+            records.back().gid = gid;
+        } else {
+            ridx = rit->second;
+        }
+        GroupRecord& rec = records[ridx];
+        rec.spans.emplace_back(start, end);
+        if (start < rec.first_pos) rec.first_pos = start;
+        if (end   > rec.last_pos)  rec.last_pos  = end;
+        if (it_prop != token_group_prop_attrs_.end() && rec.props.empty()) {
+            for (const std::string& pk : it_prop->second) {
+                if (pk.empty() || pk == "id" || pk == "group_id") continue;
+                for (const auto& kv : attrs) {
+                    if (kv.first == pk) {
+                        rec.props.emplace_back(pk, kv.second);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
 void StreamingBuilder::add_region(const std::string& type,
                                   CorpusPos start, CorpusPos end,
                                   const std::vector<std::pair<std::string, std::string>>& attrs) {
@@ -443,8 +735,17 @@ void StreamingBuilder::finalize() {
     // Close streaming files
     for (auto& [name, state] : attrs_) {
         backfill_attr(*state);
-        if (state->dat_file) { fclose(state->dat_file); state->dat_file = nullptr; }
+        if (state->dat_file) {
+            fclose(state->dat_file);
+            state->dat_file = nullptr;
+        }
     }
+    if (group_table_file_) {
+        fclose(group_table_file_);
+        group_table_file_ = nullptr;
+    }
+    // Phase A: emit per-struct sidecar listing every group's sub-spans + props.
+    write_token_group_indexes();
     if (dep_head_file_)      { fclose(dep_head_file_);      dep_head_file_ = nullptr; }
     if (dep_euler_in_file_)  { fclose(dep_euler_in_file_);  dep_euler_in_file_ = nullptr; }
     if (dep_euler_out_file_) { fclose(dep_euler_out_file_); dep_euler_out_file_ = nullptr; }
@@ -477,16 +778,19 @@ void StreamingBuilder::finalize() {
     // Collect region_attrs for corpus.info (#8)
     std::vector<std::string> region_attrs_list;
 
-    // Sentence structural attributes (s_<name>.val), parallel to s.rgn
+    // Sentence structural attributes (s_<name>.val), parallel to s.rgn.
+    // Overlay-only builds never write s.rgn, so skip the consistency probe.
     {
-        FILE* probe = fopen((output_dir_ + "/s.rgn").c_str(), "rb");
-        if (probe) {
-            fseek(probe, 0, SEEK_END);
-            long sz = ftell(probe);
-            fclose(probe);
-            size_t n_sents = (sz > 0) ? static_cast<size_t>(sz) / sizeof(Region) : 0;
-            if (n_sents != sentence_region_attr_rows_.size())
-                throw std::runtime_error("s.rgn / sentence_region_attr_rows_ size mismatch");
+        if (!overlay_standoff_only_) {
+            FILE* probe = fopen((output_dir_ + "/s.rgn").c_str(), "rb");
+            if (probe) {
+                fseek(probe, 0, SEEK_END);
+                long sz = ftell(probe);
+                fclose(probe);
+                size_t n_sents = (sz > 0) ? static_cast<size_t>(sz) / sizeof(Region) : 0;
+                if (n_sents != sentence_region_attr_rows_.size())
+                    throw std::runtime_error("s.rgn / sentence_region_attr_rows_ size mismatch");
+            }
         }
         if (!sentence_region_attr_rows_.empty()) {
             std::unordered_set<std::string> sent_attr_keys;
@@ -621,7 +925,8 @@ void StreamingBuilder::finalize() {
         info << "\n";
 
         std::vector<std::string> structs;
-        structs.push_back("s");
+        if (!overlay_standoff_only_)
+            structs.push_back("s");
         for (const auto& s : struct_set_)
             if (s != "s") structs.push_back(s);
         std::sort(structs.begin(), structs.end());
@@ -693,6 +998,16 @@ void StreamingBuilder::finalize() {
             }
             info << "\n";
         }
+        if (!token_group_struct_.empty()) {
+            std::vector<std::string> tg(token_group_struct_.begin(), token_group_struct_.end());
+            std::sort(tg.begin(), tg.end());
+            info << "token_groups=";
+            for (size_t i = 0; i < tg.size(); ++i) {
+                if (i > 0) info << ",";
+                info << tg[i];
+            }
+            info << "\n";
+        }
     }
 
     // SM-ROAD-6: Warn when non-flat geometry is detected but the corpus header did not
@@ -725,6 +1040,25 @@ void StreamingBuilder::finalize() {
 void StreamingBuilder::finalize_attribute(const std::string& name,
                                           AttrState& state) {
     std::string base = output_dir_ + "/" + name;
+
+    if (state.memory_strings) {
+        if (static_cast<CorpusPos>(state.memory_strings->size()) != corpus_size_)
+            throw std::runtime_error("standoff memory column '" + name + "' size mismatch");
+        state.str_to_id.clear();
+        state.id_to_str.clear();
+        state.placeholder_id = -1;
+        for (const auto& s : *state.memory_strings)
+            state.get_or_assign(s);
+        FILE* raw = fopen((base + ".dat").c_str(), "wb");
+        if (!raw) throw std::runtime_error("Cannot create " + base + ".dat");
+        for (const auto& s : *state.memory_strings) {
+            int32_t id = state.str_to_id.at(s);
+            fwrite(&id, sizeof(int32_t), 1, raw);
+        }
+        fclose(raw);
+        state.memory_strings = nullptr;
+    }
+
     int32_t lex_size = static_cast<int32_t>(state.id_to_str.size());
 
     // Choose optimal .dat width based on vocabulary size
@@ -774,8 +1108,12 @@ void StreamingBuilder::finalize_attribute(const std::string& name,
     build_reverse_index(base, lex_size, rev_width);
 
     // 5. RG-5f: Build MV (multivalue) component reverse index if this attr is MV
-    if (declared_multivalue_.count(name))
+    if (declared_multivalue_.count(name)) {
         build_mv_reverse_index(base, lex_size, rev_width);
+        // Stage 1 of PANDO-MULTIVALUE-FIELDS: forward MV index .mv.fwd / .mv.fwd.idx
+        // Built unconditionally for any multivalue= attr; spec dev/PANDO-MVAL-FORMAT.md (v0.2)
+        build_mv_forward_index(base, lex_size);
+    }
 }
 
 // ── remap_dat: read temp IDs, apply remap, write final IDs ─────────────
@@ -1000,7 +1338,23 @@ void StreamingBuilder::build_mv_reverse_index(const std::string& base,
         }
     }
 
-    if (comp_set.empty()) return;  // no compounds found
+    // Scalar multivalue (no '|' in any lex string): treat each distinct non-empty
+    // string as its own MV component. Needed for TEITOK-style standoff group ids
+    // (e.g. err_gid) and any MV attr whose joined values are single tokens.
+    if (comp_set.empty()) {
+        for (int32_t id = 0; id < lex_size; ++id) {
+            int64_t a = loff[id];
+            int64_t b = loff[id + 1];
+            std::string_view sv(lbase + a, static_cast<size_t>(b - a));
+            if (!sv.empty() && sv.back() == '\0') sv.remove_suffix(1);
+            if (sv.empty()) continue;
+            std::string s(sv);
+            comp_set.insert(s);
+            orig_to_comps[static_cast<size_t>(id)].push_back(std::move(s));
+        }
+    }
+
+    if (comp_set.empty()) return;  // no MV components at all
 
     // Also add non-compound entries as components of themselves — positions with
     // a single value "artist" (no pipe) should still be findable via the MV index.
@@ -1170,6 +1524,229 @@ void StreamingBuilder::build_mv_reverse_index(const std::string& base,
 
     std::cerr << "    mv_reverse: " << mv_lex_size << " components, "
               << total_pos << " entries\n";
+}
+
+// ── build_mv_forward_index: position → sorted set of MV component lex ids ──
+//
+// Stage 1 of PANDO-MULTIVALUE-FIELDS, spec dev/PANDO-MVAL-FORMAT.md (v0.2).
+//
+// Writes:
+//   .mv.fwd      — packed MV component ids per position (int16 if mv_lex_size
+//                  ≤ INT16_MAX, else int32). Sorted ascending, deduplicated.
+//   .mv.fwd.idx  — int64[corpus_size+1] element offsets into .mv.fwd.
+//                  idx[p+1] - idx[p] is the cardinality at position p.
+//
+// Self-contained: re-parses base.mv.lex (just written by build_mv_reverse_index)
+// + base.lex to rebuild orig_lex_id → sorted unique mv_lex_ids, then does a
+// two-pass scan over .dat to write the forward index. The .lex re-parse is
+// cheap relative to the .dat scan, and avoids any surgery on the existing
+// reverse-index function.
+//
+// Empty / scalar-only attrs: if no joined string contains '|', .mv.fwd is
+// zero-length and .mv.fwd.idx is filled with zeros (zero-length runs).
+void StreamingBuilder::build_mv_forward_index(const std::string& base,
+                                              int32_t lex_size) {
+    // 1. Read .mv.lex (sorted MV components) to build component → mv_id map.
+    // build_mv_reverse_index may skip writing these files (no MV components);
+    // MmapFile::open throws on ENOENT — check first.
+    if (!fs::exists(base + ".mv.lex") || !fs::exists(base + ".mv.lex.idx")) {
+        std::vector<int64_t> empty_idx(static_cast<size_t>(corpus_size_) + 1, 0);
+        write_vec(base + ".mv.fwd.idx", empty_idx);
+        write_file(base + ".mv.fwd", nullptr, 0);
+        return;
+    }
+    MmapFile mv_lex_data = MmapFile::open(base + ".mv.lex", false);
+    MmapFile mv_lex_idx  = MmapFile::open(base + ".mv.lex.idx", false);
+    if (!mv_lex_data.valid() || !mv_lex_idx.valid()) {
+        // No reverse index was written (no compounds at all): write empty
+        // forward index so loaders see has_mv_fwd() == true with zero entries.
+        std::vector<int64_t> empty_idx(static_cast<size_t>(corpus_size_) + 1, 0);
+        write_vec(base + ".mv.fwd.idx", empty_idx);
+        write_file(base + ".mv.fwd", nullptr, 0);
+        return;
+    }
+
+    const int64_t* mv_off = mv_lex_idx.as<int64_t>();
+    size_t n_mv_idx = mv_lex_idx.count<int64_t>();
+    if (n_mv_idx < 2) {
+        std::vector<int64_t> empty_idx(static_cast<size_t>(corpus_size_) + 1, 0);
+        write_vec(base + ".mv.fwd.idx", empty_idx);
+        write_file(base + ".mv.fwd", nullptr, 0);
+        return;
+    }
+    int32_t mv_lex_size = static_cast<int32_t>(n_mv_idx - 1);
+    const char* mv_base = static_cast<const char*>(mv_lex_data.data());
+
+    std::unordered_map<std::string, int32_t> comp_to_mvid;
+    comp_to_mvid.reserve(static_cast<size_t>(mv_lex_size));
+    for (int32_t i = 0; i < mv_lex_size; ++i) {
+        int64_t a = mv_off[i];
+        int64_t b = mv_off[i + 1];
+        std::string_view sv(mv_base + a, static_cast<size_t>(b - a));
+        if (!sv.empty() && sv.back() == '\0') sv.remove_suffix(1);
+        comp_to_mvid.emplace(std::string(sv), i);
+    }
+
+    // 2. Read .lex and build orig_lex_id → sorted unique mv_ids.
+    MmapFile lex_data = MmapFile::open(base + ".lex", false);
+    MmapFile lex_idx  = MmapFile::open(base + ".lex.idx", false);
+    if (!lex_data.valid() || !lex_idx.valid())
+        throw std::runtime_error("build_mv_forward_index: missing .lex for " + base);
+
+    const int64_t* loff = lex_idx.as<int64_t>();
+    const char* lbase = static_cast<const char*>(lex_data.data());
+
+    // For every joined-string lex id, what sorted set of mv ids does it map to?
+    std::vector<std::vector<int32_t>> orig_to_mvids(static_cast<size_t>(lex_size));
+    for (int32_t id = 0; id < lex_size; ++id) {
+        int64_t a = loff[id];
+        int64_t b = loff[id + 1];
+        std::string_view sv(lbase + a, static_cast<size_t>(b - a));
+        if (!sv.empty() && sv.back() == '\0') sv.remove_suffix(1);
+
+        auto& bucket = orig_to_mvids[static_cast<size_t>(id)];
+
+        if (sv.find('|') == std::string_view::npos) {
+            // Single value: only included in MV view if it also appears as
+            // a component of some compound (matches reverse-index policy).
+            std::string s(sv);
+            auto it = comp_to_mvid.find(s);
+            if (it != comp_to_mvid.end()) bucket.push_back(it->second);
+        } else {
+            size_t start = 0;
+            while (start < sv.size()) {
+                size_t p = sv.find('|', start);
+                if (p == std::string_view::npos) p = sv.size();
+                std::string comp(sv.substr(start, p - start));
+                if (!comp.empty()) {
+                    auto it = comp_to_mvid.find(comp);
+                    if (it != comp_to_mvid.end())
+                        bucket.push_back(it->second);
+                }
+                start = p + 1;
+            }
+            // Sort + dedup so per-position payload satisfies the spec's
+            // "strictly sorted, no duplicates" invariant.
+            std::sort(bucket.begin(), bucket.end());
+            bucket.erase(std::unique(bucket.begin(), bucket.end()), bucket.end());
+        }
+    }
+
+    // 3. Determine .dat element width (same probe shape as build_mv_reverse_index).
+    std::string dat_path = base + ".dat";
+    int dat_width = 4;
+    {
+        FILE* probe = fopen(dat_path.c_str(), "rb");
+        if (!probe) throw std::runtime_error("Cannot open " + dat_path);
+        fseek(probe, 0, SEEK_END);
+        long fsize = ftell(probe);
+        fclose(probe);
+        if (corpus_size_ > 0)
+            dat_width = static_cast<int>(static_cast<size_t>(fsize) /
+                                         static_cast<size_t>(corpus_size_));
+    }
+
+    // 4. Pass 1 over .dat: build .mv.fwd.idx (cumulative counts).
+    //    fwd_idx[p+1] - fwd_idx[p] == cardinality at position p.
+    std::vector<int64_t> fwd_idx(static_cast<size_t>(corpus_size_) + 1, 0);
+
+    FILE* dat = fopen(dat_path.c_str(), "rb");
+    if (!dat) throw std::runtime_error("Cannot open " + dat_path);
+
+    auto count_id = [&](size_t orig_id, CorpusPos pos) {
+        fwd_idx[static_cast<size_t>(pos) + 1] =
+            static_cast<int64_t>(orig_to_mvids[orig_id].size());
+    };
+
+    size_t nread;
+    CorpusPos pos = 0;
+    if (dat_width == 1) {
+        std::vector<uint8_t> buf(IO_CHUNK);
+        while ((nread = fread(buf.data(), 1, IO_CHUNK, dat)) > 0)
+            for (size_t i = 0; i < nread; ++i) count_id(buf[i], pos++);
+    } else if (dat_width == 2) {
+        std::vector<uint16_t> buf(IO_CHUNK);
+        while ((nread = fread(buf.data(), 2, IO_CHUNK, dat)) > 0)
+            for (size_t i = 0; i < nread; ++i) count_id(buf[i], pos++);
+    } else {
+        std::vector<int32_t> buf(IO_CHUNK);
+        while ((nread = fread(buf.data(), sizeof(int32_t), IO_CHUNK, dat)) > 0)
+            for (size_t i = 0; i < nread; ++i)
+                count_id(static_cast<size_t>(buf[i]), pos++);
+    }
+
+    // Cumulative sum → element offsets.
+    for (size_t i = 1; i < fwd_idx.size(); ++i)
+        fwd_idx[i] += fwd_idx[i - 1];
+
+    int64_t total = fwd_idx.back();
+    write_vec(base + ".mv.fwd.idx", fwd_idx);
+
+    // 5. Choose forward element width based on mv_lex_size.
+    //    int16 if all ids fit, else int32. Bounded by int32 lex space.
+    int fwd_width = (mv_lex_size <= INT16_MAX) ? 2 : 4;
+
+    if (total == 0) {
+        fclose(dat);
+        write_file(base + ".mv.fwd", nullptr, 0);
+        std::cerr << "    mv_forward: 0 entries (width=" << fwd_width << ")\n";
+        return;
+    }
+
+    // 6. Pass 2 over .dat: fill .mv.fwd via writable mmap.
+    size_t fwd_bytes = static_cast<size_t>(total) * static_cast<size_t>(fwd_width);
+    std::string fwd_path = base + ".mv.fwd";
+    int fd = ::open(fwd_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) throw std::runtime_error("Cannot create " + fwd_path);
+    if (ftruncate(fd, static_cast<off_t>(fwd_bytes)) != 0) {
+        ::close(fd);
+        throw std::runtime_error("Cannot set size of " + fwd_path);
+    }
+    void* fwd_raw = mmap(nullptr, fwd_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (fwd_raw == MAP_FAILED) {
+        ::close(fd);
+        throw std::runtime_error("Cannot mmap " + fwd_path + " for writing");
+    }
+
+    auto write_at = [&](int64_t element_idx, int32_t mvid) {
+        if (fwd_width == 2)
+            static_cast<int16_t*>(fwd_raw)[element_idx] = static_cast<int16_t>(mvid);
+        else
+            static_cast<int32_t*>(fwd_raw)[element_idx] = static_cast<int32_t>(mvid);
+    };
+
+    rewind(dat);
+    pos = 0;
+    auto fill_id = [&](size_t orig_id, CorpusPos p) {
+        int64_t off = fwd_idx[static_cast<size_t>(p)];
+        const auto& mvids = orig_to_mvids[orig_id];
+        // mvids are already sorted+deduped from step 2.
+        for (size_t i = 0; i < mvids.size(); ++i)
+            write_at(off + static_cast<int64_t>(i), mvids[i]);
+    };
+
+    if (dat_width == 1) {
+        std::vector<uint8_t> buf(IO_CHUNK);
+        while ((nread = fread(buf.data(), 1, IO_CHUNK, dat)) > 0)
+            for (size_t i = 0; i < nread; ++i) fill_id(buf[i], pos++);
+    } else if (dat_width == 2) {
+        std::vector<uint16_t> buf(IO_CHUNK);
+        while ((nread = fread(buf.data(), 2, IO_CHUNK, dat)) > 0)
+            for (size_t i = 0; i < nread; ++i) fill_id(buf[i], pos++);
+    } else {
+        std::vector<int32_t> buf(IO_CHUNK);
+        while ((nread = fread(buf.data(), sizeof(int32_t), IO_CHUNK, dat)) > 0)
+            for (size_t i = 0; i < nread; ++i)
+                fill_id(static_cast<size_t>(buf[i]), pos++);
+    }
+
+    msync(fwd_raw, fwd_bytes, MS_SYNC);
+    munmap(fwd_raw, fwd_bytes);
+    ::close(fd);
+    fclose(dat);
+
+    std::cerr << "    mv_forward: " << total << " entries, width=" << fwd_width
+              << "\n";
 }
 
 } // namespace manatree

@@ -85,12 +85,19 @@ struct Options {
     // Text hits: emit full sentence CoNLL-U (requires sentence structure `s` in the index)
     bool conllu = false;
     bool print_version = false;
+    /// Stand-off overlay index dirs (`pando-index --overlay-index`); merged with `overlay-<layer>-…` names.
+    std::vector<std::string> overlay_dirs;
     // Collocation settings (--window, --left, --right, --min-freq, --measures, --max-items)
     int coll_left = 5;
     int coll_right = 5;
     size_t coll_min_freq = 5;
     size_t coll_max_items = 50;
     std::vector<std::string> coll_measures;  // empty = default {"logdice"}
+    // RG-REG-5: named-region binding policy when an anchor position is contained in
+    // multiple candidate rows (nested/overlapping/zero-width). "fanout" (default)
+    // emits one match per candidate row (Cartesian across multiple anchors);
+    // "innermost" picks the tightest-enclosing row only. Flat types are unaffected.
+    std::string anchor_binding = "fanout";  // "fanout" | "innermost"
 };
 
 struct QueryTiming {
@@ -1669,6 +1676,9 @@ static void run_query(const Corpus& corpus, const std::string& input,
     }
 
     QueryExecutor executor(corpus);
+    executor.set_anchor_binding_mode(opts.anchor_binding == "innermost"
+                                     ? QueryExecutor::AnchorBindingMode::Innermost
+                                     : QueryExecutor::AnchorBindingMode::Fanout);
 
     for (size_t si = 0; si < prog.size(); ++si) {
         auto& stmt = prog[si];
@@ -1700,6 +1710,32 @@ static void run_query(const Corpus& corpus, const std::string& input,
                     aggregate_by = &ncmd.fields;
             }
 
+            // Resolve `<… > where MM, NN` references against the named match
+            // sets the session has accumulated. Each ref becomes a sorted vector
+            // of token positions; the executor's Phase B group handler ANDs them.
+            for (auto& tok : stmt.query.tokens) {
+                if (tok.where_refs.empty()) continue;
+                tok.where_positions.clear();
+                tok.where_positions.reserve(tok.where_refs.size());
+                for (const auto& ref : tok.where_refs) {
+                    auto it = session.named_results.find(ref);
+                    if (it == session.named_results.end())
+                        throw std::runtime_error("Unknown match set in `where`: '" + ref + "'");
+                    std::vector<CorpusPos> ps;
+                    for (const auto& m : it->second.matches) {
+                        auto mp = m.matched_positions();
+                        ps.insert(ps.end(), mp.begin(), mp.end());
+                    }
+                    std::sort(ps.begin(), ps.end());
+                    ps.erase(std::unique(ps.begin(), ps.end()), ps.end());
+                    tok.where_positions.push_back(std::move(ps));
+                }
+            }
+
+            // Refresh anchor-binding mode in case `set anchor-binding = …` was used.
+            executor.set_anchor_binding_mode(opts.anchor_binding == "innermost"
+                                             ? QueryExecutor::AnchorBindingMode::Innermost
+                                             : QueryExecutor::AnchorBindingMode::Fanout);
             auto t0 = std::chrono::high_resolution_clock::now();
             if (stmt.is_parallel) {
                 session.last_ms = executor.execute_parallel(stmt.query, stmt.target_query, max_m, count_t);
@@ -1735,19 +1771,25 @@ static void run_query(const Corpus& corpus, const std::string& input,
                     std::cout << session.last_ms.total_count << "\n";
                     return;
                 }
-                if (out_timing) {
-                    auto t2 = std::chrono::high_resolution_clock::now();
-                    if (opts.json)
-                        emit_json(corpus, input, session.last_ms, opts, query_ms);
-                    else
-                        emit_hits_text(corpus, input, session.last_ms, opts, query_ms);
-                    auto t3 = std::chrono::high_resolution_clock::now();
-                    out_timing->fetch_sec = std::chrono::duration<double, std::milli>(t3 - t2).count() / 1000.0;
-                } else {
-                    if (opts.json)
-                        emit_json(corpus, input, session.last_ms, opts, query_ms);
-                    else
-                        emit_hits_text(corpus, input, session.last_ms, opts, query_ms);
+                // `Name = …` binds a match set only; do not print concordance for that
+                // statement (CQP-style). Otherwise `MM = [lemma="over"]; <err> where MM;`
+                // shows two lines: the token query hit and the group query hit.
+                if (stmt.name.empty()) {
+                    if (out_timing) {
+                        auto t2 = std::chrono::high_resolution_clock::now();
+                        if (opts.json)
+                            emit_json(corpus, input, session.last_ms, opts, query_ms);
+                        else
+                            emit_hits_text(corpus, input, session.last_ms, opts, query_ms);
+                        auto t3 = std::chrono::high_resolution_clock::now();
+                        out_timing->fetch_sec =
+                            std::chrono::duration<double, std::milli>(t3 - t2).count() / 1000.0;
+                    } else {
+                        if (opts.json)
+                            emit_json(corpus, input, session.last_ms, opts, query_ms);
+                        else
+                            emit_hits_text(corpus, input, session.last_ms, opts, query_ms);
+                    }
                 }
             }
         }
@@ -1821,6 +1863,13 @@ static void run_query(const Corpus& corpus, const std::string& input,
                 else if (name == "debug")     to_int(opts.debug_level);
                 else if (name == "threads")   { int t; to_int(t); opts.threads = static_cast<unsigned>(t); }
                 else if (name == "sample")    to_size(opts.sample);
+                else if (name == "anchor-binding" || name == "anchor_binding") {
+                    if (val != "fanout" && val != "innermost") {
+                        std::cerr << "anchor-binding must be 'fanout' or 'innermost'\n";
+                        continue;
+                    }
+                    opts.anchor_binding = val;
+                }
                 else {
                     std::cerr << "Unknown setting: " << name << "\n";
                     continue;
@@ -2348,8 +2397,16 @@ static Options parse_args(int argc, char* argv[]) {
         else if (arg == "--version" || arg == "-V") {
             opts.print_version = true;
         }
-                else if (arg == "--preload") { opts.preload = true; }
+                else if (arg == "--overlay" && i + 1 < argc) { opts.overlay_dirs.push_back(argv[++i]); }
+        else if (arg == "--preload") { opts.preload = true; }
         else if (arg == "--no-mv-explode") { opts.no_mv_explode = true; }
+        else if (arg == "--anchor-binding" && i + 1 < argc) {
+            std::string v = argv[++i];
+            if (v != "fanout" && v != "innermost") {
+                throw std::runtime_error("--anchor-binding must be 'fanout' or 'innermost'");
+            }
+            opts.anchor_binding = std::move(v);
+        }
         else if (arg == "--max-gap" && i + 1 < argc) { opts.max_gap = std::stoi(argv[++i]); }
         else if (arg == "--strict-quoted-strings") { opts.strict_quoted_strings = true; }
         else if (arg == "--window" && i + 1 < argc) {
@@ -2437,6 +2494,7 @@ static Options parse_args(int argc, char* argv[]) {
                   << "  --sample N       Return N randomly sampled matches (reservoir sampling)\n"
                   << "  --seed N         RNG seed for --sample (reproducible runs)\n"
                   << "  --threads N      Parallel seed processing for multi-token queries (default: 1)\n"
+                  << "  --overlay DIR    Merge stand-off overlay index (repeatable); attrs are overlay-<layer>-…\n"
                   << "  --max-gap N      Cap for + and * quantifiers (default: " << REPEAT_UNBOUNDED << ")\n"
                   << "  --strict-quoted-strings  Only /pattern/ is regex; quoted strings are always literal\n"
                   << "  --no-mv-explode  count/freq: keep pipe-joined multivalue keys (no per-component buckets)\n"
@@ -2534,12 +2592,13 @@ int main(int argc, char* argv[]) {
     Corpus corpus;
     try {
         auto t_open0 = std::chrono::high_resolution_clock::now();
-        corpus.open(opts.corpus_dir, opts.preload);
+        corpus.open(opts.corpus_dir, opts.preload, opts.overlay_dirs);
         if (opts.timing)
             timing.open_sec = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - t_open0).count();
         if (opts.debug_level > 0)
             std::cerr << "Corpus loaded: " << corpus.size() << " tokens, "
-                      << corpus.attr_names().size() << " attributes\n";
+                      << corpus.attr_names().size() << " attributes"
+                      << (opts.overlay_dirs.empty() ? "" : " (with overlay(s))") << "\n";
     } catch (const std::exception& e) {
         if (opts.json || opts.api) {
             std::cout << "{\"ok\": false, \"error\": {\"stage\": \"open\", \"message\": "
