@@ -430,10 +430,27 @@ GroupCommand Parser::parse_command() {
     }
     else throw std::runtime_error("Unknown command: " + kw);
 
-    // Optional query name
-    if (lexer_.peek().type == TokType::IDENT && lexer_.peek().text != "by"
-        && lexer_.peek().text != "vs") {
+    // Optional query target(s). For `freq`, allow comma-separated names: freq Q1, Q2 by field
+    if (cmd.type == CommandType::FREQ && lexer_.peek().type == TokType::IDENT
+        && lexer_.peek().text != "by" && lexer_.peek().text != "vs") {
+        cmd.freq_query_names.push_back(lexer_.next().text);
+        while (lexer_.peek().type == TokType::COMMA) {
+            lexer_.consume();
+            cmd.freq_query_names.push_back(lexer_.expect(TokType::IDENT).text);
+        }
+    } else if (lexer_.peek().type == TokType::IDENT && lexer_.peek().text != "by"
+               && lexer_.peek().text != "vs") {
         cmd.query_name = lexer_.next().text;
+    }
+
+    // `count Q1, Q2 by ...` leaves a comma after the first name; `by` is never parsed (fields empty).
+    // Multi-query aggregation is only implemented for `freq Q1, Q2 by ...`.
+    if ((cmd.type == CommandType::COUNT || cmd.type == CommandType::GROUP
+         || cmd.type == CommandType::SORT)
+        && lexer_.peek().type == TokType::COMMA) {
+        throw std::runtime_error(
+            "multi-query count/group/sort is not supported; use `freq Q1, Q2 by <fields>` to "
+            "compare named queries, or run one command per query (e.g. `count Q1 by ...`).");
     }
 
     // keyness: optional "vs RefName"

@@ -68,6 +68,31 @@ std::vector<std::pair<std::string, size_t>> region_attr_show_values_mv(const Str
     return entries;
 }
 
+namespace {
+
+std::string corpus_json_name(const Corpus& corpus) {
+    std::string name = corpus.dir();
+    if (!name.empty() && name.back() == '/') name.pop_back();
+    auto slash = name.rfind('/');
+    if (slash != std::string::npos) name = name.substr(slash + 1);
+    if (name.size() > 4 && name.substr(name.size() - 4) == "_idx")
+        name.resize(name.size() - 4);
+    return name;
+}
+
+size_t region_attr_vocab(const Corpus& corpus,
+                         const StructuralAttr& sa,
+                         const std::string& struct_name,
+                         const std::string& rkey) {
+    const std::string composite = struct_name + "_" + rkey;
+    bool split_mv = corpus.is_multivalue(composite);
+    if (sa.has_region_value_reverse(rkey) && !split_mv)
+        return static_cast<size_t>(sa.region_attr_lex_size(rkey));
+    return region_attr_show_values_mv(sa, rkey, split_mv).size();
+}
+
+}  // namespace
+
 std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
                                             const std::string& query_text,
                                             const QueryOptions& opts) {
@@ -175,30 +200,74 @@ std::string to_query_result_json(const Corpus& corpus,
     return out.str();
 }
 
-std::string to_info_json(const Corpus& corpus) {
+std::string to_info_json(const Corpus& corpus, std::string_view operation) {
     std::ostringstream out;
-    out << "{\n  \"ok\": true,\n  \"operation\": \"info\",\n";
+    out << "{\n  \"ok\": true,\n  \"operation\": " << jstr(operation) << ",\n";
     out << "  \"result\": {\n";
-    out << "    \"size\": " << corpus.size() << ",\n";
+    out << "    \"name\": " << jstr(corpus_json_name(corpus)) << ",\n";
+    out << "    \"path\": " << jstr(corpus.dir()) << ",\n";
+    const CorpusPos ntok = corpus.size();
+    out << "    \"size\": " << ntok << ",\n";
+    out << "    \"tokens\": " << ntok << ",\n";
     out << "    \"has_deps\": " << (corpus.has_deps() ? "true" : "false") << ",\n";
     out << "    \"attributes\": [";
     const auto& names = corpus.attr_names();
     for (size_t i = 0; i < names.size(); ++i) {
         if (i > 0) out << ", ";
-        out << jstr(names[i]);
+        out << "{\"name\": " << jstr(names[i])
+            << ", \"vocab\": " << corpus.attr(names[i]).lexicon().size() << "}";
     }
     out << "],\n";
-    out << "    \"structures\": [";
+
     const auto& s_names = corpus.structure_names();
+    size_t total_regions = 0;
+    for (const auto& sn : s_names)
+        total_regions += corpus.structure(sn).region_count();
+
+    out << "    \"total_regions\": " << total_regions << ",\n";
+    out << "    \"structures\": [";
     for (size_t i = 0; i < s_names.size(); ++i) {
         if (i > 0) out << ", ";
-        const auto& sa = corpus.structure(s_names[i]);
-        out << "{\"name\": " << jstr(s_names[i])
-            << ", \"regions\": " << sa.region_count();
-        if (corpus.is_nested(s_names[i]))     out << ", \"nested\": true";
-        if (corpus.is_overlapping(s_names[i])) out << ", \"overlapping\": true";
-        if (corpus.is_zerowidth(s_names[i]))   out << ", \"zerowidth\": true";
+        const std::string& sn = s_names[i];
+        const auto& sa = corpus.structure(sn);
+        out << "{\"name\": " << jstr(sn)
+            << ", \"regions\": " << sa.region_count()
+            << ", \"has_values\": " << (sa.has_values() ? "true" : "false");
+        const auto& ra = sa.region_attr_names();
+        if (!ra.empty()) {
+            out << ", \"attrs\": [";
+            for (size_t j = 0; j < ra.size(); ++j) {
+                if (j > 0) out << ", ";
+                out << jstr(ra[j]);
+            }
+            out << "]";
+        }
+        out << ", \"region_attrs\": [";
+        for (size_t j = 0; j < ra.size(); ++j) {
+            if (j > 0) out << ", ";
+            out << "{\"name\": " << jstr(ra[j])
+                << ", \"vocab\": " << region_attr_vocab(corpus, sa, sn, ra[j]) << "}";
+        }
+        out << "]";
+        if (corpus.is_nested(sn))     out << ", \"nested\": true";
+        if (corpus.is_overlapping(sn)) out << ", \"overlapping\": true";
+        if (corpus.is_zerowidth(sn))   out << ", \"zerowidth\": true";
         out << "}";
+    }
+    out << "],\n";
+
+    out << "    \"region_attrs\": [";
+    const auto& flat_ra = corpus.region_attr_names();
+    for (size_t i = 0; i < flat_ra.size(); ++i) {
+        if (i > 0) out << ", ";
+        out << jstr(flat_ra[i]);
+    }
+    out << "],\n";
+    out << "    \"multivalue\": [";
+    const auto& mv = corpus.multivalue_attrs();
+    for (size_t i = 0; i < mv.size(); ++i) {
+        if (i > 0) out << ", ";
+        out << jstr(mv[i]);
     }
     out << "]\n  }\n}\n";
     return out.str();

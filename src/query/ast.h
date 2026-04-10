@@ -303,6 +303,7 @@ enum class CommandType {
 struct GroupCommand {
     CommandType type;
     std::string query_name;          // which named query to operate on
+    std::vector<std::string> query_names; // multiple named queries for comparison (freq Q1, Q2 by attr)
     std::vector<std::string> fields; // fields to group/sort/coll by
 
     // dcoll-specific: unified relation list
@@ -317,6 +318,10 @@ struct GroupCommand {
     // keyness: optional reference query name for "keyness M vs N by attr"
     // When empty, reference = rest of corpus (default).
     std::string ref_query_name;
+
+    // freq only: "freq Q1, Q2 by …" — compare grouped frequencies across named queries.
+    // When empty, freq uses the last result (or query_name is ignored for freq; use this list).
+    std::vector<std::string> freq_query_names;
 
     // set: setting name and value for "set <name> <value>"
     std::string set_name;

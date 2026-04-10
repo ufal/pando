@@ -222,21 +222,41 @@ bool StructuralAttr::region_matches_attr_eq_rev(const std::string& attr_name, si
 size_t StructuralAttr::token_span_sum_for_attr_eq(const std::string& attr_name,
                                                     const std::string& value) const {
     auto it = region_value_rev_.find(attr_name);
-    if (it == region_value_rev_.end()) return SIZE_MAX;
-    const RegionValueRev& rv = it->second;
-    LexiconId vid = rv.lex.lookup(value);
-    if (vid == UNKNOWN_LEX) return 0;
-    const auto* idx = rv.rev_idx.as<int64_t>();
-    size_t vi = static_cast<size_t>(vid);
-    if (vi + 1 >= rv.rev_idx.count<int64_t>()) return 0;
-    int64_t lo = idx[vi];
-    int64_t hi = idx[vi + 1];
-    const int64_t* p = rv.rev.as<int64_t>() + lo;
+    if (it != region_value_rev_.end()) {
+        const RegionValueRev& rv = it->second;
+        LexiconId vid = rv.lex.lookup(value);
+        if (vid != UNKNOWN_LEX) {
+            const auto* idx = rv.rev_idx.as<int64_t>();
+            size_t vi = static_cast<size_t>(vid);
+            if (vi + 1 < rv.rev_idx.count<int64_t>()) {
+                int64_t lo = idx[vi];
+                int64_t hi = idx[vi + 1];
+                const int64_t* p = rv.rev.as<int64_t>() + lo;
+                size_t sum = 0;
+                for (int64_t k = 0; k < hi - lo; ++k) {
+                    size_t ri = static_cast<size_t>(p[k]);
+                    Region r = get(ri);
+                    sum += static_cast<size_t>(r.end - r.start + 1);
+                }
+                if (sum > 0) return sum;
+            }
+        }
+        // Lex miss, empty posting, or rev/lex out of sync with .val strings: fall through
+        // so freq row keys (from read_tabulate_field / decode_aggregate_bucket_key) still
+        // get correct per-value denominators for IPM.
+    }
+    // No .rev index: still compute per-value token span for freq / IPM denominators by
+    // scanning .rgn rows (same row index as .val; O(n_regions) per call).
+    if (!has_region_attr(attr_name)) return SIZE_MAX;
     size_t sum = 0;
-    for (int64_t k = 0; k < hi - lo; ++k) {
-        size_t ri = static_cast<size_t>(p[k]);
-        Region r = get(ri);
-        sum += static_cast<size_t>(r.end - r.start + 1);
+    size_t n = region_count();
+    for (size_t ri = 0; ri < n; ++ri) {
+        std::string_view v = region_value(attr_name, ri);
+        if (v == value) {
+            Region r = get(ri);
+            if (r.start <= r.end)
+                sum += static_cast<size_t>(r.end - r.start + 1);
+        }
     }
     return sum;
 }

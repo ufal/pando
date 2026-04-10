@@ -115,7 +115,7 @@ static void emit_json(const Corpus& corpus, const std::string& query_text,
         size_t stored = ms.parallel_matches.size();
         size_t start = std::min(opts.offset, stored);
         size_t end   = std::min(start + opts.limit, stored);
-        std::cout << "{\n  \"ok\": true,\n  \"backend\": \"manatree\",\n  \"operation\": \"query\",\n";
+        std::cout << "{\n  \"ok\": true,\n  \"backend\": \"pando\",\n  \"operation\": \"query\",\n";
         std::cout << "  \"result\": {\n    \"parallel\": true,\n";
         std::cout << "    \"page\": {\"start\": " << start << ", \"size\": " << opts.limit
                   << ", \"returned\": " << (end - start) << ", \"total\": " << ms.total_count
@@ -146,7 +146,7 @@ static void emit_json(const Corpus& corpus, const std::string& query_text,
 
     std::cout << "{\n";
     std::cout << "  \"ok\": true,\n";
-    std::cout << "  \"backend\": \"manatree\",\n";
+    std::cout << "  \"backend\": \"pando\",\n";
     std::cout << "  \"operation\": \"query\",\n";
     std::cout << "  \"result\": {\n";
     std::cout << "    \"query\": {\"language\": \"clickcql\", \"text\": "
@@ -672,44 +672,7 @@ static void emit_hits_text(const Corpus& corpus, const std::string& query_text,
 // ── Command handling ────────────────────────────────────────────────────
 
 static void emit_info_json(const Corpus& corpus) {
-    std::cout << "{\n  \"ok\": true,\n  \"operation\": \"info\",\n";
-    std::cout << "  \"result\": {\n";
-    std::cout << "    \"size\": " << corpus.size() << ",\n";
-    std::cout << "    \"has_deps\": " << (corpus.has_deps() ? "true" : "false") << ",\n";
-    std::cout << "    \"attributes\": [";
-    const auto& names = corpus.attr_names();
-    for (size_t i = 0; i < names.size(); ++i) {
-        if (i > 0) std::cout << ", ";
-        std::cout << jstr(names[i]);
-    }
-    std::cout << "],\n";
-    std::cout << "    \"structures\": [";
-    const auto& s_names = corpus.structure_names();
-    for (size_t i = 0; i < s_names.size(); ++i) {
-        const auto& s = s_names[i];
-        if (i > 0) std::cout << ", ";
-        const auto& sa = corpus.structure(s);
-        std::cout << "{"
-                  << "\"name\": " << jstr(s) << ", "
-                  << "\"regions\": " << sa.region_count() << ", "
-                  << "\"has_values\": " << (sa.has_values() ? "true" : "false")
-                  << "}";
-    }
-    std::cout << "],\n";
-    std::cout << "    \"region_attrs\": [";
-    const auto& ra = corpus.region_attr_names();
-    for (size_t i = 0; i < ra.size(); ++i) {
-        if (i > 0) std::cout << ", ";
-        std::cout << jstr(ra[i]);
-    }
-    std::cout << "],\n";
-    std::cout << "    \"multivalue\": [";
-    const auto& mv = corpus.multivalue_attrs();
-    for (size_t i = 0; i < mv.size(); ++i) {
-        if (i > 0) std::cout << ", ";
-        std::cout << jstr(mv[i]);
-    }
-    std::cout << "]\n  }\n}\n";
+    std::cout << to_info_json(corpus, "info");
 }
 
 // Check whether a field's value may be pipe-separated (multivalue positional
@@ -771,12 +734,29 @@ static std::string make_key(const Corpus& corpus, const Match& m,
 }
 
 static bool aggregate_command_targets_stmt(const Statement& stmt, const GroupCommand& ncmd) {
+    if (!ncmd.freq_query_names.empty()) {
+        if (ncmd.freq_query_names.size() > 1)
+            return false;
+        if (!stmt.name.empty())
+            return ncmd.freq_query_names[0] == stmt.name;
+        return ncmd.freq_query_names[0] == "Last";
+    }
     if (ncmd.query_name.empty())
         return true;
     if (!stmt.name.empty())
         return ncmd.query_name == stmt.name;
     return ncmd.query_name == "Last";
 }
+
+// ── Session state for interactive REPL ──────────────────────────────────
+
+struct Session {
+    std::map<std::string, MatchSet> named_results;
+    std::map<std::string, NameIndexMap> named_name_maps;
+    MatchSet last_ms;
+    NameIndexMap last_name_map;
+    bool has_last = false;
+};
 
 static void emit_count(const Corpus& corpus, const MatchSet& ms,
                        const GroupCommand& cmd, const Options& opts,
@@ -980,16 +960,12 @@ static void emit_tabulate(const Corpus& corpus, const MatchSet& ms,
     }
 }
 
-static void emit_freq(const Corpus& corpus, const MatchSet& ms,
-                      const GroupCommand& cmd, const Options& opts,
-                      const NameIndexMap& name_map) {
-    if (cmd.fields.empty()) {
-        std::cerr << "Error: freq requires 'by' clause\n";
-        return;
-    }
-
-    // Group matches by key.
-    std::map<std::string, size_t> counts;
+static void freq_build_counts(const Corpus& corpus, const MatchSet& ms,
+                              const GroupCommand& cmd, const Options& opts,
+                              const NameIndexMap& name_map,
+                              std::map<std::string, size_t>& counts,
+                              size_t& total_matches) {
+    counts.clear();
     if (ms.aggregate_buckets) {
         for (const auto& [k, c] : ms.aggregate_buckets->counts)
             counts[decode_aggregate_bucket_key(*ms.aggregate_buckets, k)] += c;
@@ -997,8 +973,6 @@ static void emit_freq(const Corpus& corpus, const MatchSet& ms,
         for (const auto& m : ms.matches)
             ++counts[make_key(corpus, m, name_map, cmd.fields)];
     }
-
-    // RG-5f: Explode multivalue keys for single-column grouping.
     if (!opts.no_mv_explode && cmd.fields.size() == 1 && corpus.is_multivalue(cmd.fields[0])) {
         std::map<std::string, size_t> exploded;
         for (const auto& [key, count] : counts) {
@@ -1017,13 +991,196 @@ static void emit_freq(const Corpus& corpus, const MatchSet& ms,
         }
         counts = std::move(exploded);
     }
+    total_matches = ms.aggregate_buckets ? ms.aggregate_buckets->total_hits : ms.matches.size();
+}
+
+static bool session_lookup_ms(Session& session, const std::string& qn,
+                              MatchSet*& ms, NameIndexMap*& nm) {
+    if (qn == "Last") {
+        if (!session.has_last) return false;
+        ms = &session.last_ms;
+        nm = &session.last_name_map;
+        return true;
+    }
+    auto it = session.named_results.find(qn);
+    if (it == session.named_results.end()) return false;
+    ms = &it->second;
+    auto nm_it = session.named_name_maps.find(qn);
+    nm = (nm_it != session.named_name_maps.end()) ? &nm_it->second : &session.last_name_map;
+    return true;
+}
+
+static void emit_freq_compare(const Corpus& corpus, Session& session,
+                              const GroupCommand& cmd, const Options& opts) {
+    if (cmd.fields.empty()) {
+        std::cerr << "Error: freq requires 'by' clause\n";
+        return;
+    }
+    struct Src {
+        std::string label;
+        MatchSet* ms;
+        NameIndexMap* nm;
+    };
+    std::vector<Src> srcs;
+    srcs.reserve(cmd.freq_query_names.size());
+    for (const std::string& qn : cmd.freq_query_names) {
+        MatchSet* ms = nullptr;
+        NameIndexMap* nm = nullptr;
+        if (!session_lookup_ms(session, qn, ms, nm)) {
+            if (opts.json)
+                std::cout << "{\"ok\": false, \"error\": " << jstr("Unknown named query: " + qn) << "}\n";
+            else
+                std::cerr << "Error: unknown named query '" << qn << "'\n";
+            return;
+        }
+        srcs.push_back({qn, ms, nm});
+    }
+
+    std::vector<std::map<std::string, size_t>> counts_per(srcs.size());
+    std::vector<size_t> totals(srcs.size());
+    for (size_t i = 0; i < srcs.size(); ++i)
+        freq_build_counts(corpus, *srcs[i].ms, cmd, opts, *srcs[i].nm, counts_per[i], totals[i]);
+
+    std::set<std::string> all_keys;
+    for (const auto& m : counts_per)
+        for (const auto& [k, c] : m)
+            all_keys.insert(k);
+    std::vector<std::string> sorted_keys(all_keys.begin(), all_keys.end());
+    std::sort(sorted_keys.begin(), sorted_keys.end(),
+              [&](const std::string& a, const std::string& b) {
+                  size_t sa = 0, sb = 0;
+                  for (const auto& m : counts_per) {
+                      auto ia = m.find(a), ib = m.find(b);
+                      if (ia != m.end()) sa += ia->second;
+                      if (ib != m.end()) sb += ib->second;
+                  }
+                  if (sa != sb) return sa > sb;
+                  return a < b;
+              });
+
+    double corpus_size = static_cast<double>(corpus.size());
+    const StructuralAttr* freq_sa = nullptr;
+    std::string freq_region_attr;
+    if (cmd.fields.size() == 1) {
+        RegionAttrParts parts;
+        if (split_region_attr_name(cmd.fields[0], parts) &&
+            corpus.has_structure(parts.struct_name)) {
+            const auto& sa = corpus.structure(parts.struct_name);
+            auto rkey = resolve_region_attr_key(sa, parts.struct_name, parts.attr_name);
+            if (rkey) {
+                freq_sa = &sa;
+                freq_region_attr = *rkey;
+            }
+        }
+    }
+    std::unordered_map<std::string, double> subcorpus_sizes;
+    if (freq_sa) {
+        for (const auto& key : sorted_keys) {
+            size_t span = freq_sa->token_span_sum_for_attr_eq(freq_region_attr, key);
+            subcorpus_sizes[key] = (span > 0 && span != SIZE_MAX)
+                ? static_cast<double>(span) : corpus_size;
+        }
+    }
+    auto ipm_denom = [&](const std::string& key) -> double {
+        if (freq_sa) {
+            auto it = subcorpus_sizes.find(key);
+            if (it != subcorpus_sizes.end()) return it->second;
+        }
+        return corpus_size;
+    };
+
+    if (opts.json) {
+        std::cout << "{\"ok\": true, \"operation\": \"freq\", \"result\": {\n";
+        std::cout << "  \"compare_queries\": [";
+        for (size_t i = 0; i < srcs.size(); ++i) {
+            if (i > 0) std::cout << ", ";
+            std::cout << jstr(srcs[i].label);
+        }
+        std::cout << "],\n  \"corpus_size\": " << corpus.size() << ",\n";
+        std::cout << "  \"per_subcorpus_ipm\": " << (freq_sa ? "true" : "false") << ",\n";
+        std::cout << "  \"fields\": [";
+        for (size_t i = 0; i < cmd.fields.size(); ++i) {
+            if (i > 0) std::cout << ", ";
+            std::cout << jstr(cmd.fields[i]);
+        }
+        std::cout << "],\n  \"totals_per_query\": {";
+        for (size_t i = 0; i < srcs.size(); ++i) {
+            if (i > 0) std::cout << ", ";
+            std::cout << jstr(srcs[i].label) << ": " << totals[i];
+        }
+        std::cout << "},\n  \"rows\": [\n";
+        for (size_t ri = 0; ri < sorted_keys.size(); ++ri) {
+            const std::string& key = sorted_keys[ri];
+            if (ri > 0) std::cout << ",\n";
+            double denom = ipm_denom(key);
+            std::cout << "    {\"key\": " << jstr(key);
+            if (freq_sa) std::cout << ", \"subcorpus_size\": " << static_cast<size_t>(denom);
+            std::cout << ", \"queries\": {";
+            for (size_t qi = 0; qi < srcs.size(); ++qi) {
+                if (qi > 0) std::cout << ", ";
+                size_t c = 0;
+                auto it = counts_per[qi].find(key);
+                if (it != counts_per[qi].end()) c = it->second;
+                double pct = totals[qi] > 0 ? 100.0 * static_cast<double>(c) / static_cast<double>(totals[qi]) : 0.0;
+                double ipm = 1e6 * static_cast<double>(c) / denom;
+                std::cout << jstr(srcs[qi].label) << ": {\"count\": " << c
+                          << ", \"pct\": " << pct
+                          << ", \"ipm\": " << std::fixed << std::setprecision(2) << ipm << "}";
+            }
+            std::cout << "}}";
+        }
+        std::cout << "\n  ]\n}}\n";
+    } else {
+        std::cout << "# freq compare: ";
+        for (size_t i = 0; i < srcs.size(); ++i) {
+            if (i > 0) std::cout << ", ";
+            std::cout << srcs[i].label;
+        }
+        std::cout << "\n";
+        for (const auto& f : cmd.fields) std::cout << f << "\t";
+        for (size_t i = 0; i < srcs.size(); ++i) {
+            std::cout << srcs[i].label << "_count\t" << srcs[i].label << "_%\t" << srcs[i].label
+                      << "_ipm\t";
+        }
+        if (freq_sa) std::cout << "subcorpus";
+        std::cout << "\n";
+        for (const std::string& key : sorted_keys) {
+            double denom = ipm_denom(key);
+            std::cout << key << "\t";
+            for (size_t qi = 0; qi < srcs.size(); ++qi) {
+                size_t c = 0;
+                auto it = counts_per[qi].find(key);
+                if (it != counts_per[qi].end()) c = it->second;
+                double pct = totals[qi] > 0
+                    ? 100.0 * static_cast<double>(c) / static_cast<double>(totals[qi])
+                    : 0.0;
+                double ipm = 1e6 * static_cast<double>(c) / denom;
+                std::cout << c << "\t" << std::fixed << std::setprecision(1) << pct << "%\t"
+                          << std::setprecision(2) << ipm << "\t";
+            }
+            if (freq_sa) std::cout << static_cast<size_t>(denom);
+            std::cout << "\n";
+        }
+    }
+}
+
+static void emit_freq(const Corpus& corpus, const MatchSet& ms,
+                      const GroupCommand& cmd, const Options& opts,
+                      const NameIndexMap& name_map) {
+    if (cmd.fields.empty()) {
+        std::cerr << "Error: freq requires 'by' clause\n";
+        return;
+    }
+
+    std::map<std::string, size_t> counts;
+    size_t total_matches = 0;
+    freq_build_counts(corpus, ms, cmd, opts, name_map, counts, total_matches);
 
     std::vector<std::pair<std::string, size_t>> sorted(counts.begin(), counts.end());
     std::sort(sorted.begin(), sorted.end(),
               [](const auto& a, const auto& b) { return a.second > b.second; });
 
     double corpus_size = static_cast<double>(corpus.size());
-    size_t total_matches = ms.aggregate_buckets ? ms.aggregate_buckets->total_hits : ms.matches.size();
 
     // Per-subcorpus IPM: when grouping by a single region attribute (e.g. text_langcode),
     // use the token count of each subcorpus as the IPM denominator instead of the full
@@ -1615,16 +1772,6 @@ static void emit_keyness(const Corpus& corpus, const MatchSet& ms,
     }
 }
 
-// ── Session state for interactive REPL ──────────────────────────────────
-
-struct Session {
-    std::map<std::string, MatchSet> named_results;
-    std::map<std::string, NameIndexMap> named_name_maps;
-    MatchSet last_ms;
-    NameIndexMap last_name_map;
-    bool has_last = false;
-};
-
 // ── Query dispatch ──────────────────────────────────────────────────────
 
 static void run_query(const Corpus& corpus, const std::string& input,
@@ -2177,41 +2324,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                 if (name.size() > 4 && name.substr(name.size() - 4) == "_idx") name = name.substr(0, name.size() - 4);
 
                 if (opts.json) {
-                    std::cout << "{\n  \"ok\": true,\n  \"operation\": \"show_info\",\n";
-                    std::cout << "  \"result\": {\n";
-                    std::cout << "    \"name\": " << jstr(name) << ",\n";
-                    std::cout << "    \"path\": " << jstr(corpus.dir()) << ",\n";
-                    std::cout << "    \"tokens\": " << corpus.size() << ",\n";
-                    std::cout << "    \"has_deps\": " << (corpus.has_deps() ? "true" : "false") << ",\n";
-                    std::cout << "    \"attributes\": [";
-                    const auto& attr_n = corpus.attr_names();
-                    for (size_t i = 0; i < attr_n.size(); ++i) {
-                        if (i > 0) std::cout << ", ";
-                        std::cout << "{\"name\": " << jstr(attr_n[i])
-                                  << ", \"vocab\": " << corpus.attr(attr_n[i]).lexicon().size() << "}";
-                    }
-                    std::cout << "],\n    \"structures\": [";
-                    const auto& s_names = corpus.structure_names();
-                    for (size_t i = 0; i < s_names.size(); ++i) {
-                        if (i > 0) std::cout << ", ";
-                        const auto& sa = corpus.structure(s_names[i]);
-                        std::cout << "{\"name\": " << jstr(s_names[i])
-                                  << ", \"regions\": " << sa.region_count();
-                        const auto& ra = sa.region_attr_names();
-                        if (!ra.empty()) {
-                            std::cout << ", \"attrs\": [";
-                            for (size_t j = 0; j < ra.size(); ++j) {
-                                if (j > 0) std::cout << ", ";
-                                std::cout << jstr(ra[j]);
-                            }
-                            std::cout << "]";
-                        }
-                        if (corpus.is_nested(s_names[i]))    std::cout << ", \"nested\": true";
-                        if (corpus.is_overlapping(s_names[i])) std::cout << ", \"overlapping\": true";
-                        if (corpus.is_zerowidth(s_names[i]))  std::cout << ", \"zerowidth\": true";
-                        std::cout << "}";
-                    }
-                    std::cout << "]\n  }\n}\n";
+                    std::cout << to_info_json(corpus, "show_info");
                 } else {
                     std::cout << "Corpus: " << name << "\n";
                     std::cout << "Path:   " << corpus.dir() << "\n";
@@ -2244,7 +2357,27 @@ static void run_query(const Corpus& corpus, const std::string& input,
             // Commands that need a MatchSet
             MatchSet* ms_to_use = nullptr;
             const NameIndexMap* nm_to_use = nullptr;
-            if (!stmt.command.query_name.empty()) {
+
+            if (stmt.command.type == CommandType::FREQ && stmt.command.freq_query_names.size() >= 2) {
+                emit_freq_compare(corpus, session, stmt.command, opts);
+                continue;
+            }
+            if (stmt.command.type == CommandType::FREQ && stmt.command.freq_query_names.size() == 1) {
+                MatchSet* ms = nullptr;
+                NameIndexMap* nm = nullptr;
+                if (!session_lookup_ms(session, stmt.command.freq_query_names[0], ms, nm)) {
+                    if (opts.json)
+                        std::cout << "{\"ok\": false, \"error\": "
+                                  << jstr("Unknown named query: " + stmt.command.freq_query_names[0])
+                                  << "}\n";
+                    else
+                        std::cerr << "Error: unknown named query '" << stmt.command.freq_query_names[0]
+                                  << "'\n";
+                    continue;
+                }
+                ms_to_use = ms;
+                nm_to_use = nm;
+            } else if (!stmt.command.query_name.empty()) {
                 auto it = session.named_results.find(stmt.command.query_name);
                 if (it != session.named_results.end()) {
                     ms_to_use = &it->second;

@@ -3,6 +3,7 @@
 #include "corpus/corpus.h"
 #include "query/executor.h"
 #include <string>
+#include <string_view>
 #include <vector>
 #include <memory>
 
@@ -32,8 +33,9 @@ std::string to_query_result_json(const Corpus& corpus,
                                  const QueryOptions& opts,
                                  double elapsed_ms);
 
-// Build JSON string for corpus info (same format as pando --json with size on empty).
-std::string to_info_json(const Corpus& corpus);
+// Build JSON string for corpus info (CLI `show info`, /info, FFI). `operation` is the JSON
+// "operation" field ("info" vs "show_info" for CLI).
+std::string to_info_json(const Corpus& corpus, std::string_view operation = "info");
 
 // Build JSON string listing unique values + counts for a positional or region attribute.
 // Returns empty string if attribute not found.

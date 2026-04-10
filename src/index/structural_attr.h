@@ -7,8 +7,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
-#include <optional>
 #include <unordered_map>
+#include <optional>
 
 namespace pando {
 
@@ -131,8 +131,9 @@ public:
     bool region_matches_attr_eq_rev(const std::string& attr_name, size_t region_idx,
                                    const std::string& value) const;
 
-    // Sum of inclusive token spans for regions with attr == value. 0 if value not in .lex.
-    // SIZE_MAX if there is no reverse index for this attr (caller uses a conservative bound).
+    // Sum of inclusive token spans for regions with attr == value. Uses .rev when present;
+    // falls back to scanning .val if the rev lexicon misses (still O(n_regions) per call).
+    // SIZE_MAX only when the named region attribute is not loaded (caller may use corpus size).
     size_t token_span_sum_for_attr_eq(const std::string& attr_name, const std::string& value) const;
 
     // ── Fast aggregation support ─────────────────────────────────────────
@@ -173,11 +174,10 @@ private:
     std::vector<std::string> region_attr_names_;
 };
 
-/// TEITOK CQP uses composite names like \c s_id (region \c s, attribute \c id).
-/// The indexer normally registers the short key \c id (files \c s_id.val → corpus.info
-/// entry \c s_id).  Some pipelines register the literal key \c s_id on structure \c s
-/// instead.  Try the split attribute first, then \c struct_name + "_" + attr
-/// (e.g. \c s_id).
+/// TEITOK CQP uses composite names like \c s_id (region \c s, attribute \c id). The indexer
+/// normally registers the short key \c id (files \c s_id.val → corpus.info entry \c s_id).
+/// Some pipelines register the literal key \c s_id on structure \c s instead. Try the split
+/// attribute first, then \c struct_name + "_" + attr (e.g. \c s_id).
 inline std::optional<std::string> resolve_region_attr_key(
     const StructuralAttr& sa,
     const std::string& struct_name,
