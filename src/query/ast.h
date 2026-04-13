@@ -45,7 +45,7 @@ enum class StructRelType {
 // ── A single attribute condition inside [] ──────────────────────────────
 
 struct AttrCondition {
-    std::string attr;        // e.g. "upos", "lemma", "feats.Number"
+    std::string attr;        // e.g. "upos", "lemma", "feats/Number"
     CompOp op = CompOp::EQ;
     std::string value;       // string/regex value
     bool case_insensitive = false;       // %c flag
@@ -173,6 +173,9 @@ struct AnchorRegionClause {
 struct QueryToken {
     std::string    name;              // optional label (e.g. "verb:")
     ConditionPtr   conditions;        // may be null (empty token [])
+    /// `head:dep_subtree(src)` — derived binding: dependency subtree rooted at token `src` (head + descendants).
+    bool           is_dep_subtree = false;
+    std::string    dep_subtree_source; // token label for resolve_name (same query or prior Last); may also match a session named query
     int            min_repeat = 1;    // {min,max} repetition; default 1,1 = exact single token
     int            max_repeat = 1;    // REPEAT_UNBOUNDED for {n,} and +
 
@@ -223,6 +226,8 @@ enum class GlobalFunctionType {
     DEPTH,
     NDESCENDANTS,
     NVALS,
+    /// :: tcnt(label) — token count for a named region anchor or dep_subtree binding
+    TCNT,
     /// Layer A: B's token span ⊆ A's span (both args = named region bindings).
     CONTAINS,
     /// Layer B (nested + `.par`): child row's parent id == parent's region index.

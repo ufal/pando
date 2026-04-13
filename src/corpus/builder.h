@@ -33,7 +33,7 @@ public:
     void read_jsonl_overlay(const std::string& path, CorpusPos expected_tokens);
     void finalize();
 
-    // When true, split feats into individual feats_X attributes (old behavior).
+    // When true, split feats into individual feats#X positional attributes (legacy: feats_X).
     // When false (default), store feats as a single combined string.
     void set_split_feats(bool v) { split_feats_ = v; }
 

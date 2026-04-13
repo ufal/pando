@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(pando VERSION 0.1.11 LANGUAGES CXX)
+project(pando VERSION 0.1.12 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -140,10 +140,27 @@ configure_file(
     "${CMAKE_CURRENT_BINARY_DIR}/pando_version.h"
     @ONLY)
 
+# Interactive REPL: linenoise (BSD) for line editing, history, up/down arrows.
+# FetchContent (first configure needs network). Disabled on Windows (fallback: std::getline).
+# Upstream has no CMakeLists.txt; PATCH_COMMAND copies ours so only MakeAvailable is needed (CMP0169).
+option(PANDO_LINENOISE_REPL "Link linenoise for interactive pando REPL" ON)
+if(PANDO_LINENOISE_REPL AND NOT WIN32)
+    FetchContent_Declare(linenoise_fc
+        GIT_REPOSITORY https://github.com/antirez/linenoise.git
+        GIT_TAG 452e3793858a15cc006bb3aa3ea06378eb98c5b5
+        PATCH_COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/cmake/linenoise_fc_CMakeLists.txt" CMakeLists.txt
+    )
+    FetchContent_MakeAvailable(linenoise_fc)
+endif()
+
 # CLI executable
 add_executable(pando src/cli/query_main.cpp)
 target_include_directories(pando PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_link_libraries(pando PRIVATE pando_api)
+if(TARGET pando_linenoise)
+    target_link_libraries(pando PRIVATE pando_linenoise)
+    target_compile_definitions(pando PRIVATE PANDO_HAVE_LINENOISE=1)
+endif()
 if(PANDO_CWB_DIALECT)
     target_compile_definitions(pando PRIVATE PANDO_WITH_CWB_DIALECT=1)
 endif()
@@ -174,6 +191,10 @@ if(BUILD_TESTING)
     add_executable(mv_stage1_executor_test src/index/mv_stage1_executor_test.cpp)
     target_link_libraries(mv_stage1_executor_test PRIVATE pando_core)
     add_test(NAME mv_stage1_executor COMMAND mv_stage1_executor_test)
+
+    add_executable(dep_jsonl_alignment_test src/index/dep_jsonl_alignment_test.cpp)
+    target_link_libraries(dep_jsonl_alignment_test PRIVATE pando_core)
+    add_test(NAME dep_jsonl_alignment COMMAND dep_jsonl_alignment_test)
 endif()
 
 install(TARGETS pando_cwb_dialect

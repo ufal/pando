@@ -49,7 +49,7 @@ Dependency and sequence relations can be combined, with the token being interpre
 
 Intead of using sequence notation, it is also possible to define dependency relations as token restriction, in a notation similar to that used in PML-TQ. In that case, to look for a noun modified by a determiner, we specify inside the token that we are looking for a child that is a determiner: `[upos="NOUN" & child [upos="DET"] ]`. This notation has the advantage that you can specify multiple children, and still have the option to furthermore look for words to the left or the right. And there are more option in the token-restriction notation: you can look not only for `child`, but also for `parent`, `ancestor`, `descendant`, or `sibling`.
 
-Also for depenencies as token restrictions, we can use negations: `[upos="VERB" & not child [deprel="nsubj"]]` to look for any verbs without a nominal subject. 
+Also for depenencies as token restrictions, we can use negations: `[upos="VERB" & not child [deprel="nsubj"]]` to look for any verbs without a nominal subject (*!>* as an operator leads to semantic problems so is not supported). 
 
 
 
@@ -181,7 +181,7 @@ Since aggregation functions count each item separately, the total counts for tok
 
 Notice that there is no straightforward way to look for tokens that have value in their genres that is not *Book*, but it can be done by looking for a regular expression that matches anything except Book, such as *genre = /^(?!Book$).+/*.
 
-The **`nvals(attr)`** function counts **non-empty** pipe-separated components of a value (or, for nested/overlapping region attributes, the number of **distinct** components across all covering regions at the token). Use a comparison and a numeric right-hand side: **`nvals(genre) > 2`**, **`nvals(wsd)=2`**. It applies to positional attributes, **`feats.X`** (0 or 1), and composite region attributes such as **`text_genre`**. For attributes not declared multivalue and with no `|` in the stored string, the count is 0 (empty or `_`) or 1 otherwise.
+The **`nvals(attr)`** function counts **non-empty** pipe-separated components of a value (or, for nested/overlapping region attributes, the number of **distinct** components across all covering regions at the token). Use a comparison and a numeric right-hand side: **`nvals(genre) > 2`**, **`nvals(wsd)=2`**. It applies to positional attributes, **`feats/Feature`** (0 or 1), and composite region attributes such as **`text_genre`**. For attributes not declared multivalue and with no `|` in the stored string, the count is 0 (empty or `_`) or 1 otherwise.
 
 
 ## Stand-off regions
@@ -205,6 +205,10 @@ There are two types of result groups in pando: token results and region results,
 But if we want to find regions that contain specific things, a direct syntax becomes very tricky. Instead, to find regions with token-based restrictions, you use two different queries: you first look for the tokens(say all lemmas *over*) in a named query. And then we restrict our region search on regions that contain at least one token from that named query. So we can find all *split* errors that involve the lemma *over* as follows: `Over = [lemma="over"]; <err type="SPLIT"> where Over`. 
 
 Notice that that gives entire regions, not (just) the tokens inside them - which you could of course find more directly using `[ lemma="over" & err_type="SPLIT" ]`.
+
+### Dependency subtrees
+
+Another way to get from tokens to regions is by selecting the entire dependency subtree for a node, so that we can print it, count it, etc. in the same way we can with a discontinuous region. So to get long bare nouns, we can first search for bare nouns (nouns not have a determiner), and then select the subtrees for those, but only if they have more than 2 tokens in it: `barenoun:[upos="NOUN" & not child [upos="DET"] ]; longbarenp:dep_subtree(barenoun) :: tnct(longbarenp) > 2`.
 
 
 ## Collocations

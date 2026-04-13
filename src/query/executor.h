@@ -36,6 +36,8 @@ struct Match {
     std::vector<CorpusPos> span_ends;    // end position (inclusive) of each token's span
     /// Names from `np:<node …>`-style anchors → region row (filled when anchor constraints run).
     std::unordered_map<std::string, RegionRef> named_regions;
+    /// `label:dep_subtree(src)` — sorted unique token positions in the subtree (head + descendants).
+    std::unordered_map<std::string, std::vector<CorpusPos>> named_dep_subtrees;
     /// Token-group sidecar props (`groups/<struct>.jsonl`), set for `<err>` / overlay group matches.
     std::vector<std::pair<std::string, std::string>> token_group_props;
     /// True when this match comes from token-group expansion (`<err>` etc.), not token chain.
@@ -71,6 +73,10 @@ struct Match {
             for (CorpusPos p = positions[i]; p <= end; ++p)
                 out.push_back(p);
         }
+        for (const auto& kv : named_dep_subtrees) {
+            for (CorpusPos p : kv.second)
+                out.push_back(p);
+        }
         std::sort(out.begin(), out.end());
         out.erase(std::unique(out.begin(), out.end()), out.end());
         return out;
@@ -96,18 +102,21 @@ inline CorpusPos resolve_name(const Match& m, const NameIndexMap& names,
     return m.positions[it->second];
 }
 
-/// Normalize attribute names from queries: `namespace/key` → `namespace.key`;
-/// `feats.Key` ↔ `feats_Key` when a split column exists (same rules as QueryExecutor::normalize_attr).
+/// Normalize attribute names from queries: `namespace/key` → `namespace.key` (except
+/// `feats/Feature`, which stays slash-separated or maps to `feats#Feature` / `feats_Feature`
+/// when a split column exists — same rules as QueryExecutor::normalize_attr).
 std::string normalize_query_attr_name(const Corpus& corpus, const std::string& attr);
 
-/// True if `name` is `feats.<Feat>` (UD sub-key on combined `feats` column).
+/// True if `name` is `feats/Feature` (UD sub-key on combined `feats` column, query form).
 bool feats_is_subkey(const std::string& name, std::string& feat_name_out);
+
+/// True if corpus has a materialized UD split column for `feat_name` (`feats#Name` or legacy `feats_Name`).
+bool corpus_has_ud_split_feats_column(const Corpus& corpus, const std::string& feat_name);
 /// Value for one UD feature from a combined `feats` blob (`Key=Val|…`), or `"_"` if absent.
 std::string feats_extract_value(std::string_view feats_blob, const std::string& feat_name);
 
 /// If `field` is `tcnt(region_label)`, returns the number of token positions in that named
-/// region binding as a decimal string. Returns `std::nullopt` if `field` is not `tcnt(...)`.
-/// Throws if the label names a query token, or is not bound to a region anchor.
+/// region anchor, or in a `dep_subtree` binding. Returns `std::nullopt` if `field` is not `tcnt(...)`.
 inline std::optional<std::string> evaluate_tcnt_tabulate_field(
     const Corpus& corpus, const Match& m, const NameIndexMap& name_map,
     const std::string& field) {
@@ -116,6 +125,10 @@ inline std::optional<std::string> evaluate_tcnt_tabulate_field(
     const std::string inner = field.substr(5, field.size() - 6);
     if (inner.empty() || inner.find('.') != std::string::npos)
         throw std::runtime_error("Invalid tcnt(...) field: expected tcnt(region_name)");
+
+    auto ds = m.named_dep_subtrees.find(inner);
+    if (ds != m.named_dep_subtrees.end())
+        return std::to_string(static_cast<long long>(ds->second.size()));
 
     auto nr = m.named_regions.find(inner);
     if (nr != m.named_regions.end()) {
@@ -432,6 +445,15 @@ public:
                               size_t max_matches = 0,
                               bool count_total = false);
 
+    /// Single-token `label:dep_subtree(src)` executed as its own statement: `src` resolves to
+    /// token positions via `source_name_map` / `MatchSet` (session named query or prior `Last`).
+    MatchSet execute_dep_subtree_from_named(const TokenQuery& query,
+                                            const MatchSet& source_matches,
+                                            const NameIndexMap& source_name_map,
+                                            size_t max_matches = 0,
+                                            bool count_total = false,
+                                            size_t max_total_cap = 0) const;
+
     /// Same token-name indices as execute() / Match.positions (strips region anchors first).
     static NameIndexMap build_name_map_for_stripped_query(const TokenQuery& query);
 
@@ -458,6 +480,9 @@ private:
     // ── Query planning ──────────────────────────────────────────────────
 
     QueryPlan plan_query(const TokenQuery& query) const;
+
+    /// Fills `m.named_dep_subtrees` for each `dep_subtree` token that has a label.
+    void materialize_dep_subtree_bindings(const TokenQuery& query, Match& m) const;
 
     // ── Per-position condition checking (avoids materializing sets) ─────
 

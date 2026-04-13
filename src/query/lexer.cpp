@@ -144,7 +144,7 @@ Token Lexer::next() {
         auto read_segment = [&]() {
             while (pos_ < input_.size() &&
                    (std::isalnum(static_cast<unsigned char>(input_[pos_])) ||
-                    input_[pos_] == '_' || input_[pos_] == '-'))
+                    input_[pos_] == '_' || input_[pos_] == '-' || input_[pos_] == '#'))
                 text += input_[pos_++];
         };
         read_segment();

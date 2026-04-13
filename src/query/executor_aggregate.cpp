@@ -352,8 +352,7 @@ bool build_aggregate_plan_impl(const Corpus& corpus, const std::vector<std::stri
         std::string attr = normalize_query_attr_name(corpus, attr_spec);
         std::string feat_name;
         if (feats_is_subkey(attr, feat_name) && corpus.has_attr("feats")) {
-            std::string split_col = "feats_" + feat_name;
-            if (!corpus.has_attr(split_col)) {
+            if (!corpus_has_ud_split_feats_column(corpus, feat_name)) {
                 col.kind = AggregateBucketData::Column::Kind::FeatsComposite;
                 col.pa = &corpus.attr("feats");
                 col.feats_sub_key = feat_name;
@@ -361,8 +360,6 @@ bool build_aggregate_plan_impl(const Corpus& corpus, const std::vector<std::stri
                 continue;
             }
         }
-        if (attr.size() > 5 && attr.substr(0, 5) == "feats" && attr.find('.') != std::string::npos)
-            attr[attr.find('.')] = '_';
         if (corpus.has_attr(attr)) {
             if (!col.named_anchor.empty()) {
                 bool any_region = false;

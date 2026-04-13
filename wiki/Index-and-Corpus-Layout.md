@@ -3,7 +3,7 @@
 A **Pando corpus** is a **directory** containing:
 
 - **`corpus.info`** — key/value metadata: corpus size, positional attribute list, structural types, region attribute names, `multivalue`, **`kv_pipe`** (UD-style `Key=Val|…` columns, distinct from multivalue), `nested`, `overlapping`, `zerowidth`, default `within`, etc.
-- **Memory-mapped data files** — one family per positional attribute (`form.dat`, `form.lex`, `form.rev`, …; optional `form.mv.*` for **multivalue** attrs only); `*.rgn` for structural spans; `*_attr.val` for region attributes; `dep.*` when dependencies exist. Combined UD **`feats`** uses the single `feats.*` family; **`--split-feats`** adds separate `feats_<Feature>.*` families — see [Multivalue attributes](Multivalue-Attributes.md#kv-pipe-attributes-ud-feats) (KV pipe section; contrasts with MV indexing).
+- **Memory-mapped data files** — one family per positional attribute (`form.dat`, `form.lex`, `form.rev`, …; optional `form.mv.*` for **multivalue** attrs only); `*.rgn` for structural spans; `*_attr.val` for region attributes; `dep.*` when dependencies exist. Combined UD **`feats`** uses the single `feats.*` family; **`--split-feats`** adds separate `feats#<Feature>.*` families (legacy: `feats_<Feature>.*`) — see [Multivalue attributes](Multivalue-Attributes.md#kv-pipe-attributes-ud-feats) (KV pipe section; contrasts with MV indexing).
 
 ## Building
 

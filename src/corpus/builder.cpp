@@ -202,7 +202,7 @@ void CorpusBuilder::parse_feats(const std::string& feats_str,
 
             size_t eq = feats_str.find('=', start);
             if (eq != std::string::npos && eq < end) {
-                attrs["feats_" + feats_str.substr(start, eq - start)] =
+                attrs[std::string("feats#") + feats_str.substr(start, eq - start)] =
                     feats_str.substr(eq + 1, end - eq - 1);
             }
             start = end + 1;
@@ -1027,7 +1027,8 @@ void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expec
         return std::stoll(ln.substr(p, q - p));
     };
 
-    auto flush_sentence = [&]() {
+    auto flush_sentence = [&](const std::vector<std::pair<std::string, std::string>>& sent_attrs
+                              = std::vector<std::pair<std::string, std::string>>{}) {
         if (sentence_buf.empty()) return;
         std::unordered_map<std::string, int> tok_id_to_local;
         tok_id_to_local.reserve(sentence_buf.size());
@@ -1047,7 +1048,7 @@ void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expec
             }
             builder_.add_token(pt.attrs, sentence_head_id);
         }
-        builder_.end_sentence();
+        builder_.end_sentence(sent_attrs);
         sentence_buf.clear();
     };
 
@@ -1092,9 +1093,13 @@ void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expec
         const std::string& actual_struct = it->second.struct_name.empty()
                                            ? sname : it->second.struct_name;
 
-        // In v2 mode, closing an "s" region flushes the sentence buffer first
-        if (have_header && actual_struct == "s")
-            flush_sentence();
+        // In v2 mode, closing an "s" region finalizes the sentence buffer and uses
+        // the region attrs as sentence attrs; avoid adding a duplicate s span row.
+        if (have_header && actual_struct == "s") {
+            flush_sentence(it->second.attrs);
+            open_regions.erase(it);
+            return;
+        }
         CorpusPos end = builder_.corpus_size() > 0 ? builder_.corpus_size() - 1 : 0;
         if (end >= it->second.start)
             emit_struct_span(actual_struct, it->second.start, end, it->second.attrs);
@@ -1145,7 +1150,9 @@ void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expec
         if (ep >= 0) end = ep;
         std::vector<std::pair<std::string, std::string>> attrs;
         json_get_attrs_object(ln, "attrs", attrs);
-        // In v2 mode, a single-shot "s" region flushes the sentence buffer first.
+        // In v2 mode, a single-shot "s" region finalizes the sentence buffer and uses
+        // attrs on that event as sentence attrs. Sentence span coordinates come from
+        // buffered tokens, not from event start/end (which may be 1-based in exports).
         // Warn if the region appears to be placed late (far behind the token stream),
         // which indicates the writer is deferring sentence regions to the end of file.
         if (have_header && sname == "s") {
@@ -1160,7 +1167,21 @@ void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expec
                     warned_late_s = true;
                 }
             }
-            flush_sentence();
+            if (!sentence_buf.empty()) {
+                CorpusPos expected_start = cur;
+                CorpusPos expected_end = cur + static_cast<CorpusPos>(sentence_buf.size()) - 1;
+                if (sp >= 0 && ep >= 0 && (sp != expected_start || ep != expected_end)) {
+                    static bool warned_mismatch_s = false;
+                    if (!warned_mismatch_s) {
+                        std::cerr << "Warning: single-shot 's' coordinates (" << sp << ".." << ep
+                                  << ") do not match buffered sentence tokens (" << expected_start
+                                  << ".." << expected_end << "); using buffered token boundaries.\n";
+                        warned_mismatch_s = true;
+                    }
+                }
+            }
+            flush_sentence(attrs);
+            return;
         }
         // Accept both normal regions (end >= start) and zero-width regions (start > end).
         // Zero-width regions use the convention start_pos > end_pos to signal zero width.
@@ -1182,8 +1203,9 @@ void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expec
         for (const auto& a : positional_list)
             positional_set.insert(a);
 
-        // split_feats
-        split_feats_ = json_get_bool(ln, "split_feats", false);
+        // split_feats: OR with current value so CLI --split-feats (set before read_jsonl)
+        // is not overwritten when the header declares "split_feats": false.
+        split_feats_ = split_feats_ || json_get_bool(ln, "split_feats", false);
 
         // default_within
         std::string dw = json_get_string(ln, "default_within");

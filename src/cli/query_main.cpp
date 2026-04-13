@@ -16,6 +16,7 @@
 #include <chrono>
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
 #include <map>
 #include <iomanip>
 #include <vector>
@@ -26,6 +27,10 @@
 #include <set>
 #include <stdexcept>
 #include <filesystem>
+
+#ifdef PANDO_HAVE_LINENOISE
+#include <linenoise.h>
+#endif
 
 using namespace pando;
 
@@ -62,7 +67,10 @@ struct Options {
     size_t offset = 0;
     size_t max_total = 0;  // 0 = no cap; with --total, stop counting at this (e.g. 10000)
     int context   = 5;
+    /// True: read CQL from stdin with `pando>` prompt (see `--interactive`, or omit query after corpus path).
     bool interactive = false;
+    /// `--print-all-steps`: print KWIC/JSON for every query step in a multi-statement program (not only the last).
+    bool print_all_program_steps = false;
     bool total    = false;
     std::vector<std::string> attrs;  // empty = all attributes in JSON tokens; else only these
     bool count_only = false;  // print only total (for benchmarking)
@@ -1797,6 +1805,22 @@ static void emit_keyness(const Corpus& corpus, const MatchSet& ms,
 
 // ── Query dispatch ──────────────────────────────────────────────────────
 
+// If prog[si+1] is a single-token `label:dep_subtree(src)`, returns &src.
+static const std::string* next_stmt_dep_subtree_source(const Program& prog, size_t si) {
+    if (si + 1 >= prog.size()) return nullptr;
+    const Statement& n = prog[si + 1];
+    if (!n.has_query || n.query.tokens.size() != 1) return nullptr;
+    if (!n.query.tokens[0].is_dep_subtree) return nullptr;
+    return &n.query.tokens[0].dep_subtree_source;
+}
+
+static bool query_has_labeled_token(const TokenQuery& q, const std::string& label) {
+    for (const auto& tok : q.tokens) {
+        if (!tok.is_anchor() && tok.name == label) return true;
+    }
+    return false;
+}
+
 static void run_query(const Corpus& corpus, const std::string& input,
                       Options& opts, Session& session, QueryTiming* out_timing = nullptr) {
     Program prog;
@@ -1856,6 +1880,11 @@ static void run_query(const Corpus& corpus, const std::string& input,
         bool next_is_command = (si + 1 < prog.size() && prog[si + 1].has_command);
 
         if (stmt.has_query) {
+            const std::string* dep_chain_src = next_stmt_dep_subtree_source(prog, si);
+            const bool is_dep_subtree_prelude =
+                    stmt.name.empty() && dep_chain_src
+                    && query_has_labeled_token(stmt.query, *dep_chain_src);
+
             size_t max_m = 0;
             bool count_t = false;
             size_t max_total_cap = 0;
@@ -1869,7 +1898,9 @@ static void run_query(const Corpus& corpus, const std::string& input,
                 // Concordance page limit (offset+limit) applies to anonymous queries only.
                 // Named binds (Q1 = …) are stored for later freq/count; truncating here makes
                 // Q1 a tiny sample while Q2 before `freq` uses max_m=0 (full set).
-                if (!stmt.name.empty()) {
+                // Same for a dep_subtree chain prelude: `barenoun:[…]; barenp:dep_subtree(barenoun)…`
+                // must materialize the full head match set for the next statement.
+                if (!stmt.name.empty() || is_dep_subtree_prelude) {
                     max_m = 0;
                     count_t = opts.total;
                     max_total_cap = (opts.total && opts.max_total > 0) ? opts.max_total : 0;
@@ -1919,6 +1950,33 @@ static void run_query(const Corpus& corpus, const std::string& input,
             auto t0 = std::chrono::high_resolution_clock::now();
             if (stmt.is_parallel) {
                 session.last_ms = executor.execute_parallel(stmt.query, stmt.target_query, max_m, count_t);
+            } else if (stmt.has_query && stmt.query.tokens.size() == 1
+                       && stmt.query.tokens[0].is_dep_subtree) {
+                const std::string& src_q = stmt.query.tokens[0].dep_subtree_source;
+                // Prefer a session named query (`src = [...];`). Otherwise resolve `src` as a
+                // *token label* against the previous query's match + name map (`Last`), not as a
+                // stored result alias.
+                const MatchSet* src_ms = nullptr;
+                const NameIndexMap* src_nm = nullptr;
+                auto named_it = session.named_results.find(src_q);
+                if (named_it != session.named_results.end()) {
+                    src_ms = &named_it->second;
+                    auto nm_it = session.named_name_maps.find(src_q);
+                    if (nm_it != session.named_name_maps.end()) src_nm = &nm_it->second;
+                } else if (session.has_last && session.last_name_map.count(src_q)) {
+                    src_ms = &session.last_ms;
+                    src_nm = &session.last_name_map;
+                }
+                if (!src_ms) {
+                    throw std::runtime_error(
+                            "dep_subtree: no matches for token label '" + src_q + "'. Use a prior "
+                            "query that labels that token (e.g. `" + src_q + ":[...]; ...`), or "
+                            "`" + src_q + " = [...];`, or one query: `" + src_q + ":[...] "
+                            "sub:dep_subtree(" + src_q + ") [:: ...]`.");
+                }
+                const NameIndexMap& source_nm = src_nm ? *src_nm : NameIndexMap{};
+                session.last_ms = executor.execute_dep_subtree_from_named(
+                        stmt.query, *src_ms, source_nm, max_m, count_t, max_total_cap);
             } else {
                 session.last_ms = executor.execute(stmt.query, max_m, count_t, max_total_cap,
                                           opts.sample, opts.sample_seed, opts.threads,
@@ -1952,9 +2010,14 @@ static void run_query(const Corpus& corpus, const std::string& input,
                     return;
                 }
                 // `Name = …` binds a match set only; do not print concordance for that
-                // statement (CQP-style). Otherwise `MM = [lemma="over"]; <err> where MM;`
-                // shows two lines: the token query hit and the group query hit.
-                if (stmt.name.empty()) {
+                // statement (CQP-style). Multi-statement programs: show KWIC/JSON only for the
+                // final query step (intermediate steps feed `Last` / chaining). Use
+                // `--print-all-steps` to print every query step (e.g. while debugging pipelines).
+                const bool is_last_statement = (si + 1 == prog.size());
+                const bool emit_query_concordance =
+                        stmt.name.empty()
+                        && (is_last_statement || opts.print_all_program_steps);
+                if (emit_query_concordance) {
                     if (out_timing) {
                         auto t2 = std::chrono::high_resolution_clock::now();
                         if (opts.json)
@@ -2487,11 +2550,116 @@ static void run_query(const Corpus& corpus, const std::string& input,
     }
 }
 
+/// Persistent path for REPL history (~/.pando_history). Empty if $HOME is unset.
+static std::string repl_history_path() {
+    const char* h = std::getenv("HOME");
+    if (!h || !*h) return {};
+    return std::string(h) + "/.pando_history";
+}
+
+static std::string repl_trim(const std::string& s) {
+    size_t a = 0, b = s.size();
+    while (a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r')) ++a;
+    while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\r')) --b;
+    return s.substr(a, b - a);
+}
+
+static bool repl_line_is_help(const std::string& line) {
+    std::string t = repl_trim(line);
+    for (char& c : t)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return t == "help";
+}
+
+/// Print REPL-only commands and the main CQL task verbs (not full CLI --help).
+static void print_interactive_repl_help(const Options& opts) {
+    std::cout
+        << "REPL (read one CQL program per line; session keeps named queries).\n"
+        << "  Front-end: --cql " << opts.cql_dialect << "\n\n"
+        << "  help              This summary\n"
+        << "  quit, exit        Leave the REPL\n\n"
+        << "  Query / concordance — a token pattern, or a named bind, then optional commands:\n"
+        << "    [lemma=\"run\"]+\n"
+        << "    Nouns = [pos=\"N.*\"]+\n\n"
+        << "  Aggregation / listing:\n"
+        << "    count … | group … | sort … | freq … | size\n\n"
+        << "  Collocation / comparison:\n"
+        << "    coll | dcoll | keyness …\n\n"
+        << "  Tables / dumps:\n"
+        << "    tabulate … | raw | cat\n\n"
+        << "  Corpus / session:\n"
+        << "    show attributes | show regions | show named | show info | show values <attr>\n"
+        << "    show settings | set <name> <value> | drop <name> | drop all\n\n"
+        << "  Output format and limits follow the flags you passed on the pando command line\n"
+        << "  (e.g. --json, --limit, --context). Run `pando` with no args for full CLI help.\n";
+}
+
+/// Read CQL from stdin; with a TTY, use linenoise when available (arrows + history).
+static void run_interactive_repl(const Corpus& corpus, Options& opts, Session& session) {
+    const bool stdin_tty = isatty(STDIN_FILENO);
+#ifdef PANDO_HAVE_LINENOISE
+    if (stdin_tty && !opts.json && !opts.api) {
+        std::string hist = repl_history_path();
+        linenoiseHistorySetMaxLen(1000);
+        linenoiseSetMultiLine(1);
+        if (!hist.empty())
+            linenoiseHistoryLoad(hist.c_str());
+        char* raw = nullptr;
+        while ((raw = linenoise("pando> ")) != nullptr) {
+            std::string line = raw;
+            linenoiseFree(raw);
+            if (line.empty() || line == "quit" || line == "exit") break;
+            if (repl_line_is_help(line)) {
+                print_interactive_repl_help(opts);
+                continue;
+            }
+            linenoiseHistoryAdd(line.c_str());
+            try {
+                run_query(corpus, line, opts, session);
+            } catch (const std::exception& e) {
+                if (opts.json || opts.api) {
+                    std::cout << "{\"ok\": false, \"error\": {\"stage\": \"query\", \"message\": "
+                              << jstr(e.what()) << "}}\n";
+                } else {
+                    std::cerr << "Error: " << e.what() << "\n";
+                }
+            }
+        }
+        if (!hist.empty())
+            linenoiseHistorySave(hist.c_str());
+        return;
+    }
+#endif
+    std::string line;
+    if (stdin_tty && !opts.json && !opts.api)
+        std::cout << "pando> " << std::flush;
+    while (std::getline(std::cin, line)) {
+        if (line.empty() || line == "quit" || line == "exit") break;
+        if (repl_line_is_help(line)) {
+            print_interactive_repl_help(opts);
+            continue;
+        }
+        try {
+            run_query(corpus, line, opts, session);
+        } catch (const std::exception& e) {
+            if (opts.json || opts.api) {
+                std::cout << "{\"ok\": false, \"error\": {\"stage\": \"query\", \"message\": "
+                          << jstr(e.what()) << "}}\n";
+            } else {
+                std::cerr << "Error: " << e.what() << "\n";
+            }
+        }
+        if (stdin_tty && !opts.json && !opts.api)
+            std::cout << "pando> " << std::flush;
+    }
+}
+
 // ── Argument parsing ────────────────────────────────────────────────────
 
 static Options parse_args(int argc, char* argv[]) {
     Options opts;
     std::vector<std::string> positional;
+    bool request_interactive_repl = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -2551,6 +2719,8 @@ static Options parse_args(int argc, char* argv[]) {
         else if (arg == "--offset" && i + 1 < argc) { opts.offset = std::stoul(argv[++i]); }
         else if (arg == "--context" && i + 1 < argc) { opts.context = std::stoi(argv[++i]); }
         else if (arg == "--count-only") { opts.count_only = true; }
+        else if (arg == "--interactive") { request_interactive_repl = true; }
+        else if (arg == "--print-all-steps") { opts.print_all_program_steps = true; }
         else if (arg == "--timing")     { opts.timing = true; }
         else if (arg == "--sample" && i + 1 < argc) { opts.sample = std::stoul(argv[++i]); }
         else if (arg == "--seed" && i + 1 < argc)  { opts.sample_seed = static_cast<uint32_t>(std::stoul(argv[++i])); }
@@ -2629,7 +2799,8 @@ static Options parse_args(int argc, char* argv[]) {
                      "If the current directory is already a corpus (./corpus.info), it is used the same way.\n\n"
                   << "If [query] is omitted, CQL is read from stdin. With a terminal (stdin is a TTY), "
                      "an interactive REPL runs with a pando> prompt; with a pipe, queries are read "
-                     "line by line with no prompt.\n\n"
+                     "line by line with no prompt. Use --interactive to open the same REPL even when "
+                     "a query string is present on the command line (it is then ignored).\n\n"
                   << "Shell quoting: CQL string literals often use double quotes (e.g. form=\"can't\"). "
                      "Wrap the whole query in double quotes and backslash-escape those inner quotes:\n"
                   << "  ./pando CORP \"[form=\\\"can't\\\" | contr_form=\\\"can't\\\"]+\"\n"
@@ -2657,6 +2828,9 @@ static Options parse_args(int argc, char* argv[]) {
                   << "  --context N      Context width in tokens for JSON output (default: 5)\n"
                   << "  --attrs A,B,...  Token attributes to show (text: appended with /; JSON: in token objects; default: form only in text, all in JSON)\n"
                   << "  --count-only     Print only total match count (for benchmarking)\n"
+                  << "  --interactive    Open stdin REPL (`pando>`): type one CQL command per line (session persists).\n"
+                  << "                    On a TTY, line editing uses linenoise (arrows, history); history file: ~/.pando_history\n"
+                  << "  --print-all-steps  Multi-statement CQL: print hits for each query step, not only the last\n"
                   << "  --timing         Print open_sec, query_sec, fetch_sec, total, returned to stderr\n"
                   << "  --sample N       Return N randomly sampled matches (reservoir sampling)\n"
                   << "  --seed N         RNG seed for --sample (reproducible runs)\n"
@@ -2709,6 +2883,9 @@ static Options parse_args(int argc, char* argv[]) {
             opts.interactive = true;
         }
     }
+
+    if (request_interactive_repl)
+        opts.interactive = true;
 
     return opts;
 }
@@ -2778,6 +2955,9 @@ int main(int argc, char* argv[]) {
 
     Session session;
 
+    if (opts.interactive && !opts.query.empty() && !opts.json && !opts.api)
+        std::cerr << "Note: --interactive reads CQL from stdin; the command-line query is ignored.\n";
+
     if (!opts.interactive) {
         try {
             run_query(corpus, opts.query, opts, session, opts.timing ? &timing : nullptr);
@@ -2797,27 +2977,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
     } else {
-        // Print REPL prompts only when stdin is a TTY. For pipes (echo query | pando .)
-        // prompts add noise and a trailing prompt after EOF.
-        std::string line;
-        const bool stdin_tty = isatty(STDIN_FILENO);
-        if (stdin_tty && !opts.json && !opts.api)
-            std::cout << "pando> " << std::flush;
-        while (std::getline(std::cin, line)) {
-            if (line.empty() || line == "quit" || line == "exit") break;
-            try {
-                run_query(corpus, line, opts, session);
-            } catch (const std::exception& e) {
-                if (opts.json || opts.api) {
-                    std::cout << "{\"ok\": false, \"error\": {\"stage\": \"query\", \"message\": "
-                              << jstr(e.what()) << "}}\n";
-                } else {
-                    std::cerr << "Error: " << e.what() << "\n";
-                }
-            }
-            if (stdin_tty && !opts.json && !opts.api)
-                std::cout << "pando> " << std::flush;
-        }
+        run_interactive_repl(corpus, opts, session);
     }
 
     return 0;

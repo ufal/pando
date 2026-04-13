@@ -136,7 +136,7 @@ int main(int argc, char* argv[]) {
                   << "         with --format jsonl: JSONL events as in dev/PANDO-INDEX-INTEGRATION.md\n\n"
                   << "  For each region attribute (e.g. text_langcode.val), the indexer also writes\n"
                   << "  .lex / .rev / .rev.idx (value → region ids) for fast :: metadata filters.\n\n"
-                  << "  --split-feats     Split FEATS into feats_X (default: combined)\n"
+                  << "  --split-feats     Split FEATS into feats#Feature columns (default: combined)\n"
                   << "  --format vertical Read CWB-style vertical (one token/line, <s> </s>);\n"
                   << "                    optional <!-- positional-attributes: ... --> (Korp/Kielipankki)\n"
                   << "  --format jsonl    Read streaming JSONL events (tokens/regions)\n"

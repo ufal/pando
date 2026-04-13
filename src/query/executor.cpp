@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <queue>
 #include <random>
 #include <stdexcept>
@@ -188,6 +189,9 @@ static void append_func_call_token_args(const GlobalFuncCall& fc, std::vector<st
         case GlobalFunctionType::RCHILD:
         case GlobalFunctionType::RCONTAINS:
             break;
+        case GlobalFunctionType::TCNT:
+            if (!fc.args.empty()) out->push_back(fc.args[0]);
+            break;
     }
 }
 
@@ -208,6 +212,14 @@ static void validate_global_func_filter_token_labels(const GlobalFunctionFilter&
                                                      const std::unordered_set<std::string>& token_labels,
                                                      const std::unordered_set<std::string>& region_labels) {
     auto check_call = [&](const GlobalFuncCall& fc) {
+        if (fc.func == GlobalFunctionType::TCNT) {
+            if (fc.args.size() != 1)
+                throw std::runtime_error("tcnt(...) in global filter requires exactly one label");
+            const std::string& n = fc.args[0];
+            if (token_labels.count(n) || region_labels.count(n)) return;
+            throw std::runtime_error(
+                    "Global filter (:: …): tcnt(...) unknown label '" + n + "'");
+        }
         if (fc.func == GlobalFunctionType::CONTAINS || fc.func == GlobalFunctionType::RCHILD
             || fc.func == GlobalFunctionType::RCONTAINS) {
             if (fc.args.size() < 2)
@@ -482,20 +494,28 @@ const FoldMap& QueryExecutor::get_fold_map(const std::string& attr, bool case_fo
 // ── Attribute name normalization ────────────────────────────────────────
 
 std::string normalize_query_attr_name(const Corpus& corpus, const std::string& attr) {
+    // UD positional sub-key: feats/Feature — never fold slash to dot; map to materialized split
+    // column when present (feats#Feature preferred, feats_Feature legacy).
+    if (attr.size() > 6 && attr.compare(0, 6, "feats/") == 0) {
+        std::string feat = attr.substr(6);
+        if (!feat.empty() && feat.find('/') == std::string::npos && feat.find('.') == std::string::npos) {
+            std::string modern = std::string("feats#") + feat;
+            if (corpus.has_attr(modern)) return modern;
+            std::string legacy = std::string("feats_") + feat;
+            if (corpus.has_attr(legacy)) return legacy;
+            return attr;
+        }
+    }
+    if (attr.size() > 6 && attr.compare(0, 6, "feats#") == 0 && corpus.has_attr(attr))
+        return attr;
+    if (attr.size() > 6 && attr.compare(0, 6, "feats_") == 0 && corpus.has_attr(attr))
+        return attr;
+
     std::string a;
     a.reserve(attr.size());
     for (char c : attr) {
         if (c == '/') a += '.';
         else a += c;
-    }
-    if (a.size() > 6 && a.compare(0, 6, "feats.") == 0) {
-        std::string split_name = "feats_" + a.substr(6);
-        if (corpus.has_attr(split_name)) return split_name;
-        return a;
-    }
-    if (a.size() > 6 && a.compare(0, 6, "feats_") == 0) {
-        if (corpus.has_attr(a)) return a;
-        return "feats." + a.substr(6);
     }
     return a;
 }
@@ -510,11 +530,16 @@ std::string QueryExecutor::normalize_attr(const std::string& attr) const {
 // extract the value for a specific feature name.
 
 bool feats_is_subkey(const std::string& name, std::string& feat_name) {
-    if (name.size() > 6 && name.compare(0, 6, "feats.") == 0) {
+    if (name.size() > 6 && name.compare(0, 6, "feats/") == 0) {
         feat_name = name.substr(6);
-        return true;
+        return !feat_name.empty() && feat_name.find('/') == std::string::npos;
     }
     return false;
+}
+
+bool corpus_has_ud_split_feats_column(const Corpus& corpus, const std::string& feat_name) {
+    return corpus.has_attr(std::string("feats#") + feat_name)
+        || corpus.has_attr(std::string("feats_") + feat_name);
 }
 
 std::string feats_extract_value(std::string_view feats,
@@ -620,6 +645,17 @@ void QueryExecutor::validate_query_name_bindings(const TokenQuery& query,
     }
     for (const auto& ff : query.global_function_filters)
         validate_global_func_filter_token_labels(ff, token_labels, region_labels);
+
+    const bool single_dep_subtree_only =
+        query.tokens.size() == 1 && query.tokens[0].is_dep_subtree
+        && std::all_of(query.tokens.begin(), query.tokens.end(),
+                       [](const QueryToken& t) { return !t.is_anchor(); });
+    for (const auto& tok : query.tokens) {
+        if (!tok.is_dep_subtree || tok.dep_subtree_source.empty()) continue;
+        if (token_labels.count(tok.dep_subtree_source)) continue;
+        if (single_dep_subtree_only) continue;  // CLI resolves src against named query or Last + name map
+        expect_token_label(tok.dep_subtree_source, "dep_subtree(...)", token_labels, region_labels);
+    }
 
     size_t real_token_slots = 0;
     for (const auto& tok : query.tokens) {
@@ -767,7 +803,9 @@ QueryPlan QueryExecutor::plan_query(const TokenQuery& query) const {
 
     std::vector<size_t> card(n);
     for (size_t i = 0; i < n; ++i)
-        card[i] = estimate_cardinality(query.tokens[i].conditions);
+        card[i] = query.tokens[i].is_dep_subtree
+                      ? std::numeric_limits<size_t>::max()
+                      : estimate_cardinality(query.tokens[i].conditions);
 
     // Pick the lowest-cardinality *non-optional* token as seed.
     // Optional tokens (min_repeat == 0) can match nothing, so they make
@@ -874,7 +912,7 @@ bool QueryExecutor::check_leaf(CorpusPos pos, const AttrCondition& ac) const {
 
     std::string name = normalize_attr(ac.attr);
 
-    // Combined feats mode: feats.Number="Sing" → check within combined feats string
+    // Combined feats mode: feats/Number="Sing" → check within combined feats string
     std::string feat_name;
     if (feats_is_subkey(name, feat_name) && !corpus_.has_attr(name)
         && corpus_.has_attr("feats")) {
@@ -1949,8 +1987,7 @@ bool build_aggregate_plan(const Corpus& corpus, const std::vector<std::string>& 
         std::string attr = normalize_query_attr_name(corpus, attr_spec);
         std::string feat_name;
         if (feats_is_subkey(attr, feat_name) && corpus.has_attr("feats")) {
-            std::string split_col = "feats_" + feat_name;
-            if (!corpus.has_attr(split_col)) {
+            if (!corpus_has_ud_split_feats_column(corpus, feat_name)) {
                 col.kind = AggregateBucketData::Column::Kind::FeatsComposite;
                 col.pa = &corpus.attr("feats");
                 col.feats_sub_key = feat_name;
@@ -1958,8 +1995,6 @@ bool build_aggregate_plan(const Corpus& corpus, const std::vector<std::string>& 
                 continue;
             }
         }
-        if (attr.size() > 5 && attr.substr(0, 5) == "feats" && attr.find('.') != std::string::npos)
-            attr[attr.find('.')] = '_';
         if (corpus.has_attr(attr)) {
             // `n.form`-style: label is not a struct prefix; prefer region row attribute when
             // the short name exists on a structural type (matches read_tabulate_field order).
@@ -2403,10 +2438,11 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
 
     // Partial match vectors are of size 2*n: [0..n-1]=starts, [n..2n-1]=ends
     // For non-repeating tokens: pm[i] == pm[n+i]
-    auto build_match = [n](std::vector<CorpusPos>&& pm) -> Match {
+    auto build_match = [this, n, &q](std::vector<CorpusPos>&& pm) -> Match {
         Match m;
         m.positions.assign(pm.begin(), pm.begin() + n);
         m.span_ends.assign(pm.begin() + n, pm.begin() + 2 * n);
+        materialize_dep_subtree_bindings(q, m);
         return m;
     };
 
@@ -2475,6 +2511,12 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
     // ── Single-token fast path ──────────────────────────────────────────
 
     if (n == 1) {
+        if (q.tokens[0].is_dep_subtree) {
+            throw std::runtime_error(
+                    "dep_subtree(...) must be paired with its source in one query (e.g. "
+                    "`head:[...] sub:dep_subtree(head) [:: ...]`), or define the source first "
+                    "as a named query (`head = [...];` then `sub = dep_subtree(head) [:: ...]`).");
+        }
         size_t est = estimate_cardinality(q.tokens[0].conditions);
         result.cardinalities = {est};
         result.seed_token = 0;
@@ -2603,18 +2645,22 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             if (rel.type != RelationType::SEQUENCE) { all_seq = false; break; }
         bool no_rep = true;
         bool no_anchor = true;
+        bool any_dep_subtree = false;
         for (const auto& tok : q.tokens) {
             if (tok.has_repetition()) no_rep = false;
             if (tok.is_anchor()) no_anchor = false;
+            if (tok.is_dep_subtree) any_dep_subtree = true;
         }
 
-        if (all_seq && no_rep && no_anchor && n >= 2) {
+        if (all_seq && no_rep && no_anchor && !any_dep_subtree && n >= 2) {
             // Pick cheapest token as seed
             size_t seed = 0;
             size_t best_est = SIZE_MAX;
             std::vector<size_t> card(n);
             for (size_t i = 0; i < n; ++i) {
-                card[i] = estimate_cardinality(q.tokens[i].conditions);
+                card[i] = q.tokens[i].is_dep_subtree
+                              ? std::numeric_limits<size_t>::max()
+                              : estimate_cardinality(q.tokens[i].conditions);
                 if (card[i] < best_est) { best_est = card[i]; seed = i; }
             }
             result.seed_token = seed;
@@ -2842,6 +2888,32 @@ void QueryExecutor::expand_seed(const TokenQuery& query,
 
             std::vector<std::vector<CorpusPos>> new_partial;
 
+            if (query.tokens[step.to].is_dep_subtree) {
+                if (!corpus_.has_deps())
+                    throw std::runtime_error("dep_subtree requires a corpus with dependency index");
+                if (rel != RelationType::SEQUENCE)
+                    throw std::runtime_error("dep_subtree must follow SEQUENCE (chain) relation");
+                const NameIndexMap nm = build_name_map(query);
+                auto src_it = nm.find(query.tokens[step.to].dep_subtree_source);
+                if (src_it == nm.end()) {
+                    throw std::runtime_error(
+                            "dep_subtree: unknown source token '" + query.tokens[step.to].dep_subtree_source
+                            + "'");
+                }
+                const size_t src_idx = src_it->second;
+                for (const auto& pm : partial) {
+                    CorpusPos head = pm[src_idx];
+                    if (head == NO_HEAD) continue;
+                    auto extended = pm;
+                    extended[step.to] = head;
+                    extended[n + step.to] = head;
+                    new_partial.push_back(std::move(extended));
+                }
+                partial = std::move(new_partial);
+                if (partial.empty()) break;
+                continue;
+            }
+
             if (is_negative) {
                 // Negative relation: keep partial only if NO target matches
                 RelationType pos_rel = (rel == RelationType::NOT_GOVERNS)
@@ -3025,11 +3097,71 @@ std::vector<Match> QueryExecutor::expand_one_seed(const TokenQuery& query,
                     Match m;
                     m.positions.assign(pm.begin(), pm.begin() + n);
                     m.span_ends.assign(pm.begin() + n, pm.begin() + 2 * n);
+                    materialize_dep_subtree_bindings(query, m);
                     out.push_back(std::move(m));
                     return true;
                 },
                 within_span_semantics);
 
+    return out;
+}
+
+void QueryExecutor::materialize_dep_subtree_bindings(const TokenQuery& query, Match& m) const {
+    if (!corpus_.has_deps()) return;
+    const auto& deps = corpus_.deps();
+    for (size_t i = 0; i < query.tokens.size(); ++i) {
+        const auto& tok = query.tokens[i];
+        if (!tok.is_dep_subtree || tok.name.empty()) continue;
+        if (i >= m.positions.size()) continue;
+        CorpusPos head = m.positions[i];
+        if (head == NO_HEAD) continue;
+        std::vector<CorpusPos> pos;
+        pos.push_back(head);
+        auto desc = deps.subtree(head);
+        pos.insert(pos.end(), desc.begin(), desc.end());
+        std::sort(pos.begin(), pos.end());
+        pos.erase(std::unique(pos.begin(), pos.end()), pos.end());
+        m.named_dep_subtrees[tok.name] = std::move(pos);
+    }
+}
+
+MatchSet QueryExecutor::execute_dep_subtree_from_named(const TokenQuery& query,
+                                                       const MatchSet& source_matches,
+                                                       const NameIndexMap& source_name_map,
+                                                       size_t max_matches,
+                                                       bool count_total,
+                                                       size_t max_total_cap) const {
+    validate_query_name_bindings(query);
+    if (query.tokens.size() != 1 || !query.tokens[0].is_dep_subtree)
+        throw std::runtime_error("internal: execute_dep_subtree_from_named expects one dep_subtree token");
+    if (!corpus_.has_deps())
+        throw std::runtime_error("dep_subtree requires a corpus with dependency index");
+    compile_query(query);
+    NameIndexMap name_map = build_name_map(query);
+
+    MatchSet out;
+    out.num_tokens = 1;
+    const std::string& src_label = query.tokens[0].dep_subtree_source;
+
+    for (const auto& src_m : source_matches.matches) {
+        CorpusPos head = resolve_name(src_m, source_name_map, src_label);
+        if (head == NO_HEAD) {
+            if (!src_m.positions.empty()) head = src_m.positions[0];
+            else continue;
+        }
+        Match m;
+        m.positions.push_back(head);
+        m.span_ends.push_back(head);
+        materialize_dep_subtree_bindings(query, m);
+        out.matches.push_back(std::move(m));
+        if (count_total && max_total_cap > 0 && out.matches.size() >= max_total_cap) break;
+    }
+
+    apply_global_filters(query, name_map, out);
+    if (max_matches > 0 && !count_total && out.matches.size() > max_matches)
+        out.matches.resize(max_matches);
+    out.total_count = out.matches.size();
+    out.total_exact = true;
     return out;
 }
 
@@ -3327,6 +3459,23 @@ void QueryExecutor::apply_global_filters(const TokenQuery& query, const NameInde
                         return {false, 0};
                     bool ok = sa.region_is_ancestor_of(ar.region_idx, dr.region_idx);
                     return {true, ok ? 1 : 0};
+                }
+                case GlobalFunctionType::TCNT: {
+                    if (fc.args.size() != 1) return {false, 0};
+                    const std::string& label = fc.args[0];
+                    auto ds = m.named_dep_subtrees.find(label);
+                    if (ds != m.named_dep_subtrees.end())
+                        return {true, static_cast<int64_t>(ds->second.size())};
+                    auto nr = m.named_regions.find(label);
+                    if (nr != m.named_regions.end()) {
+                        const RegionRef& rr = nr->second;
+                        if (!corpus_.has_structure(rr.struct_name)) return {false, 0};
+                        const auto& sa = corpus_.structure(rr.struct_name);
+                        Region rg = sa.get(rr.region_idx);
+                        if (rg.start > rg.end) return {true, 0};
+                        return {true, static_cast<int64_t>(rg.end - rg.start + 1)};
+                    }
+                    return {false, 0};
                 }
                 }
                 return {false, 0};

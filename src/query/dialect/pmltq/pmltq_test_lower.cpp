@@ -57,8 +57,7 @@ std::string pmltq_map_field(std::string field) {
         if (!rest.empty()) {
             if (rest[0] >= 'a' && rest[0] <= 'z')
                 rest[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(rest[0])));
-            // Align with native CQL feats/Key → feats.Key (QueryExecutor::normalize_attr)
-            return "feats." + rest;
+            return feats_p + rest;
         }
     }
     const std::string iset_p = "iset/";
@@ -67,7 +66,7 @@ std::string pmltq_map_field(std::string field) {
         if (!rest.empty()) {
             if (rest[0] >= 'a' && rest[0] <= 'z')
                 rest[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(rest[0])));
-            return "feats." + rest;
+            return feats_p + rest;
         }
     }
     return field;

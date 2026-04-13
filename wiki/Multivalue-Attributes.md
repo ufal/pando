@@ -41,16 +41,20 @@ For **single-column** `count` / `freq` on a **multivalue** positional attribute,
 
 With **`split_feats` false** (the usual case for UD), the indexer keeps a **single** positional attribute **`feats`**. On disk you get the normal positional family: `feats.dat`, `feats.lex`, `feats.rev`, … — one lexicon entry per **full** bundle string.
 
-Queries use **`feats/Feature`** or **`feats.Feature`** (see [PANDO-CQL.md](PANDO-CQL.md)). For those sub-keys the engine **does not** require a separate indexed column per feature: it resolves the value **at query time** by parsing the stored UD string on each candidate token (and uses the same logic for **`freq` / `tabulate` / aggregates** on `feats/Feature`). There are **no** `feats_Number.mv.*` style component indexes like MV: the “special filenames” story is different from multivalue sidecars.
+Queries use **`feats/Feature`** only — **`.`** is reserved for **`name.attr`** (token label or region binding), not UD sub-keys (see [PANDO-CQL.md](PANDO-CQL.md)). For those sub-keys the engine **does not** require a separate indexed column per feature: it resolves the value **at query time** by parsing the stored UD string on each candidate token (and uses the same logic for **`freq` / `tabulate` / aggregates** on `feats/Feature`). There are **no** `feats_Number.mv.*` style component indexes like MV: the “special filenames” story is different from multivalue sidecars.
 
 ### Split feats (optional)
 
-With **`pando-index --split-feats`** or JSONL **`split_feats: true`**, the indexer **decomposes** each bundle into **separate positional attributes** named **`feats_<FeatureName>`** (e.g. `feats_Number`, `feats_Mood`). Each of those gets its **own** `.dat` / `.lex` / `.rev` files like any other positional column. When a split column exists for a feature, the query normalizer can prefer it, so lookups may hit materialized **`feats_Number`** data instead of parsing the combined string.
+With **`pando-index --split-feats`** or JSONL **`split_feats: true`**, the indexer **decomposes** each bundle into **separate positional attributes** named **`feats#<FeatureName>`** (e.g. `feats#Number`, `feats#Mood`). That keeps them distinct from **region** attributes flattened as **`feats_<Field>`** (struct `feats`, field `Number` → `feats_Number`). Each split column gets its **own** `.dat` / `.lex` / `.rev` files. **Legacy** indexes may still use **`feats_<FeatureName>`** for UD split columns; the query normalizer accepts **`feats/Feature`** → `feats#Feature` or legacy `feats_Feature` when present.
 
 ### Relation to multivalue
 
 - **`feats`** must **not** be listed under **`multivalue`**: the pipe means **feature pairs**, not a multivalue set.
 - MV **`|`** = unordered set of components with **`.mv.*`** indexes; KV **`|`** = ordered **Key=Val** pairs inside one morphological field.
+
+### Key-only segments (future)
+
+Some UD-style columns (notably **MISC** in CoNLL-U) can contain **flags without `=value`**. The query-time parser currently expects **`FeatureName=`** to locate a value; a bare **`|Key|`** between pipes is **not** interpreted as **`Key=True`** yet. A reasonable future rule would be to treat such tokens as **`Key=True`** (or another sentential truth value); **left unspecified for now**.
 
 ## See also
 

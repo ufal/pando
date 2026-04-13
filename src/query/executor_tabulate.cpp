@@ -75,14 +75,11 @@ std::string read_tabulate_field(const Corpus& corpus, const Match& m,
     std::string attr = normalize_query_attr_name(corpus, attr_spec);
     std::string feat_name;
     if (feats_is_subkey(attr, feat_name) && corpus.has_attr("feats")) {
-        std::string split_col = "feats_" + feat_name;
-        if (!corpus.has_attr(split_col)) {
+        if (!corpus_has_ud_split_feats_column(corpus, feat_name)) {
             const auto& pa = corpus.attr("feats");
             return std::string(feats_extract_value(pa.value_at(pos), feat_name));
         }
     }
-    if (attr.size() > 5 && attr.substr(0, 5) == "feats" && attr.find('.') != std::string::npos)
-        attr[attr.find('.')] = '_';
     if (corpus.has_attr(attr))
         return std::string(corpus.attr(attr).value_at(pos));
 

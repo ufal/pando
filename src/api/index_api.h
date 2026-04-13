@@ -25,7 +25,7 @@ public:
     // Feed a token.
     //
     // - attrs: map from attribute name → value; typically includes
-    //   "form", "lemma", "upos", "xpos", "deprel", "feats" or feats_*.
+    //   "form", "lemma", "upos", "xpos", "deprel", "feats" or feats#* / feats_* (split).
     // - sentence_head_id: 1-based head index within the current sentence
     //   (0 = root, -1 = no dependency info).
     //

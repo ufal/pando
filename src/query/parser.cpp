@@ -6,6 +6,18 @@
 
 namespace pando {
 
+namespace {
+
+void reject_ud_feats_dot_syntax(const std::string& attr, size_t pos) {
+    if (attr.size() > 6 && attr.compare(0, 6, "feats.") == 0)
+        throw std::runtime_error(
+            "UD morphological features use feats/Feature (e.g. feats/Number=...), not feats.Feature; "
+            "'.' is reserved for name.attr (token label or region binding). Error at position " +
+            std::to_string(pos));
+}
+
+} // namespace
+
 Parser::Parser(const std::string& input, ParserOptions opts)
     : lexer_(input), opts_(opts) {}
 
@@ -59,6 +71,15 @@ Statement Parser::parse_statement() {
                 || t3.type == TokType::IDENT || t3.type == TokType::REGION_START) {
                 stmt.name = t1.text;
                 stmt.has_query = true;
+                // `Name = dep_subtree(src) [:: …]` — single-token query, not `[`…`]`
+                if (t3.type == TokType::IDENT && t3.text == "dep_subtree") {
+                    stmt.query.tokens.push_back(parse_token_expr());
+                    if (lexer_.peek().type == TokType::DCOLON) {
+                        lexer_.consume();
+                        parse_global_filters(stmt.query);
+                    }
+                    return stmt;
+                }
                 stmt.query = parse_token_query();
                 return stmt;
             }
@@ -570,6 +591,19 @@ TokenQuery Parser::parse_token_query() {
 QueryToken Parser::parse_token_expr() {
     QueryToken qt;
 
+    // `dep_subtree(src)` without a leading label (e.g. `Q = dep_subtree(head)`).
+    Token t_dep = lexer_.peek();
+    if (t_dep.type == TokType::IDENT && t_dep.text == "dep_subtree") {
+        lexer_.consume();
+        lexer_.expect(TokType::LPAREN);
+        std::string src = lexer_.expect(TokType::IDENT).text;
+        lexer_.expect(TokType::RPAREN);
+        qt.is_dep_subtree = true;
+        qt.dep_subtree_source = std::move(src);
+        parse_repetition(qt);
+        return qt;
+    }
+
     // Optional label: IDENT ":"
     Token t = lexer_.peek();
     if (t.type == TokType::IDENT) {
@@ -583,6 +617,17 @@ QueryToken Parser::parse_token_expr() {
             throw std::runtime_error("Expected ':' or '[' after identifier '" +
                                      t1.text + "'");
         }
+    }
+
+    if (lexer_.peek().type == TokType::IDENT && lexer_.peek().text == "dep_subtree") {
+        lexer_.consume();
+        lexer_.expect(TokType::LPAREN);
+        std::string src = lexer_.expect(TokType::IDENT).text;
+        lexer_.expect(TokType::RPAREN);
+        qt.is_dep_subtree = true;
+        qt.dep_subtree_source = std::move(src);
+        parse_repetition(qt);
+        return qt;
     }
 
     // Region boundary anchors: <s>, </s>, <text genre="book"> etc.
@@ -931,6 +976,10 @@ ConditionPtr Parser::parse_primary_condition() {
                 if (lexer_.peek().type == TokType::COLON) {
                     lexer_.consume();
                     nested_name = name_tok.text;
+                    if (negated) {
+                        throw std::runtime_error(
+                            "you cannot name tokens in a negative scope");
+                    }
                 } else {
                     // Not a name, error - we expected [ after keyword
                     throw std::runtime_error("Expected '[' or name:[] after structural keyword at position " + std::to_string(name_tok.pos));
@@ -959,6 +1008,7 @@ ConditionPtr Parser::parse_primary_condition() {
             lexer_.consume();
             ac.attr += "." + lexer_.expect(TokType::IDENT).text;
         }
+        reject_ud_feats_dot_syntax(ac.attr, t.pos);
         lexer_.expect(TokType::RPAREN);
         Token op_tok = lexer_.next();
         switch (op_tok.type) {
@@ -986,6 +1036,7 @@ ConditionPtr Parser::parse_primary_condition() {
         lexer_.consume();
         ac.attr += "." + lexer_.expect(TokType::IDENT).text;
     }
+    reject_ud_feats_dot_syntax(ac.attr, t.pos);
 
     // Operator
     Token op = lexer_.next();
@@ -1179,6 +1230,7 @@ void Parser::parse_global_filters(TokenQuery& tq) {
                 else if (name == "contains")      fc.func = GlobalFunctionType::CONTAINS;
                 else if (name == "rchild")        fc.func = GlobalFunctionType::RCHILD;
                 else if (name == "rcontains")      fc.func = GlobalFunctionType::RCONTAINS;
+                else if (name == "tcnt")          fc.func = GlobalFunctionType::TCNT;
                 else throw std::runtime_error("Unknown function in global filter: " + name);
                 lexer_.consume(); // consume LPAREN
                 while (lexer_.peek().type != TokType::RPAREN) {
