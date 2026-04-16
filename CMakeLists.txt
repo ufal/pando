@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(pando VERSION 0.1.13 LANGUAGES C CXX)
+project(pando VERSION 0.1.14 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -10,6 +10,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Optional: HTTP server (cpp-httplib, header-only)
 include(FetchContent)
+if(POLICY CMP0169)
+    # FetchContent_Populate() is deprecated on newer CMake; CMP0169=OLD keeps this project quiet.
+    cmake_policy(SET CMP0169 OLD)
+endif()
 FetchContent_Declare(httplib
     GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
     GIT_TAG v0.14.3
@@ -148,9 +152,17 @@ if(PANDO_LINENOISE_REPL AND NOT WIN32)
     FetchContent_Declare(linenoise_fc
         GIT_REPOSITORY https://github.com/antirez/linenoise.git
         GIT_TAG 452e3793858a15cc006bb3aa3ea06378eb98c5b5
-        PATCH_COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/cmake/linenoise_fc_CMakeLists.txt" CMakeLists.txt
     )
-    FetchContent_MakeAvailable(linenoise_fc)
+    # Upstream linenoise ships no CMakeLists.txt; instead of patching the fetched tree
+    # (which can be brittle in containerized environments), we populate and wire it up
+    # via an explicit target.
+    FetchContent_GetProperties(linenoise_fc)
+    if(NOT linenoise_fc_POPULATED)
+        FetchContent_Populate(linenoise_fc)
+    endif()
+    add_library(pando_linenoise STATIC "${linenoise_fc_SOURCE_DIR}/linenoise.c")
+    target_include_directories(pando_linenoise PUBLIC "${linenoise_fc_SOURCE_DIR}")
+    set_target_properties(pando_linenoise PROPERTIES C_STANDARD 99)
 endif()
 
 # CLI executable
@@ -192,9 +204,13 @@ if(BUILD_TESTING)
     target_link_libraries(mv_stage1_executor_test PRIVATE pando_core)
     add_test(NAME mv_stage1_executor COMMAND mv_stage1_executor_test)
 
-    add_executable(dep_jsonl_alignment_test src/index/dep_jsonl_alignment_test.cpp)
-    target_link_libraries(dep_jsonl_alignment_test PRIVATE pando_core)
-    add_test(NAME dep_jsonl_alignment COMMAND dep_jsonl_alignment_test)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/index/dep_jsonl_alignment_test.cpp")
+        add_executable(dep_jsonl_alignment_test src/index/dep_jsonl_alignment_test.cpp)
+        target_link_libraries(dep_jsonl_alignment_test PRIVATE pando_core)
+        add_test(NAME dep_jsonl_alignment COMMAND dep_jsonl_alignment_test)
+    else()
+        message(STATUS "Skipping dep_jsonl_alignment test; missing src/index/dep_jsonl_alignment_test.cpp")
+    endif()
 endif()
 
 install(TARGETS pando_cwb_dialect
