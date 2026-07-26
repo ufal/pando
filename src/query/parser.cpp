@@ -35,7 +35,7 @@ Program Parser::parse() {
 bool Parser::is_command_keyword(const std::string& text) const {
     static const std::vector<std::string> cmds = {
         "count", "group", "sort", "freq", "coll", "dcoll",
-        "cat", "size", "raw", "show", "tabulate", "stats", "keyness", "set", "drop"
+        "cat", "size", "raw", "show", "tabulate", "describe", "stats", "keyness", "set", "drop"
     };
     std::string lower = text;
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
@@ -305,6 +305,32 @@ GroupCommand Parser::parse_command() {
     else if (kw == "cat") cmd.type = CommandType::CAT;
     else if (kw == "size") cmd.type = CommandType::SIZE;
     else if (kw == "raw") cmd.type = CommandType::RAW;
+    else if (kw == "describe") {
+        cmd.type = CommandType::DESCRIBE;
+        cmd.tabulate_offset = 0;
+        cmd.tabulate_limit = 1000;
+
+        if (lexer_.peek().type == TokType::NUMBER) {
+            cmd.tabulate_offset = std::stoull(lexer_.next().text);
+            cmd.tabulate_limit = std::stoull(lexer_.expect(TokType::NUMBER).text);
+            if (lexer_.peek().type == TokType::IDENT)
+                cmd.query_name = lexer_.next().text;
+            return cmd;
+        }
+
+        if (lexer_.peek().type == TokType::IDENT) {
+            std::string first = lexer_.next().text;
+            if (lexer_.peek().type == TokType::NUMBER) {
+                cmd.query_name = first;
+                cmd.tabulate_offset = std::stoull(lexer_.next().text);
+                cmd.tabulate_limit = std::stoull(lexer_.expect(TokType::NUMBER).text);
+            } else {
+                cmd.query_name = first;
+            }
+            return cmd;
+        }
+        return cmd;
+    }
     else if (kw == "tabulate") {
         cmd.type = CommandType::TABULATE;
         // CWB-style: tabulate [QueryName] offset limit field1[, field2, ...]

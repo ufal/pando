@@ -305,6 +305,7 @@ enum class CommandType {
     SHOW_INFO,
     SHOW_VALUES,   // show values <attr> — unique values + counts
     TABULATE,
+    DESCRIBE,      // describe [offset limit] [QueryName] — materialize all attrs for matches
     STATS,         // stats avg(expr), median(expr) [by field[, ...]]
     KEYNESS,       // keyness by <attr> — subcorpus keyword extraction (#40)
     SET,           // set <name> <value> — change runtime option (#41)

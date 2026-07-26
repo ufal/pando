@@ -889,6 +889,99 @@ static void emit_tabulate_json(std::ostream& out, const Corpus& corpus, const Ma
     }
 }
 
+static void emit_describe_json(std::ostream& out, const Corpus& corpus, const MatchSet& ms,
+                               const GroupCommand& cmd, const NameIndexMap& name_map) {
+    const size_t n = ms.matches.size();
+    const size_t start = std::min(cmd.tabulate_offset, n);
+    const size_t end = std::min(start + cmd.tabulate_limit, n);
+    const size_t total_hits = ms.total_count > 0 ? ms.total_count : n;
+
+    auto is_region_only_match = [&](const Match& m) {
+        return m.token_group_match || (!m.named_regions.empty() && name_map.empty());
+    };
+
+    out << "{\"ok\": true, \"operation\": \"describe\", \"last_command\": \"describe\", \"result\": {\n";
+    out << "  \"total_matches\": " << total_hits << ",\n";
+    out << "  \"offset\": " << cmd.tabulate_offset << ",\n";
+    out << "  \"limit\": " << cmd.tabulate_limit << ",\n";
+    out << "  \"rows_returned\": " << (end - start) << ",\n";
+    out << "  \"rows\": [\n";
+    for (size_t i = start; i < end; ++i) {
+        if (i > start) out << ",\n";
+        const auto& m = ms.matches[i];
+        const bool region_only = is_region_only_match(m);
+        out << "    {\"match_index\": " << i
+            << ", \"match_start\": " << m.first_pos()
+            << ", \"match_end\": " << m.last_pos()
+            << ", \"kind\": " << jstr(region_only ? "region" : "token");
+
+        if (region_only) {
+            out << ", \"regions\": [";
+            bool first_region = true;
+            for (const auto& [label, rr] : m.named_regions) {
+                if (!corpus.has_structure(rr.struct_name)) continue;
+                const auto& sa = corpus.structure(rr.struct_name);
+                if (rr.region_idx >= sa.region_count()) continue;
+                if (!first_region) out << ", ";
+                first_region = false;
+                Region r = sa.get(rr.region_idx);
+                out << "{\"label\": " << jstr(label)
+                    << ", \"type\": " << jstr(rr.struct_name)
+                    << ", \"index\": " << rr.region_idx
+                    << ", \"start\": " << r.start
+                    << ", \"end\": " << r.end
+                    << ", \"attrs\": {";
+                const auto& ra = sa.region_attr_names();
+                bool first_ra = true;
+                for (size_t j = 0; j < ra.size(); ++j) {
+                    std::string_view rv = sa.region_value(ra[j], rr.region_idx);
+                    if (!describe_emit_attr(ra[j], rv)) continue;
+                    if (!first_ra) out << ", ";
+                    first_ra = false;
+                    out << jstr(ra[j]) << ": " << jstr(std::string(rv));
+                }
+                out << "}}";
+            }
+            out << "]";
+            if (!m.token_group_props.empty()) {
+                out << ", \"token_group_props\": {";
+                bool first_prop = true;
+                for (size_t j = 0; j < m.token_group_props.size(); ++j) {
+                    const auto& [pk, pv] = m.token_group_props[j];
+                    if (!describe_emit_attr(pk, pv)) continue;
+                    if (!first_prop) out << ", ";
+                    first_prop = false;
+                    out << jstr(pk) << ": " << jstr(pv);
+                }
+                out << "}";
+            }
+        } else {
+            out << ", \"tokens\": [";
+            bool first_tok = true;
+            const auto& attr_names = corpus.attr_names();
+            for (size_t t = 0; t < m.positions.size(); ++t) {
+                if (m.positions[t] == NO_HEAD) continue;
+                CorpusPos span_end = (!m.span_ends.empty()) ? m.span_ends[t] : m.positions[t];
+                for (CorpusPos p = m.positions[t]; p <= span_end; ++p) {
+                    if (!first_tok) out << ", ";
+                    first_tok = false;
+                    out << "{\"corpus_pos\": " << p;
+                    for (const auto& attr_name : attr_names) {
+                        if (!corpus.has_attr(attr_name)) continue;
+                        auto val = corpus.attr(attr_name).value_at(p);
+                        if (!describe_emit_attr(attr_name, val)) continue;
+                        out << ", " << jstr(attr_name) << ": " << jstr(val);
+                    }
+                    out << "}";
+                }
+            }
+            out << "]";
+        }
+        out << "}";
+    }
+    out << "\n  ]\n}}\n";
+}
+
 static void emit_raw_json(std::ostream& out, const Corpus& corpus, const MatchSet& ms) {
     const auto& form = corpus.attr("form");
     out << "{\"ok\": true, \"operation\": \"raw\", \"last_command\": \"raw\", \"result\": [\n";
@@ -1543,6 +1636,9 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                     break;
                 case CommandType::TABULATE:
                     emit_tabulate_json(out, corpus, *ms_to_use, stmt.command, *nm_to_use);
+                    break;
+                case CommandType::DESCRIBE:
+                    emit_describe_json(out, corpus, *ms_to_use, stmt.command, *nm_to_use);
                     break;
                 case CommandType::RAW:
                     emit_raw_json(out, corpus, *ms_to_use);

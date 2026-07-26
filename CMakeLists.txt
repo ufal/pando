@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(pando VERSION 0.1.18 LANGUAGES C CXX)
+project(pando VERSION 0.1.19 LANGUAGES C CXX)
 
 include(CTest)
 

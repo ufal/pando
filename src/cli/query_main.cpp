@@ -1246,6 +1246,115 @@ static void emit_tabulate(const Corpus& corpus, const MatchSet& ms,
     }
 }
 
+static void emit_describe(const Corpus& corpus, const MatchSet& ms,
+                          const GroupCommand& cmd, const Options& opts,
+                          const NameIndexMap& name_map) {
+    const size_t n = ms.matches.size();
+    const size_t start = std::min(cmd.tabulate_offset, n);
+    const size_t end = std::min(start + cmd.tabulate_limit, n);
+    const size_t total_hits = ms.total_count > 0 ? ms.total_count : n;
+
+    auto is_region_only_match = [&](const Match& m) {
+        return m.token_group_match || (!m.named_regions.empty() && name_map.empty());
+    };
+
+    if (opts.json || opts.api) {
+        std::ostringstream out;
+        out << "{\"ok\": true, \"operation\": \"describe\", \"last_command\": \"describe\", \"result\": {\n";
+        out << "  \"total_matches\": " << total_hits << ",\n";
+        out << "  \"offset\": " << cmd.tabulate_offset << ",\n";
+        out << "  \"limit\": " << cmd.tabulate_limit << ",\n";
+        out << "  \"rows_returned\": " << (end - start) << ",\n";
+        out << "  \"rows\": [\n";
+        for (size_t i = start; i < end; ++i) {
+            if (i > start) out << ",\n";
+            const auto& m = ms.matches[i];
+            const bool region_only = is_region_only_match(m);
+            out << "    {\"match_index\": " << i
+                << ", \"match_start\": " << m.first_pos()
+                << ", \"match_end\": " << m.last_pos()
+                << ", \"kind\": " << jstr(region_only ? "region" : "token");
+
+            if (region_only) {
+                out << ", \"regions\": [";
+                bool first_region = true;
+                for (const auto& [label, rr] : m.named_regions) {
+                    if (!corpus.has_structure(rr.struct_name)) continue;
+                    const auto& sa = corpus.structure(rr.struct_name);
+                    if (rr.region_idx >= sa.region_count()) continue;
+                    if (!first_region) out << ", ";
+                    first_region = false;
+                    Region r = sa.get(rr.region_idx);
+                    out << "{\"label\": " << jstr(label)
+                        << ", \"type\": " << jstr(rr.struct_name)
+                        << ", \"index\": " << rr.region_idx
+                        << ", \"start\": " << r.start
+                        << ", \"end\": " << r.end
+                        << ", \"attrs\": {";
+                    const auto& ra = sa.region_attr_names();
+                    bool first_ra = true;
+                    for (size_t j = 0; j < ra.size(); ++j) {
+                        std::string_view rv = sa.region_value(ra[j], rr.region_idx);
+                        if (!describe_emit_attr(ra[j], rv)) continue;
+                        if (!first_ra) out << ", ";
+                        first_ra = false;
+                        out << jstr(ra[j]) << ": " << jstr(std::string(rv));
+                    }
+                    out << "}}";
+                }
+                out << "]";
+                if (!m.token_group_props.empty()) {
+                    out << ", \"token_group_props\": {";
+                    bool first_prop = true;
+                    for (size_t j = 0; j < m.token_group_props.size(); ++j) {
+                        const auto& [pk, pv] = m.token_group_props[j];
+                        if (!describe_emit_attr(pk, pv)) continue;
+                        if (!first_prop) out << ", ";
+                        first_prop = false;
+                        out << jstr(pk) << ": " << jstr(pv);
+                    }
+                    out << "}";
+                }
+            } else {
+                out << ", \"tokens\": [";
+                bool first_tok = true;
+                const auto& attr_names = corpus.attr_names();
+                for (size_t t = 0; t < m.positions.size(); ++t) {
+                    if (m.positions[t] == NO_HEAD) continue;
+                    CorpusPos span_end = (!m.span_ends.empty()) ? m.span_ends[t] : m.positions[t];
+                    for (CorpusPos p = m.positions[t]; p <= span_end; ++p) {
+                        if (!first_tok) out << ", ";
+                        first_tok = false;
+                        out << "{\"corpus_pos\": " << p;
+                        for (const auto& attr_name : attr_names) {
+                            if (!corpus.has_attr(attr_name)) continue;
+                            auto val = corpus.attr(attr_name).value_at(p);
+                            if (!describe_emit_attr(attr_name, val)) continue;
+                            out << ", " << jstr(attr_name) << ": " << jstr(val);
+                        }
+                        out << "}";
+                    }
+                }
+                out << "]";
+            }
+            out << "}";
+        }
+        out << "\n  ]\n}}\n";
+        std::cout << out.str();
+        return;
+    }
+
+    for (size_t i = start; i < end; ++i) {
+        const auto& m = ms.matches[i];
+        const bool region_only = is_region_only_match(m);
+        std::cout << "#" << i << " [" << m.first_pos() << "," << m.last_pos() << "] "
+                  << (region_only ? "region" : "token") << "\n";
+    }
+    if (end < n || (total_hits > n && end == n))
+        std::cout << "# (" << total_hits << " matches in query; showing " << (end - start)
+                  << " at offset " << cmd.tabulate_offset << ")\n";
+}
+
 static void freq_build_counts(const Corpus& corpus, const MatchSet& ms,
                               const GroupCommand& cmd, const Options& opts,
                               const NameIndexMap& name_map,
@@ -2457,6 +2566,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                 case CommandType::FREQ:
                 case CommandType::SIZE:
                 case CommandType::TABULATE:
+                case CommandType::DESCRIBE:
                 case CommandType::STATS:
                 case CommandType::RAW:
                 case CommandType::COLL:
@@ -3174,6 +3284,11 @@ static void run_query(const Corpus& corpus, const std::string& input,
                         emit_tabulate(corpus, *ms_to_use, cmd_to_run, opts, *nm_to_use);
                     }
                     break;
+                case CommandType::DESCRIBE:
+                    if (should_emit_output) {
+                        emit_describe(corpus, *ms_to_use, cmd_to_run, opts, *nm_to_use);
+                    }
+                    break;
 
                 case CommandType::STATS:
                     if (should_emit_output) {
@@ -3263,7 +3378,7 @@ static void print_interactive_repl_help(const Options& opts) {
         << "  Collocation / comparison:\n"
         << "    coll | dcoll | keyness …\n\n"
         << "  Tables / dumps:\n"
-        << "    tabulate … | raw | cat\n\n"
+        << "    tabulate … | describe … | raw | cat\n\n"
         << "  Corpus / session:\n"
         << "    show attributes | show regions | show named | show info | show values <attr>\n"
         << "    show settings | set <name> <value> | drop <name> | drop all\n\n"

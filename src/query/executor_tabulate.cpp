@@ -198,6 +198,10 @@ std::string read_tabulate_field(const Corpus& corpus, const Match& m,
                 auto rkey = resolve_region_attr_key(sa, rr.struct_name, rattr);
                 if (rkey)
                     return render_date_part(std::string(sa.region_value(*rkey, rr.region_idx)));
+                if (auto super_val = lookup_super_region_attr_value(
+                        corpus, sa, rr.struct_name, rr.region_idx, rattr)) {
+                    return render_date_part(*super_val);
+                }
                 throw std::runtime_error(
                     "Tabulate field '" + field + "': no region attribute '" + rattr
                     + "' on structure '" + rr.struct_name + "' (binding '" + name + "')");

@@ -535,12 +535,18 @@ bool fill_aggregate_key_impl(AggregateBucketData& data, const Corpus& corpus, co
             auto nr = m.named_regions.find(col.named_anchor);
             if (nr == m.named_regions.end()) return false;
             const auto& sa = corpus.structure(nr->second.struct_name);
-            auto rkey = resolve_region_attr_key(sa, nr->second.struct_name, col.region_attr_name);
-            if (!rkey) return false;
-            std::string val(sa.region_value(*rkey, nr->second.region_idx));
+            std::optional<std::string> val;
+            if (auto rkey = resolve_region_attr_key(sa, nr->second.struct_name, col.region_attr_name)) {
+                val = std::string(sa.region_value(*rkey, nr->second.region_idx));
+            } else {
+                val = lookup_super_region_attr_value(
+                    corpus, sa, nr->second.struct_name, nr->second.region_idx,
+                    col.region_attr_name);
+            }
+            if (!val) return false;
             if (col.date_transform != AggregateBucketData::Column::DateTransform::None)
-                val = apply_date_transform_bucket(val, col.date_transform);
-            intern_value(std::move(val));
+                *val = apply_date_transform_bucket(*val, col.date_transform);
+            intern_value(std::move(*val));
         } else {
             int64_t rgn = -1;
             if (!col.named_anchor.empty()) {

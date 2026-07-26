@@ -38,6 +38,14 @@ inline std::string jstr(std::string_view s) {
     return "\"" + json_escape(s) + "\"";
 }
 
+/// `describe` output: omit `""` always; omit `_` except on `form`/`lemma` (may be `_`).
+inline bool describe_emit_attr(std::string_view attr_name, std::string_view val) {
+    if (val.empty()) return false;
+    if (val == "_")
+        return attr_name == "form" || attr_name == "lemma";
+    return true;
+}
+
 struct KwicContext {
     std::string left;
     std::string match;

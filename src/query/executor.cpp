@@ -2506,12 +2506,18 @@ bool fill_aggregate_key(AggregateBucketData& data, const Corpus& corpus, const M
             auto nr = m.named_regions.find(col.named_anchor);
             if (nr == m.named_regions.end()) return false;
             const auto& sa = corpus.structure(nr->second.struct_name);
-            auto rk = resolve_region_attr_key(sa, nr->second.struct_name, col.region_attr_name);
-            if (!rk) return false;
-            std::string val(sa.region_value(*rk, nr->second.region_idx));
+            std::optional<std::string> val;
+            if (auto rk = resolve_region_attr_key(sa, nr->second.struct_name, col.region_attr_name)) {
+                val = std::string(sa.region_value(*rk, nr->second.region_idx));
+            } else {
+                val = lookup_super_region_attr_value(
+                    corpus, sa, nr->second.struct_name, nr->second.region_idx,
+                    col.region_attr_name);
+            }
+            if (!val) return false;
             if (col.date_transform != AggregateBucketData::Column::DateTransform::None)
-                val = apply_date_transform_bucket(val, col.date_transform);
-            intern_value(std::move(val));
+                *val = apply_date_transform_bucket(*val, col.date_transform);
+            intern_value(std::move(*val));
         } else {
             int64_t rgn = -1;
             if (!col.named_anchor.empty()) {
@@ -4364,32 +4370,9 @@ MatchSet QueryExecutor::execute_region_enumeration(const std::vector<AnchorConst
 
             // Super-region fallback for region-only anchor enumeration
             // (e.g. b:<s text_lang="Dutch"> where language lives on text).
-            bool matched_super = false;
-            Region reg = sa.get(ri);
-            for (const auto& super_name : corpus_.structure_names()) {
-                if (super_name == enum_ac->region) continue;
-                if (!corpus_.has_structure(super_name)) continue;
-                const auto& super_sa = corpus_.structure(super_name);
-                auto super_key = resolve_region_attr_key(super_sa, super_name, key);
-                if (!super_key) {
-                    RegionAttrParts parts;
-                    if (split_region_attr_name(key, parts) && parts.struct_name == super_name) {
-                        super_key = resolve_region_attr_key(super_sa, super_name, parts.attr_name);
-                    }
-                }
-                if (!super_key) continue;
-                super_sa.for_each_region_at(reg.start, [&](size_t sidx) -> bool {
-                    Region sr = super_sa.get(sidx);
-                    if (sr.start <= reg.start && reg.end <= sr.end
-                        && super_sa.region_value(*super_key, sidx) == wanted_val) {
-                        matched_super = true;
-                        return false;
-                    }
-                    return true;
-                });
-                if (matched_super) break;
-            }
-            if (!matched_super) {
+            auto super_val = lookup_super_region_attr_value(
+                corpus_, sa, enum_ac->region, ri, key);
+            if (!super_val || *super_val != wanted_val) {
                 attr_ok = false;
                 break;
             }
@@ -4459,31 +4442,9 @@ struct AnchorRowCheck {
 
             // Super-region fallback (e.g. <s text_lang="Dutch"> resolves via
             // containing text.text_lang when s itself has no lang attr).
-            bool matched_super = false;
-            for (const auto& super_name : corpus.structure_names()) {
-                if (super_name == region_name) continue;
-                if (!corpus.has_structure(super_name)) continue;
-                const auto& super_sa = corpus.structure(super_name);
-                auto super_key = resolve_region_attr_key(super_sa, super_name, key);
-                if (!super_key) {
-                    RegionAttrParts parts;
-                    if (split_region_attr_name(key, parts) && parts.struct_name == super_name) {
-                        super_key = resolve_region_attr_key(super_sa, super_name, parts.attr_name);
-                    }
-                }
-                if (!super_key) continue;
-                super_sa.for_each_region_at(cur.start, [&](size_t sidx) -> bool {
-                    Region sr = super_sa.get(sidx);
-                    if (sr.start <= cur.start && cur.end <= sr.end
-                        && super_sa.region_value(*super_key, sidx) == wanted_val) {
-                        matched_super = true;
-                        return false;
-                    }
-                    return true;
-                });
-                if (matched_super) break;
-            }
-            if (!matched_super) return false;
+            auto super_val = lookup_super_region_attr_value(
+                corpus, sa, region_name, ri, key);
+            if (!super_val || *super_val != wanted_val) return false;
         }
         return true;
     }

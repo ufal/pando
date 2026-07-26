@@ -362,6 +362,41 @@ inline std::optional<std::string> evaluate_spellout_tabulate_field(
         "' does not refer to a region anchor from the query");
 }
 
+/// When `attr` is not on the bound region row, read it from a geometrically containing
+/// super-region (same rules as anchor restriction super-region fallback).
+inline std::optional<std::string> lookup_super_region_attr_value(
+        const Corpus& corpus,
+        const StructuralAttr& bound_sa,
+        const std::string& bound_struct,
+        size_t region_idx,
+        const std::string& attr) {
+    Region reg = bound_sa.get(region_idx);
+    for (const auto& super_name : corpus.structure_names()) {
+        if (super_name == bound_struct) continue;
+        if (!corpus.has_structure(super_name)) continue;
+        const auto& super_sa = corpus.structure(super_name);
+        auto super_key = resolve_region_attr_key(super_sa, super_name, attr);
+        if (!super_key) {
+            RegionAttrParts parts;
+            if (split_region_attr_name(attr, parts) && parts.struct_name == super_name) {
+                super_key = resolve_region_attr_key(super_sa, super_name, parts.attr_name);
+            }
+        }
+        if (!super_key) continue;
+        std::optional<std::string> found;
+        super_sa.for_each_region_at(reg.start, [&](size_t sidx) -> bool {
+            Region sr = super_sa.get(sidx);
+            if (sr.start <= reg.start && reg.end <= sr.end) {
+                found = std::string(super_sa.region_value(*super_key, sidx));
+                return false;
+            }
+            return true;
+        });
+        if (found) return found;
+    }
+    return std::nullopt;
+}
+
 /// Project one tabulate / group-by field. Throws `std::runtime_error` for unknown attribute
 /// names (token, region, or named-region binding); empty string is only returned when the
 /// attribute exists but has no value at this match (e.g. position outside a region).
