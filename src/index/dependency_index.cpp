@@ -17,6 +17,11 @@ void DependencyIndex::open(const std::string& dir,
 }
 
 CorpusPos DependencyIndex::head(CorpusPos pos) const {
+    int64_t hint = -1;
+    return head_from(pos, hint);
+}
+
+CorpusPos DependencyIndex::head_from(CorpusPos pos, int64_t& sentence_hint) const {
     // Defensive bounds check to avoid OOB access on malformed queries/plans
     size_t n = head_file_.size() / sizeof(int16_t);
     if (pos < 0 || static_cast<size_t>(pos) >= n)
@@ -24,8 +29,9 @@ CorpusPos DependencyIndex::head(CorpusPos pos) const {
 
     int16_t local = head_file_.as<int16_t>()[pos];
     if (local == -1) return NO_HEAD;
-    int64_t ri = sentences_->find_region(pos);
+    int64_t ri = sentences_->find_region_from(pos, sentence_hint);
     if (ri < 0) return NO_HEAD;
+    sentence_hint = ri;
     Region sent = sentences_->get(static_cast<size_t>(ri));
     return sent.start + static_cast<CorpusPos>(local);
 }

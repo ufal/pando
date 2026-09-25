@@ -29,6 +29,10 @@ public:
     // Absolute corpus position of the head.  Returns NO_HEAD for root.
     CorpusPos head(CorpusPos pos) const;
 
+    /// Like `head`, but reuses `sentence_hint` via `find_region_from` so scanning
+    /// sorted child positions is amortized O(1) per call (Manatee-style dep joins).
+    CorpusPos head_from(CorpusPos pos, int64_t& sentence_hint) const;
+
     // Children of pos.  First call in a sentence builds and caches the
     // full children map (O(sentence_length)); subsequent calls in the
     // same sentence are O(1) amortized via cache lookup.

@@ -222,6 +222,24 @@ static bool shift_merge_starts(const std::vector<CorpusPos>& starts, const RevSp
     return true;
 }
 
+/// Fill a corpus-sized bitset from sorted `.rev` postings (dense-side operand for dep joins).
+static void rev_span_to_bitset(const RevSpan& span, std::vector<uint64_t>& bits,
+                               CorpusPos corpus_size) {
+    bits.assign(static_cast<size_t>((corpus_size + 63) / 64), 0);
+    for (size_t i = 0; i < span.count; ++i) {
+        CorpusPos p = span.at(i);
+        if (p < 0 || p >= corpus_size) continue;
+        bits[static_cast<size_t>(p) >> 6] |= (uint64_t{1} << (static_cast<size_t>(p) & 63));
+    }
+}
+
+static inline bool bitset_test(const std::vector<uint64_t>& bits, CorpusPos p) {
+    if (p < 0) return false;
+    size_t i = static_cast<size_t>(p) >> 6;
+    if (i >= bits.size()) return false;
+    return (bits[i] & (uint64_t{1} << (static_cast<size_t>(p) & 63))) != 0;
+}
+
 static void collect_token_and_region_labels(const TokenQuery& q,
                                             std::unordered_set<std::string>* token_labels,
                                             std::unordered_set<std::string>* region_labels) {
@@ -3257,8 +3275,8 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 }
                 std::vector<CorpusPos> pm(2 * n);
                 for (size_t i = 0; i < n; ++i) {
-                    pm[2 * i]     = p0 + static_cast<int64_t>(i);
-                    pm[2 * i + 1] = p0 + static_cast<int64_t>(i);
+                    pm[i]     = p0 + static_cast<int64_t>(i);
+                    pm[n + i] = p0 + static_cast<int64_t>(i);
                 }
                 add_match(std::move(pm));
                 return !reached_limit() && !reached_total_cap();
@@ -3363,11 +3381,11 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 }
                 if (!all_match) return true;
 
-                // Build match: 2*n entries (start, end for each token; all single-position)
+                // Build match: [0..n)=starts, [n..2n)=ends
                 std::vector<CorpusPos> pm(2 * n);
                 for (size_t i = 0; i < n; ++i) {
-                    pm[2 * i]     = p0 + static_cast<int64_t>(i);
-                    pm[2 * i + 1] = p0 + static_cast<int64_t>(i);
+                    pm[i]     = p0 + static_cast<int64_t>(i);
+                    pm[n + i] = p0 + static_cast<int64_t>(i);
                 }
                 add_match(std::move(pm));
                 return !reached_limit() && !reached_total_cap();
@@ -3381,6 +3399,109 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             apply_global_filters(q, name_map, result);
             result.total_exact = !reached_limit() && !reached_total_cap();
             return result;
+        }
+    }
+
+    // ── Dep EQ fast path: [A] > [B] / [A] < [B] via bitset + head() ─────
+    //
+    // Dense POS×POS (e.g. VERB > NOUN) used to probe millions of seeds.
+    // Build a bitset of the parent side from .rev, stream the child side,
+    // test head(child) ∈ parent — sequential .rev + amortized head_from.
+    {
+        bool no_rep = true, no_anchor = true, any_dep_subtree = false;
+        for (const auto& tok : q.tokens) {
+            if (tok.has_repetition()) no_rep = false;
+            if (tok.is_anchor()) no_anchor = false;
+            if (tok.is_dep_subtree) any_dep_subtree = true;
+        }
+        if (n == 2 && no_rep && no_anchor && !any_dep_subtree
+            && q.relations.size() == 1 && corpus_.has_deps()) {
+            RelationType rt = q.relations[0].type;
+            if (rt == RelationType::GOVERNS || rt == RelationType::GOVERNED_BY) {
+                SeqMergeOperand left = seq_merge_operand(corpus_, q.tokens[0].conditions);
+                SeqMergeOperand right = seq_merge_operand(corpus_, q.tokens[1].conditions);
+                if (left.kind == SeqMergeTok::EqRev && right.kind == SeqMergeTok::EqRev
+                    && !left.span.empty() && !right.span.empty()) {
+                    // GOVERNS: head(right)=left.  GOVERNED_BY: head(left)=right.
+                    const RevSpan& parent_span =
+                        (rt == RelationType::GOVERNS) ? left.span : right.span;
+                    const RevSpan& child_span =
+                        (rt == RelationType::GOVERNS) ? right.span : left.span;
+                    const bool parent_is_token0 = (rt == RelationType::GOVERNS);
+
+                    result.seed_token = parent_is_token0 ? 0 : 1;
+                    result.cardinalities = {
+                        estimate_cardinality(q.tokens[0].conditions),
+                        estimate_cardinality(q.tokens[1].conditions)};
+
+                    std::string effective_within = q.within.empty()
+                        ? corpus_.default_within() : q.within;
+                    bool has_within = !effective_within.empty() &&
+                                      corpus_.has_structure(effective_within);
+                    const StructuralAttr* within_sa = has_within
+                        ? &corpus_.structure(effective_within) : nullptr;
+                    const bool within_span_semantics =
+                        has_within && (corpus_.is_nested(effective_within) ||
+                                       corpus_.is_overlapping(effective_within));
+
+                    std::vector<uint64_t> parent_bits;
+                    rev_span_to_bitset(parent_span, parent_bits, corpus_.size());
+
+                    const auto& deps = corpus_.deps();
+                    int64_t sent_hint = -1;
+                    CorpusPos corpus_end = corpus_.size();
+
+                    for (size_t i = 0; i < child_span.count; ++i) {
+                        CorpusPos child = child_span.at(i);
+                        CorpusPos parent = deps.head_from(child, sent_hint);
+                        if (parent == NO_HEAD || !bitset_test(parent_bits, parent))
+                            continue;
+
+                        CorpusPos lo = parent < child ? parent : child;
+                        CorpusPos hi = parent < child ? child : parent;
+                        if (hi >= corpus_end) continue;
+                        if (within_sa) {
+                            if (within_span_semantics) {
+                                if (!within_span_in_some_region(*within_sa, lo, hi))
+                                    continue;
+                            } else {
+                                int64_t rgn = within_sa->find_region(lo);
+                                if (rgn < 0) continue;
+                                Region r = within_sa->get(static_cast<size_t>(rgn));
+                                if (hi > r.end) continue;
+                            }
+                        }
+
+                        if (max_matches > 0 && result.matches.size() >= max_matches) {
+                            if (!count_total) break;
+                            ++result.total_count;
+                            if (reached_total_cap()) break;
+                            continue;
+                        }
+
+                        // pm layout: [t0_start, t1_start, t0_end, t1_end]
+                        std::vector<CorpusPos> pm(4);
+                        if (parent_is_token0) {
+                            pm[0] = parent; pm[1] = child;
+                            pm[2] = parent; pm[3] = child;
+                        } else {
+                            pm[0] = child; pm[1] = parent;
+                            pm[2] = child; pm[3] = parent;
+                        }
+                        add_match(std::move(pm));
+                        if (reached_limit() || reached_total_cap()) break;
+                    }
+
+                    apply_anchor_filters(token_anchor_constraints, result);
+                    apply_within_having(q, result);
+                    apply_not_within(q, result);
+                    apply_containing(q, result);
+                    apply_position_orders(q, name_map, result);
+                    apply_global_filters(q, name_map, result);
+                    result.total_exact = !reached_limit() && !reached_total_cap();
+                    return result;
+                }
+            }
         }
     }
 
