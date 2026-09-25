@@ -103,6 +103,125 @@ static bool within_span_in_some_region(const StructuralAttr& sa, CorpusPos min_p
     return ok;
 }
 
+// ── Manatee-style adjacent sequence merge (QUERY-PERF-MERGE S1) ─────────
+
+/// Simple EQ on a non-MV positional attr (post-compile), or empty = wildcard `[]`.
+enum class SeqMergeTok : uint8_t { Complex, Wildcard, EqRev };
+
+struct SeqMergeOperand {
+    SeqMergeTok kind = SeqMergeTok::Complex;
+    RevSpan span{};
+};
+
+static SeqMergeOperand seq_merge_operand(const Corpus& corpus, const ConditionPtr& cond) {
+    SeqMergeOperand out;
+    if (!cond) {
+        out.kind = SeqMergeTok::Wildcard;
+        return out;
+    }
+    if (!cond->is_leaf) return out;
+    const AttrCondition& ac = cond->leaf;
+    if (ac.op != CompOp::EQ || ac.case_insensitive || ac.diacritics_insensitive || ac.is_nvals)
+        return out;
+    if (ac.resolved_id < 0) return out;
+    // normalize_attr is on executor; duplicate minimal alias here for form/word.
+    std::string name = ac.attr;
+    if (name == "word" && !corpus.has_attr("word") && corpus.has_attr("form"))
+        name = "form";
+    if (!corpus.has_attr(name) || corpus.is_multivalue(name)) return out;
+    out.span = corpus.attr(name).rev_span_of_id(static_cast<LexiconId>(ac.resolved_id));
+    out.kind = SeqMergeTok::EqRev;
+    return out;
+}
+
+/// Emit every `a` in A such that `a + delta` is in B (both sorted, unique positions).
+/// `emit(a)` return false to stop. Returns false if stopped early.
+template<typename Emit>
+static bool shift_merge_rev(const RevSpan& A, const RevSpan& B, int64_t delta, Emit&& emit) {
+    if (A.empty() || B.empty()) return true;
+    size_t ia = 0, ib = 0;
+    const size_t na = A.count, nb = B.count;
+    // Gallop when B is much larger: for each a, binary-search a+delta in B.
+    if (nb > (na << 3)) {
+        size_t lo = 0;
+        while (ia < na) {
+            CorpusPos need = A.at(ia) + delta;
+            // lower_bound in B[lo..]
+            size_t L = lo, R = nb;
+            while (L < R) {
+                size_t mid = L + ((R - L) >> 1);
+                if (B.at(mid) < need) L = mid + 1;
+                else R = mid;
+            }
+            if (L >= nb) break;
+            lo = L;
+            if (B.at(L) == need) {
+                if (!emit(A.at(ia))) return false;
+                ++lo;
+            }
+            ++ia;
+        }
+        return true;
+    }
+    if (na > (nb << 3)) {
+        // Symmetric: walk B, seek a = b - delta in A.
+        size_t lo = 0;
+        while (ib < nb) {
+            CorpusPos b = B.at(ib);
+            CorpusPos need = b - delta;
+            size_t L = lo, R = na;
+            while (L < R) {
+                size_t mid = L + ((R - L) >> 1);
+                if (A.at(mid) < need) L = mid + 1;
+                else R = mid;
+            }
+            if (L >= na) break;
+            lo = L;
+            if (A.at(L) == need) {
+                if (!emit(need)) return false;
+                ++lo;
+            }
+            ++ib;
+        }
+        return true;
+    }
+    // Balanced two-pointer merge
+    while (ia < na && ib < nb) {
+        CorpusPos a = A.at(ia);
+        CorpusPos b = B.at(ib);
+        CorpusPos need = a + delta;
+        if (need == b) {
+            if (!emit(a)) return false;
+            ++ia;
+            ++ib;
+        } else if (need < b) {
+            ++ia;
+        } else {
+            ++ib;
+        }
+    }
+    return true;
+}
+
+/// Intersect sorted start-positions `starts` with B shifted so start+delta ∈ B.
+template<typename Emit>
+static bool shift_merge_starts(const std::vector<CorpusPos>& starts, const RevSpan& B,
+                               int64_t delta, Emit&& emit) {
+    if (starts.empty() || B.empty()) return true;
+    size_t ib = 0;
+    const size_t nb = B.count;
+    for (CorpusPos a : starts) {
+        CorpusPos need = a + delta;
+        while (ib < nb && B.at(ib) < need) ++ib;
+        if (ib >= nb) break;
+        if (B.at(ib) == need) {
+            if (!emit(a)) return false;
+            ++ib;
+        }
+    }
+    return true;
+}
+
 static void collect_token_and_region_labels(const TokenQuery& q,
                                             std::unordered_set<std::string>* token_labels,
                                             std::unordered_set<std::string>* region_labels) {
@@ -3078,7 +3197,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
         }
 
         if (all_seq && no_rep && no_anchor && !any_dep_subtree && n >= 2) {
-            // Pick cheapest token as seed
+            // Pick cheapest token as seed (cardinalities for debug / fallback)
             size_t seed = 0;
             size_t best_est = SIZE_MAX;
             std::vector<size_t> card(n);
@@ -3102,8 +3221,118 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 has_within && (corpus_.is_nested(effective_within) ||
                                corpus_.is_overlapping(effective_within));
 
-            int64_t seed_offset = static_cast<int64_t>(seed);
             CorpusPos corpus_end = corpus_.size();
+
+            // ── S1: Manatee-style .rev shift-merge when every token is EQ or [] ──
+            std::vector<SeqMergeOperand> ops(n);
+            bool mergeable = true;
+            for (size_t i = 0; i < n; ++i) {
+                ops[i] = seq_merge_operand(corpus_, q.tokens[i].conditions);
+                if (ops[i].kind == SeqMergeTok::Complex) { mergeable = false; break; }
+                if (ops[i].kind == SeqMergeTok::EqRev && ops[i].span.empty()) {
+                    // Lex id present but no postings → zero hits
+                    result.total_exact = true;
+                    return result;
+                }
+            }
+
+            auto accept_start = [&](CorpusPos p0) -> bool {
+                CorpusPos pN = p0 + static_cast<int64_t>(n) - 1;
+                if (p0 < 0 || pN >= corpus_end) return true;
+                if (within_sa) {
+                    if (within_span_semantics) {
+                        if (!within_span_in_some_region(*within_sa, p0, pN)) return true;
+                    } else {
+                        int64_t rgn = within_sa->find_region(p0);
+                        if (rgn < 0) return true;
+                        Region r = within_sa->get(static_cast<size_t>(rgn));
+                        if (pN > r.end) return true;
+                    }
+                }
+                // Past page capacity: count only (no Match alloc) when totaling.
+                if (max_matches > 0 && result.matches.size() >= max_matches) {
+                    if (!count_total) return false;
+                    ++result.total_count;
+                    return !reached_total_cap();
+                }
+                std::vector<CorpusPos> pm(2 * n);
+                for (size_t i = 0; i < n; ++i) {
+                    pm[2 * i]     = p0 + static_cast<int64_t>(i);
+                    pm[2 * i + 1] = p0 + static_cast<int64_t>(i);
+                }
+                add_match(std::move(pm));
+                return !reached_limit() && !reached_total_cap();
+            };
+
+            if (mergeable) {
+                // Find first EqRev token as merge left; accumulate starts.
+                size_t first_eq = n;
+                for (size_t i = 0; i < n; ++i) {
+                    if (ops[i].kind == SeqMergeTok::EqRev) { first_eq = i; break; }
+                }
+                bool ok = true;
+                if (first_eq == n) {
+                    // All wildcards — every aligned window; probe-free but O(corpus).
+                    // Fall through to seed path (degenerate).
+                    ok = false;
+                } else if (n == 2 && first_eq == 0 && ops[1].kind == SeqMergeTok::EqRev) {
+                    ok = shift_merge_rev(ops[0].span, ops[1].span, /*delta=*/1, accept_start);
+                } else if (n == 2 && first_eq == 0 && ops[1].kind == SeqMergeTok::Wildcard) {
+                    for (size_t i = 0; i < ops[0].span.count; ++i) {
+                        if (!accept_start(ops[0].span.at(i))) { ok = true; break; }
+                    }
+                } else if (n == 2 && first_eq == 1 && ops[0].kind == SeqMergeTok::Wildcard) {
+                    // [][B]: starts at b-1
+                    for (size_t i = 0; i < ops[1].span.count; ++i) {
+                        CorpusPos b = ops[1].span.at(i);
+                        if (b == 0) continue;
+                        if (!accept_start(b - 1)) { ok = true; break; }
+                    }
+                } else {
+                    // n>=3 or mixed: start from first_eq postings as candidate starts
+                    // shifted so token[0] = start.
+                    std::vector<CorpusPos> starts;
+                    {
+                        const RevSpan& S = ops[first_eq].span;
+                        starts.reserve(S.count);
+                        int64_t back = static_cast<int64_t>(first_eq);
+                        for (size_t i = 0; i < S.count; ++i) {
+                            CorpusPos p = S.at(i) - back;
+                            if (p >= 0) starts.push_back(p);
+                        }
+                    }
+                    for (size_t t = 0; t < n && ok; ++t) {
+                        if (t == first_eq) continue;
+                        if (ops[t].kind == SeqMergeTok::Wildcard) continue;
+                        std::vector<CorpusPos> next;
+                        next.reserve(starts.size());
+                        shift_merge_starts(starts, ops[t].span, static_cast<int64_t>(t),
+                                          [&](CorpusPos s) {
+                                              next.push_back(s);
+                                              return true;
+                                          });
+                        starts.swap(next);
+                    }
+                    for (CorpusPos p0 : starts) {
+                        if (!accept_start(p0)) break;
+                    }
+                }
+
+                if (first_eq != n) {
+                    apply_anchor_filters(token_anchor_constraints, result);
+                    apply_within_having(q, result);
+                    apply_not_within(q, result);
+                    apply_containing(q, result);
+                    apply_position_orders(q, name_map, result);
+                    apply_global_filters(q, name_map, result);
+                    result.total_exact = !reached_limit() && !reached_total_cap();
+                    return result;
+                }
+                (void)ok;
+            }
+
+            // ── Fallback: seed + neighbor probe (non-EQ / regex / MV / …) ──
+            int64_t seed_offset = static_cast<int64_t>(seed);
 
             for_each_seed_position(q.tokens[seed].conditions, [&](CorpusPos seed_p) {
                 // Compute position of first token from this seed

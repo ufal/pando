@@ -13,11 +13,30 @@
 
 namespace pando {
 
+/// Zero-copy view of one lexicon id's sorted `.rev` postings (Manatee-style merge operand).
+struct RevSpan {
+    int width = 8;            // 2, 4, or 8
+    const void* data = nullptr;
+    size_t count = 0;
+
+    CorpusPos at(size_t i) const {
+        switch (width) {
+            case 2: return static_cast<CorpusPos>(static_cast<const int16_t*>(data)[i]);
+            case 4: return static_cast<CorpusPos>(static_cast<const int32_t*>(data)[i]);
+            default: return static_cast<const int64_t*>(data)[i];
+        }
+    }
+    bool empty() const { return count == 0 || data == nullptr; }
+};
+
 // Read-only positional attribute: provides O(log V) lookup from value
 // to a sorted position list, and O(1) lookup from position to value.
 class PositionalAttr {
 public:
     void open(const std::string& base_path, CorpusPos corpus_size, bool preload = false);
+
+    /// Sorted postings for `id` without allocating a vector (empty if unknown / OOB).
+    RevSpan rev_span_of_id(LexiconId id) const;
 
     // Position → value
     LexiconId id_at(CorpusPos pos) const;

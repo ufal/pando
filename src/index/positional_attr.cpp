@@ -62,31 +62,30 @@ std::vector<CorpusPos> PositionalAttr::positions_of(const std::string& value) co
     return positions_of_id(id);
 }
 
-std::vector<CorpusPos> PositionalAttr::positions_of_id(LexiconId id) const {
+RevSpan PositionalAttr::rev_span_of_id(LexiconId id) const {
+    RevSpan span;
+    span.width = rev_width_;
+    if (!rev_idx_.valid() || id == UNKNOWN_LEX) return span;
+    size_t nlex = rev_idx_.count<int64_t>();
+    if (nlex < 2 || static_cast<size_t>(id) + 1 >= nlex) return span;
     const auto* idx = rev_idx_.as<int64_t>();
     int64_t start = idx[id];
     int64_t end   = idx[id + 1];
-    size_t count = static_cast<size_t>(end - start);
-
-    std::vector<CorpusPos> result(count);
-
+    if (end <= start) return span;
+    span.count = static_cast<size_t>(end - start);
     switch (rev_width_) {
-        case 2: {
-            auto* p = rev_.as<int16_t>() + start;
-            for (size_t i = 0; i < count; ++i) result[i] = static_cast<CorpusPos>(p[i]);
-            break;
-        }
-        case 4: {
-            auto* p = rev_.as<int32_t>() + start;
-            for (size_t i = 0; i < count; ++i) result[i] = static_cast<CorpusPos>(p[i]);
-            break;
-        }
-        default: {
-            auto* p = rev_.as<int64_t>() + start;
-            for (size_t i = 0; i < count; ++i) result[i] = p[i];
-            break;
-        }
+        case 2: span.data = rev_.as<int16_t>() + start; break;
+        case 4: span.data = rev_.as<int32_t>() + start; break;
+        default: span.data = rev_.as<int64_t>() + start; break;
     }
+    return span;
+}
+
+std::vector<CorpusPos> PositionalAttr::positions_of_id(LexiconId id) const {
+    RevSpan span = rev_span_of_id(id);
+    std::vector<CorpusPos> result(span.count);
+    for (size_t i = 0; i < span.count; ++i)
+        result[i] = span.at(i);
     return result;
 }
 
