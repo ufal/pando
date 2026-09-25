@@ -138,11 +138,13 @@ int main(int argc, char* argv[]) {
         if (left < 0) left = 0;
         if (right < 0) right = 0;
         KwicContext ctx = build_context_at(corpus, pos, left, right, sentence);
+        std::string_view doc = lookup_doc_id(corpus, pos);
         std::ostringstream out;
         out << "{\"ok\":true,\"pos\":" << pos
             << ",\"left\":" << jstr(ctx.left)
             << ",\"match\":" << jstr(ctx.match)
             << ",\"right\":" << jstr(ctx.right)
+            << ",\"doc_id\":" << jstr(doc)
             << ",\"corpus_size\":" << corpus.size() << "}\n";
         res.set_content(out.str(), "application/json");
     });
