@@ -142,7 +142,7 @@ std::string to_query_result_json(const Corpus& corpus,
         CorpusPos match_start = m.first_pos();
         CorpusPos match_end   = m.last_pos();
         auto doc_id = lookup_doc_id(corpus, match_start);
-        auto ctx = build_context(corpus, m, opts.context);
+        auto ctx = build_context(corpus, m, opts.context, opts.sentence);
 
         if (i > start) out << ",\n";
         out << "      {";

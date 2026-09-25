@@ -16,6 +16,9 @@ struct QueryOptions {
     int context    = 5;
     bool total     = false;
     bool debug     = false;
+    /// When true, left/right context expands to enclosing sentence structure ``s``
+    /// (falls back to ``context`` token window if no ``s`` region covers the match).
+    bool sentence  = false;
     std::vector<std::string> attrs;  // empty = all token attributes in JSON; else only these
     /// When true: only `/pattern/` is regex; quoted strings are literal (matches `--strict-quoted-strings` on CLI).
     bool strict_quoted_strings = false;

@@ -6,6 +6,7 @@
 #include "corpus/corpus.h"
 #include <httplib.h>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <cstdlib>
 #include <thread>
@@ -19,22 +20,45 @@ static unsigned default_thread_pool_size() {
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cerr << "Usage: pando-server <corpus_dir> [port] [threads]\n";
+        std::cerr << "Usage: pando-server <corpus_dir> [port] [threads] [--preload]\n";
         std::cerr << "  Default port: 8765, threads: " << default_thread_pool_size() << "\n";
+        std::cerr << "  Open matches CLI (lazy mmap). Pass --preload to warm all pages at startup.\n";
         return 1;
     }
     std::string corpus_dir = argv[1];
-    int port = argc >= 3 ? std::atoi(argv[2]) : 8765;
+    int port = 8765;
     unsigned nthreads = default_thread_pool_size();
-    if (argc >= 4) {
-        int t = std::atoi(argv[3]);
-        if (t > 0) nthreads = static_cast<unsigned>(t);
+    bool preload = false;
+    int positional = 0;
+    for (int i = 2; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--preload") {
+            preload = true;
+            continue;
+        }
+        if (a == "--no-preload") {
+            preload = false;
+            continue;
+        }
+        if (a.rfind("--", 0) == 0) {
+            std::cerr << "Unknown option: " << a << "\n";
+            return 1;
+        }
+        if (positional == 0) {
+            port = std::atoi(a.c_str());
+            ++positional;
+        } else if (positional == 1) {
+            int t = std::atoi(a.c_str());
+            if (t > 0) nthreads = static_cast<unsigned>(t);
+            ++positional;
+        }
     }
 
     Corpus corpus;
     try {
-        // Preload by default: server keeps corpus open and serves many requests; warm pages at startup.
-        corpus.open(corpus_dir, true);
+        // Default: same as CLI (lazy mmap). Full preload is optional and can take
+        // tens of seconds / GBs RSS on mid-size UD; queries are already fast without it.
+        corpus.open(corpus_dir, preload);
     } catch (const std::exception& e) {
         std::cerr << "Failed to open corpus at " << corpus_dir << ": " << e.what() << "\n";
         return 1;
@@ -85,43 +109,53 @@ int main(int argc, char* argv[]) {
         }
     });
 
+    // GET /context?pos=&left=&right=&sentence= — KWIC window around one position
+    // (KonText widectx; Manatee CorpRegion cannot address Pando toknums).
+    svr.Get("/context", [&corpus](const httplib::Request& req, httplib::Response& res) {
+        if (!req.has_param("pos")) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":\"missing 'pos'\"}\n", "application/json");
+            return;
+        }
+        CorpusPos pos = static_cast<CorpusPos>(
+            std::strtoull(req.get_param_value("pos").c_str(), nullptr, 10));
+        if (pos >= corpus.size()) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":\"pos out of range\"}\n", "application/json");
+            return;
+        }
+        int left = 40;
+        int right = 40;
+        if (req.has_param("left"))
+            left = static_cast<int>(std::strtol(req.get_param_value("left").c_str(), nullptr, 10));
+        if (req.has_param("right"))
+            right = static_cast<int>(std::strtol(req.get_param_value("right").c_str(), nullptr, 10));
+        bool sentence = false;
+        if (req.has_param("sentence")) {
+            std::string s = req.get_param_value("sentence");
+            sentence = (s == "1" || s == "true" || s == "yes");
+        }
+        if (left < 0) left = 0;
+        if (right < 0) right = 0;
+        KwicContext ctx = build_context_at(corpus, pos, left, right, sentence);
+        std::ostringstream out;
+        out << "{\"ok\":true,\"pos\":" << pos
+            << ",\"left\":" << jstr(ctx.left)
+            << ",\"match\":" << jstr(ctx.match)
+            << ",\"right\":" << jstr(ctx.right)
+            << ",\"corpus_size\":" << corpus.size() << "}\n";
+        res.set_content(out.str(), "application/json");
+    });
+
     // POST /run — run a full CQL program (queries + commands), session-aware
     // Body: {"cql": "...", "limit": 20, "offset": 0, ...}
     // Maintains per-server session for named queries.
     ProgramSession program_session;
     svr.Post("/run", [&corpus, &program_session](const httplib::Request& req, httplib::Response& res) {
         const std::string& body = req.body;
-        auto extract_str = [&body](const char* key) -> std::string {
-            std::string search = std::string("\"") + key + "\":\"";
-            auto pos = body.find(search);
-            if (pos == std::string::npos) return "";
-            pos += search.size();
-            std::string val;
-            while (pos < body.size()) {
-                char c = body[pos++];
-                if (c == '"') break;
-                if (c == '\\' && pos < body.size()) c = body[pos++];
-                val += c;
-            }
-            return val;
-        };
-        auto extract_num = [&body](const char* key, size_t default_val) -> size_t {
-            std::string search = std::string("\"") + key + "\":";
-            auto pos = body.find(search);
-            if (pos == std::string::npos) return default_val;
-            pos += search.size();
-            return static_cast<size_t>(std::strtoull(body.c_str() + pos, nullptr, 10));
-        };
-        auto extract_bool = [&body](const char* key, bool default_val) -> bool {
-            std::string search = std::string("\"") + key + "\":";
-            auto pos = body.find(search);
-            if (pos == std::string::npos) return default_val;
-            pos += search.size();
-            return body.substr(pos, 4) == "true";
-        };
 
-        std::string cql = extract_str("cql");
-        if (cql.empty()) cql = extract_str("query");
+        std::string cql = json_extract_str(body, "cql");
+        if (cql.empty()) cql = json_extract_str(body, "query");
         if (cql.empty()) {
             res.status = 400;
             res.set_content("{\"ok\":false,\"error\":\"missing 'cql' field\"}\n", "application/json");
@@ -129,13 +163,13 @@ int main(int argc, char* argv[]) {
         }
 
         ProgramOptions opts;
-        opts.limit      = extract_num("limit", 20);
-        opts.offset     = extract_num("offset", 0);
-        opts.max_total  = extract_num("max_total", 0);
-        opts.context    = static_cast<int>(extract_num("context", 5));
-        opts.total      = (body.find("\"total\":true") != std::string::npos);
-        opts.group_limit = extract_num("group_limit", 1000);
-        opts.strict_quoted_strings = extract_bool("strict_quoted_strings", false);
+        opts.limit      = json_extract_num(body, "limit", 20);
+        opts.offset     = json_extract_num(body, "offset", 0);
+        opts.max_total  = json_extract_num(body, "max_total", 0);
+        opts.context    = static_cast<int>(json_extract_num(body, "context", 5));
+        opts.total      = json_extract_bool(body, "total", false);
+        opts.group_limit = json_extract_num(body, "group_limit", 1000);
+        opts.strict_quoted_strings = json_extract_bool(body, "strict_quoted_strings", false);
 
         std::string json = run_program_json(corpus, program_session, cql, opts);
         res.set_content(json, "application/json");
@@ -143,49 +177,21 @@ int main(int argc, char* argv[]) {
 
     svr.Post("/query", [&corpus](const httplib::Request& req, httplib::Response& res) {
         // Expect JSON body with optional: query, limit, offset, total, max_total, context, debug
-        std::string query_text = "[]";
-        QueryOptions opts;
-        // Minimal JSON parsing: look for "query":"...", "limit":N, etc.
+        // Whitespace-tolerant (Python json.dumps emits spaces after ':' / ',').
         const std::string& body = req.body;
-        auto extract_str = [&body](const char* key) -> std::string {
-            std::string search = std::string("\"") + key + "\":\"";
-            auto pos = body.find(search);
-            if (pos == std::string::npos) return "";
-            pos += search.size();
-            std::string val;
-            while (pos < body.size()) {
-                char c = body[pos++];
-                if (c == '"') break;
-                if (c == '\\' && pos < body.size()) c = body[pos++];
-                val += c;
-            }
-            return val;
-        };
-        auto extract_num = [&body](const char* key, size_t default_val) -> size_t {
-            std::string search = std::string("\"") + key + "\":";
-            auto pos = body.find(search);
-            if (pos == std::string::npos) return default_val;
-            pos += search.size();
-            return static_cast<size_t>(std::strtoull(body.c_str() + pos, nullptr, 10));
-        };
-        auto extract_bool = [&body](const char* key, bool default_val) -> bool {
-            std::string search = std::string("\"") + key + "\":";
-            auto pos = body.find(search);
-            if (pos == std::string::npos) return default_val;
-            pos += search.size();
-            return body.substr(pos, 4) == "true";
-        };
+        QueryOptions opts;
 
-        std::string q = extract_str("query");
-        if (!q.empty()) query_text = q;
-        opts.limit     = extract_num("limit", 20);
-        opts.offset    = extract_num("offset", 0);
-        opts.max_total = extract_num("max_total", 0);
-        opts.total     = extract_bool("total", false);
-        opts.context   = static_cast<int>(extract_num("context", 5));
-        opts.debug     = extract_bool("debug", false);
-        opts.strict_quoted_strings = extract_bool("strict_quoted_strings", false);
-        std::string attrs_str = extract_str("attrs");
+        std::string q = json_extract_str(body, "query");
+        std::string query_text = q.empty() ? "[]" : q;
+        opts.limit     = json_extract_num(body, "limit", 20);
+        opts.offset    = json_extract_num(body, "offset", 0);
+        opts.max_total = json_extract_num(body, "max_total", 0);
+        opts.total     = json_extract_bool(body, "total", false);
+        opts.context   = static_cast<int>(json_extract_num(body, "context", 5));
+        opts.debug     = json_extract_bool(body, "debug", false);
+        opts.sentence  = json_extract_bool(body, "sentence", false);
+        opts.strict_quoted_strings = json_extract_bool(body, "strict_quoted_strings", false);
+        std::string attrs_str = json_extract_str(body, "attrs");
         opts.attrs.clear();
         if (!attrs_str.empty()) {
             for (size_t pos = 0; ; ) {
@@ -210,8 +216,9 @@ int main(int argc, char* argv[]) {
         }
     });
 
-    std::cerr << "Manatree server: corpus " << corpus_dir << ", port " << port
-              << ", threads " << nthreads << "\n";
+    std::cerr << "Pando server: corpus " << corpus_dir << ", port " << port
+              << ", threads " << nthreads
+              << (preload ? ", preload=on" : ", preload=off (lazy mmap)") << "\n";
     if (!svr.listen("0.0.0.0", static_cast<int>(port))) {
         std::cerr << "Failed to listen on port " << port << "\n";
         return 1;
