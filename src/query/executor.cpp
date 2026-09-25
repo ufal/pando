@@ -240,6 +240,115 @@ static inline bool bitset_test(const std::vector<uint64_t>& bits, CorpusPos p) {
     return (bits[i] & (uint64_t{1} << (static_cast<size_t>(p) & 63))) != 0;
 }
 
+static inline void bitset_set(std::vector<uint64_t>& bits, CorpusPos p) {
+    if (p < 0) return;
+    size_t i = static_cast<size_t>(p) >> 6;
+    if (i >= bits.size()) return;
+    bits[i] |= (uint64_t{1} << (static_cast<size_t>(p) & 63));
+}
+
+static inline void bitset_and_inplace(std::vector<uint64_t>& a, const std::vector<uint64_t>& b) {
+    size_t n = std::min(a.size(), b.size());
+    for (size_t i = 0; i < n; ++i) a[i] &= b[i];
+}
+
+/// Set every bit in [lo, hi] inclusive (corpus positions).
+static void bitset_set_range(std::vector<uint64_t>& bits, CorpusPos lo, CorpusPos hi) {
+    if (lo < 0) lo = 0;
+    if (hi < lo) return;
+    size_t max_bit = bits.size() * 64;
+    if (static_cast<size_t>(lo) >= max_bit) return;
+    if (static_cast<size_t>(hi) >= max_bit)
+        hi = static_cast<CorpusPos>(max_bit - 1);
+
+    size_t a = static_cast<size_t>(lo);
+    size_t b = static_cast<size_t>(hi);
+    size_t wa = a >> 6, wb = b >> 6;
+    if (wa == wb) {
+        uint64_t mask = (~uint64_t{0} << (a & 63)) &
+                        (~uint64_t{0} >> (63 - (b & 63)));
+        bits[wa] |= mask;
+        return;
+    }
+    bits[wa] |= ~uint64_t{0} << (a & 63);
+    for (size_t w = wa + 1; w < wb; ++w) bits[w] = ~uint64_t{0};
+    bits[wb] |= ~uint64_t{0} >> (63 - (b & 63));
+}
+
+/// Result of compiling EQ global region filters (e.g. `within text_langcode="en"`)
+/// into a corpus position bitset via structure attr `.rev`.
+enum class RegionMaskStatus : uint8_t {
+    None,           // no filters — do not use a mask
+    Unsatisfiable,  // no matching regions
+    Ready,          // `bits` valid
+    Unsupported     // non-EQ / no rev — caller must post-filter only
+};
+
+struct RegionPosMask {
+    RegionMaskStatus status = RegionMaskStatus::None;
+    std::vector<uint64_t> bits;
+};
+
+static RegionPosMask build_region_eq_position_mask(
+        const Corpus& corpus,
+        const std::vector<GlobalRegionFilter>& filters) {
+    RegionPosMask out;
+    if (filters.empty()) return out;
+
+    CorpusPos ntok = corpus.size();
+    bool any = false;
+    for (const auto& gf : filters) {
+        if (gf.op != CompOp::EQ || !gf.anchor_name.empty()) {
+            out.status = RegionMaskStatus::Unsupported;
+            out.bits.clear();
+            return out;
+        }
+        RegionAttrParts parts;
+        if (!split_region_attr_name(gf.region_attr, parts) ||
+            !corpus.has_structure(parts.struct_name)) {
+            out.status = RegionMaskStatus::Unsatisfiable;
+            out.bits.clear();
+            return out;
+        }
+        const auto& sa = corpus.structure(parts.struct_name);
+        auto rkey = resolve_region_attr_key(sa, parts.struct_name, parts.attr_name);
+        if (!rkey) {
+            out.status = RegionMaskStatus::Unsatisfiable;
+            out.bits.clear();
+            return out;
+        }
+        const int64_t* regions = nullptr;
+        size_t nreg = 0;
+        if (!sa.regions_for_value(*rkey, gf.value, regions, nreg)) {
+            out.status = RegionMaskStatus::Unsupported;
+            out.bits.clear();
+            return out;
+        }
+        if (nreg == 0) {
+            out.status = RegionMaskStatus::Unsatisfiable;
+            out.bits.clear();
+            return out;
+        }
+        std::vector<uint64_t> layer(static_cast<size_t>((ntok + 63) / 64), 0);
+        for (size_t i = 0; i < nreg; ++i) {
+            size_t ri = static_cast<size_t>(regions[i]);
+            if (ri >= sa.region_count()) continue;
+            Region r = sa.get(ri);
+            if (r.start > r.end) continue;
+            CorpusPos hi = std::min(r.end, ntok - 1);
+            bitset_set_range(layer, r.start, hi);
+        }
+        if (!any) {
+            out.bits = std::move(layer);
+            any = true;
+        } else {
+            bitset_and_inplace(out.bits, layer);
+        }
+    }
+    out.status = RegionMaskStatus::Ready;
+    return out;
+}
+
 static void collect_token_and_region_labels(const TokenQuery& q,
                                             std::unordered_set<std::string>* token_labels,
                                             std::unordered_set<std::string>* region_labels) {
@@ -3241,6 +3350,17 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
 
             CorpusPos corpus_end = corpus_.size();
 
+            RegionPosMask region_mask =
+                build_region_eq_position_mask(corpus_, q.global_region_filters);
+            if (region_mask.status == RegionMaskStatus::Unsatisfiable) {
+                result.total_exact = true;
+                return result;
+            }
+            const bool use_region_mask =
+                region_mask.status == RegionMaskStatus::Ready;
+            const bool cheap_total_ok =
+                q.global_region_filters.empty() || use_region_mask;
+
             // ── S1: Manatee-style .rev shift-merge when every token is EQ or [] ──
             std::vector<SeqMergeOperand> ops(n);
             bool mergeable = true;
@@ -3257,6 +3377,8 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             auto accept_start = [&](CorpusPos p0) -> bool {
                 CorpusPos pN = p0 + static_cast<int64_t>(n) - 1;
                 if (p0 < 0 || pN >= corpus_end) return true;
+                if (use_region_mask && !bitset_test(region_mask.bits, p0))
+                    return true;
                 if (within_sa) {
                     if (within_span_semantics) {
                         if (!within_span_in_some_region(*within_sa, p0, pN)) return true;
@@ -3270,8 +3392,11 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 // Past page capacity: count only (no Match alloc) when totaling.
                 if (max_matches > 0 && result.matches.size() >= max_matches) {
                     if (!count_total) return false;
-                    ++result.total_count;
-                    return !reached_total_cap();
+                    if (cheap_total_ok) {
+                        ++result.total_count;
+                        return !reached_total_cap();
+                    }
+                    // Fall through to add_match for filter-aware counting.
                 }
                 std::vector<CorpusPos> pm(2 * n);
                 for (size_t i = 0; i < n; ++i) {
@@ -3357,6 +3482,8 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 CorpusPos p0 = seed_p - seed_offset;
                 CorpusPos pN = p0 + static_cast<int64_t>(n) - 1;
                 if (p0 < 0 || pN >= corpus_end) return true;  // out of bounds, skip
+                if (use_region_mask && !bitset_test(region_mask.bits, p0))
+                    return true;
 
                 if (within_sa) {
                     if (within_span_semantics) {
@@ -3444,8 +3571,29 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                         has_within && (corpus_.is_nested(effective_within) ||
                                        corpus_.is_overlapping(effective_within));
 
+                    // `within text_langcode="en"` is functionally the same as
+                    // `[… & text_langcode="en"]`, but arrives as a post-join
+                    // global filter. Compile EQ region filters into a position
+                    // mask and prune parent/child streams before the join —
+                    // otherwise we pay for the full-corpus dep join then discard.
+                    RegionPosMask region_mask =
+                        build_region_eq_position_mask(corpus_, q.global_region_filters);
+                    if (region_mask.status == RegionMaskStatus::Unsatisfiable) {
+                        result.total_exact = true;
+                        return result;
+                    }
+                    const bool use_region_mask =
+                        region_mask.status == RegionMaskStatus::Ready;
+                    // Cheap total++ bypass is only safe when every candidate that
+                    // reaches it already satisfies global region filters (mask),
+                    // or there are no such filters. Otherwise go through add_match.
+                    const bool cheap_total_ok =
+                        q.global_region_filters.empty() || use_region_mask;
+
                     std::vector<uint64_t> parent_bits;
                     rev_span_to_bitset(parent_span, parent_bits, corpus_.size());
+                    if (use_region_mask)
+                        bitset_and_inplace(parent_bits, region_mask.bits);
 
                     const auto& deps = corpus_.deps();
                     int64_t sent_hint = -1;
@@ -3453,6 +3601,8 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
 
                     for (size_t i = 0; i < child_span.count; ++i) {
                         CorpusPos child = child_span.at(i);
+                        if (use_region_mask && !bitset_test(region_mask.bits, child))
+                            continue;
                         CorpusPos parent = deps.head_from(child, sent_hint);
                         if (parent == NO_HEAD || !bitset_test(parent_bits, parent))
                             continue;
@@ -3474,9 +3624,12 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
 
                         if (max_matches > 0 && result.matches.size() >= max_matches) {
                             if (!count_total) break;
-                            ++result.total_count;
-                            if (reached_total_cap()) break;
-                            continue;
+                            if (cheap_total_ok) {
+                                ++result.total_count;
+                                if (reached_total_cap()) break;
+                                continue;
+                            }
+                            // Filters not pre-applied — must go through add_match.
                         }
 
                         // pm layout: [t0_start, t1_start, t0_end, t1_end]
@@ -4179,8 +4332,15 @@ void QueryExecutor::apply_region_filters(const TokenQuery& query, const NameInde
         if (pass) kept.push_back(m);
     }
 
+    const size_t before = result.matches.size();
     result.matches = std::move(kept);
-    result.total_count = result.matches.size();
+    // Fast paths may have already counted a full-corpus total past the page.
+    // Only sync total_count from the page when it still reflected page size;
+    // otherwise subtract rejected page rows so --total stays accurate.
+    if (result.total_count <= before)
+        result.total_count = result.matches.size();
+    else if (before > result.matches.size())
+        result.total_count -= (before - result.matches.size());
 }
 
 void QueryExecutor::apply_global_filters(const TokenQuery& query, const NameIndexMap& name_map, MatchSet& result) const {

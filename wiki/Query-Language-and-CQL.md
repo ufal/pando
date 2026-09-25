@@ -71,6 +71,8 @@ If neither path succeeds, translation fails (the error text mentions whether the
 
 **`--pmltq-export-sql`:** Emits **ClickPMLTQ-style SQL** only (no corpus load). Requires **`--cql pmltq`**, a query on the command line, and the **JavaScript** helpers described in **`pando --help`** (typically a **`pmltq2sql-optimized.js`** next to the PEG bundle, plus **`PMLTQ_GOLD_JS_DIR`**).
 
+**Gaps / difficulty:** What the dialect still does not lower (especially **`>>` output filters**, nested selectors, multi-selector queries) is inventoried with effort estimates in **[`dev/PMLTQ-ROADMAP.md`](../dev/PMLTQ-ROADMAP.md)**.
+
 ---
 
 ## TIGERSearch-style macros (`--cql tiger`)
