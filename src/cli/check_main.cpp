@@ -126,6 +126,9 @@ static int run_check(const std::string& dir) {
         if (!file_exists(dep_head)) { std::cerr << "Missing: " << dep_head << " (sentence structure present).\n"; ++errors; }
         if (!file_exists(dep_in))  { std::cerr << "Missing: " << dep_in << "\n"; ++errors; }
         if (!file_exists(dep_out)) { std::cerr << "Missing: " << dep_out << "\n"; ++errors; }
+        if (file_exists(dep_head) && !file_exists(dir + "/dep.head_rel"))
+            std::cerr << "Note: no dep.head_rel (index predates it); run `pando-index --upgrade "
+                      << dir << "` for faster dependency queries.\n";
     }
 
     if (errors > 0) {

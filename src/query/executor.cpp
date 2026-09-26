@@ -279,10 +279,19 @@ static bool shift_merge_rev(const RevSpan& A, const RevSpan& B, int64_t delta, E
 static void rev_span_to_bitset(const RevSpan& span, std::vector<uint64_t>& bits,
                                CorpusPos corpus_size) {
     bits.assign(static_cast<size_t>((corpus_size + 63) / 64), 0);
-    for (size_t i = 0; i < span.count; ++i) {
-        CorpusPos p = span.at(i);
-        if (p < 0 || p >= corpus_size) continue;
-        bits[static_cast<size_t>(p) >> 6] |= (uint64_t{1} << (static_cast<size_t>(p) & 63));
+    uint64_t* b = bits.data();
+    auto fill = [&](const auto* p, size_t n) {
+        for (size_t i = 0; i < n; ++i) {
+            const CorpusPos v = static_cast<CorpusPos>(p[i]);
+            if (v < 0 || v >= corpus_size) continue;
+            b[static_cast<size_t>(v) >> 6] |= (uint64_t{1} << (static_cast<size_t>(v) & 63));
+        }
+    };
+    if (span.empty()) return;
+    switch (span.width) {
+        case 2: fill(static_cast<const int16_t*>(span.data), span.count); break;
+        case 4: fill(static_cast<const int32_t*>(span.data), span.count); break;
+        default: fill(static_cast<const int64_t*>(span.data), span.count); break;
     }
 }
 
@@ -3452,6 +3461,8 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             // Candidates mostly arrive in position order: reuse the last region
             // (find_region_from) instead of a full binary search per candidate.
             int64_t within_hint = -1;
+            RegionCursor within_cur;
+            if (within_sa && !within_span_semantics) within_cur = RegionCursor(*within_sa);
 
             RegionPosMask region_mask =
                 build_region_eq_position_mask(corpus_, q.global_region_filters);
@@ -3487,11 +3498,11 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     if (within_span_semantics) {
                         if (!within_span_in_some_region(*within_sa, p0, pN)) return true;
                     } else {
-                        int64_t rgn = within_sa->find_region_from(p0, within_hint);
+                        // Merge paths emit starts in increasing order: RegionCursor
+                        // (amortised O(1), inline) instead of a lookup per candidate.
+                        int64_t rgn = within_cur.find(p0);
                         if (rgn < 0) return true;
-                        within_hint = rgn;
-                        Region r = within_sa->get(static_cast<size_t>(rgn));
-                        if (pN > r.end) return true;
+                        if (pN > within_cur.regions[rgn].end) return true;
                     }
                 }
                 // Past page capacity: count only (no Match alloc) when totaling.
@@ -3726,45 +3737,51 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     if (use_region_mask)
                         bitset_and_inplace(parent_bits, region_mask.bits);
 
+                    // ── Kernel (P1.0g / P1.8 / P1.0h) ──
+                    // Raw arrays, no cross-file calls per child. head = pos + head_rel
+                    // when dep.head_rel exists; otherwise sentence start (RegionCursor,
+                    // children arrive sorted) + sentence-local head.
                     const auto& deps = corpus_.deps();
-                    int64_t sent_hint = -1;
+                    const StructuralAttr& sents = corpus_.structure("s");
+                    const Region* sent_r = sents.region_data();
+                    RegionCursor sent_cur(sents);
+                    const int16_t* hrel = deps.head_rel_data();
+                    const int16_t* hloc = deps.head_local_data();
+                    const uint64_t* pbits = parent_bits.data();
+                    const uint64_t* mbits = use_region_mask ? region_mask.bits.data() : nullptr;
+                    const CorpusPos corpus_end = corpus_.size();
+                    // `within s` is implied: a head and its dependent share the sentence
+                    // the dependency index is built on.
+                    const StructuralAttr* wsa =
+                        (within_sa && !within_span_semantics && within_sa == &sents)
+                            ? nullptr : within_sa;
                     int64_t within_hint = -1;
-                    CorpusPos corpus_end = corpus_.size();
+                    auto bit = [](const uint64_t* b, CorpusPos p) -> bool {
+                        return (b[static_cast<size_t>(p) >> 6] >> (static_cast<size_t>(p) & 63)) & 1u;
+                    };
 
-                    for (size_t i = 0; i < child_span.count; ++i) {
-                        CorpusPos child = child_span.at(i);
-                        if (use_region_mask && !bitset_test(region_mask.bits, child))
-                            continue;
-                        CorpusPos parent = deps.head_from(child, sent_hint);
-                        if (parent == NO_HEAD || !bitset_test(parent_bits, parent))
-                            continue;
-
-                        CorpusPos lo = parent < child ? parent : child;
-                        CorpusPos hi = parent < child ? child : parent;
-                        if (hi >= corpus_end) continue;
-                        if (within_sa) {
+                    // Returns false to stop the scan.
+                    auto emit = [&](CorpusPos parent, CorpusPos child) -> bool {
+                        if (wsa) {
+                            CorpusPos lo = parent < child ? parent : child;
+                            CorpusPos hi = parent < child ? child : parent;
                             if (within_span_semantics) {
-                                if (!within_span_in_some_region(*within_sa, lo, hi))
-                                    continue;
+                                if (!within_span_in_some_region(*wsa, lo, hi)) return true;
                             } else {
-                                int64_t rgn = within_sa->find_region_from(lo, within_hint);
-                                if (rgn < 0) continue;
+                                int64_t rgn = wsa->find_region_from(lo, within_hint);
+                                if (rgn < 0) return true;
                                 within_hint = rgn;
-                                Region r = within_sa->get(static_cast<size_t>(rgn));
-                                if (hi > r.end) continue;
+                                if (hi > wsa->get(static_cast<size_t>(rgn)).end) return true;
                             }
                         }
-
                         if (max_matches > 0 && result.matches.size() >= max_matches) {
-                            if (!count_total) break;
+                            if (!count_total) return false;
                             if (cheap_total_ok) {
                                 ++result.total_count;
-                                if (reached_total_cap()) break;
-                                continue;
+                                return !reached_total_cap();
                             }
                             // Filters not pre-applied — must go through add_match.
                         }
-
                         // pm layout: [t0_start, t1_start, t0_end, t1_end]
                         std::vector<CorpusPos> pm(4);
                         if (parent_is_token0) {
@@ -3775,7 +3792,52 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                             pm[2] = child; pm[3] = parent;
                         }
                         add_match(std::move(pm));
-                        if (reached_limit() || reached_total_cap()) break;
+                        return !(reached_limit() || reached_total_cap());
+                    };
+
+                    // Once the page is full and every remaining hit only needs counting,
+                    // switch to a tight loop with a local counter (no per-hit call).
+                    const bool can_fast_count = count_total && cheap_total_ok && !wsa
+                        && max_matches > 0 && !agg_ptr && sample_size == 0;
+                    auto head_of = [&](CorpusPos child, CorpusPos& parent) -> bool {
+                        if (hrel) {
+                            const int16_t d = hrel[child];
+                            parent = child + d;
+                            return d != 0;
+                        }
+                        const int16_t l = hloc[child];
+                        if (l < 0) return false;
+                        const int64_t si = sent_cur.find(child);
+                        if (si < 0) return false;
+                        parent = sent_r[si].start + l;
+                        return parent < corpus_end;
+                    };
+                    auto scan = [&](const auto* cp, size_t cn) {
+                        size_t i = 0;
+                        for (; i < cn; ++i) {
+                            if (can_fast_count && result.matches.size() >= max_matches) break;
+                            const CorpusPos child = static_cast<CorpusPos>(cp[i]);
+                            if (mbits && !bit(mbits, child)) continue;
+                            CorpusPos parent;
+                            if (!head_of(child, parent) || !bit(pbits, parent)) continue;
+                            if (!emit(parent, child)) return;
+                        }
+                        if (i >= cn) return;
+                        size_t cnt = 0;
+                        for (; i < cn; ++i) {
+                            const CorpusPos child = static_cast<CorpusPos>(cp[i]);
+                            if (mbits && !bit(mbits, child)) continue;
+                            CorpusPos parent;
+                            if (head_of(child, parent)) cnt += bit(pbits, parent);
+                        }
+                        result.total_count += cnt;
+                        if (max_total_cap > 0 && result.total_count > max_total_cap)
+                            result.total_count = max_total_cap;
+                    };
+                    switch (child_span.width) {
+                        case 2: scan(static_cast<const int16_t*>(child_span.data), child_span.count); break;
+                        case 4: scan(static_cast<const int32_t*>(child_span.data), child_span.count); break;
+                        default: scan(static_cast<const int64_t*>(child_span.data), child_span.count); break;
                     }
 
                     apply_anchor_filters(token_anchor_constraints, result);

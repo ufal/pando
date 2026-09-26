@@ -201,6 +201,7 @@ void StreamingBuilder::bootstrap_overlay_corpus_size(CorpusPos n) {
 
 StreamingBuilder::~StreamingBuilder() {
     if (dep_head_file_)      fclose(dep_head_file_);
+    if (dep_head_rel_file_)  fclose(dep_head_rel_file_);
     if (dep_euler_in_file_)  fclose(dep_euler_in_file_);
     if (dep_euler_out_file_) fclose(dep_euler_out_file_);
     if (sent_rgn_file_)      fclose(sent_rgn_file_);
@@ -287,10 +288,11 @@ void StreamingBuilder::backfill_attr(AttrState& state) {
 
 void StreamingBuilder::open_dep_files() {
     dep_head_file_      = fopen((output_dir_ + "/dep.head").c_str(), "wb");
+    dep_head_rel_file_  = fopen((output_dir_ + "/dep.head_rel").c_str(), "wb");
     dep_euler_in_file_  = fopen((output_dir_ + "/dep.euler_in").c_str(), "wb");
     dep_euler_out_file_ = fopen((output_dir_ + "/dep.euler_out").c_str(), "wb");
 
-    if (!dep_head_file_ || !dep_euler_in_file_ || !dep_euler_out_file_)
+    if (!dep_head_file_ || !dep_head_rel_file_ || !dep_euler_in_file_ || !dep_euler_out_file_)
         throw std::runtime_error("Cannot create dep files in " + output_dir_);
 
     // Backfill positions before the first sentence with dep info
@@ -298,6 +300,7 @@ void StreamingBuilder::open_dep_files() {
         int16_t neg1 = -1, zero = 0;
         for (CorpusPos i = dep_written_; i < sent_start_; ++i) {
             fwrite(&neg1, sizeof(int16_t), 1, dep_head_file_);
+            fwrite(&zero, sizeof(int16_t), 1, dep_head_rel_file_);
             fwrite(&zero, sizeof(int16_t), 1, dep_euler_in_file_);
             fwrite(&zero, sizeof(int16_t), 1, dep_euler_out_file_);
         }
@@ -416,6 +419,13 @@ void StreamingBuilder::end_sentence(
         }
 
         fwrite(heads.data(), sizeof(int16_t), sent_len, dep_head_file_);
+        {
+            std::vector<int16_t> rel(sent_len, 0);
+            for (int i = 0; i < sent_len; ++i)
+                if (heads[i] >= 0 && heads[i] < sent_len && heads[i] != i)
+                    rel[i] = static_cast<int16_t>(heads[i] - i);
+            fwrite(rel.data(), sizeof(int16_t), sent_len, dep_head_rel_file_);
+        }
         fwrite(euler_in.data(), sizeof(int16_t), sent_len, dep_euler_in_file_);
         fwrite(euler_out.data(), sizeof(int16_t), sent_len, dep_euler_out_file_);
         dep_written_ += sent_len;
@@ -425,6 +435,7 @@ void StreamingBuilder::end_sentence(
         int16_t neg1 = -1, zero = 0;
         for (int i = 0; i < sent_len; ++i) {
             fwrite(&neg1, sizeof(int16_t), 1, dep_head_file_);
+            fwrite(&zero, sizeof(int16_t), 1, dep_head_rel_file_);
             fwrite(&zero, sizeof(int16_t), 1, dep_euler_in_file_);
             fwrite(&zero, sizeof(int16_t), 1, dep_euler_out_file_);
         }
@@ -747,6 +758,7 @@ void StreamingBuilder::finalize() {
     // Phase A: emit per-struct sidecar listing every group's sub-spans + props.
     write_token_group_indexes();
     if (dep_head_file_)      { fclose(dep_head_file_);      dep_head_file_ = nullptr; }
+    if (dep_head_rel_file_)  { fclose(dep_head_rel_file_);  dep_head_rel_file_ = nullptr; }
     if (dep_euler_in_file_)  { fclose(dep_euler_in_file_);  dep_euler_in_file_ = nullptr; }
     if (dep_euler_out_file_) { fclose(dep_euler_out_file_); dep_euler_out_file_ = nullptr; }
     if (sent_rgn_file_)      { fclose(sent_rgn_file_);      sent_rgn_file_ = nullptr; }

@@ -1,6 +1,9 @@
 #include "index/dependency_index.h"
 #include <stdexcept>
 #include <algorithm>
+#include <cstdio>
+#include <fstream>
+#include <vector>
 
 namespace pando {
 
@@ -13,6 +16,15 @@ void DependencyIndex::open(const std::string& dir,
     head_file_       = MmapFile::open(dir + "/dep.head", preload);
     euler_in_file_   = MmapFile::open(dir + "/dep.euler_in", preload);
     euler_out_file_  = MmapFile::open(dir + "/dep.euler_out", preload);
+    head_rel_file_   = MmapFile{};
+    {
+        std::ifstream probe(dir + "/dep.head_rel");
+        if (probe.good()) {
+            MmapFile rel = MmapFile::open(dir + "/dep.head_rel", preload);
+            if (rel.valid() && rel.size() == head_file_.size())
+                head_rel_file_ = std::move(rel);   // size mismatch → ignore stale file
+        }
+    }
     cached_sentence_id_ = -1;  // invalidate cache on (re)open
 }
 
@@ -26,6 +38,10 @@ CorpusPos DependencyIndex::head_from(CorpusPos pos, int64_t& sentence_hint) cons
     size_t n = head_file_.size() / sizeof(int16_t);
     if (pos < 0 || static_cast<size_t>(pos) >= n)
         return NO_HEAD;
+    if (const int16_t* rel = head_rel_data()) {
+        int16_t d = rel[pos];
+        return d ? pos + d : NO_HEAD;
+    }
 
     int16_t local = head_file_.as<int16_t>()[pos];
     if (local == -1) return NO_HEAD;
@@ -34,6 +50,46 @@ CorpusPos DependencyIndex::head_from(CorpusPos pos, int64_t& sentence_hint) cons
     sentence_hint = ri;
     Region sent = sentences_->get(static_cast<size_t>(ri));
     return sent.start + static_cast<CorpusPos>(local);
+}
+
+bool DependencyIndex::write_head_rel_file(const std::string& dir, const StructuralAttr& sentences,
+                                          std::string* err) {
+    MmapFile head = MmapFile::open(dir + "/dep.head", false);
+    if (!head.valid()) {
+        if (err) *err = "cannot open " + dir + "/dep.head";
+        return false;
+    }
+    const size_t n = head.size() / sizeof(int16_t);
+    const int16_t* h = head.as<int16_t>();
+    std::vector<int16_t> rel(n, 0);
+    const size_t ns = sentences.region_count();
+    const Region* r = sentences.region_data();
+    for (size_t si = 0; si < ns; ++si) {
+        const CorpusPos s = r[si].start, e = r[si].end;
+        if (s < 0 || e < s) continue;
+        for (CorpusPos p = s; p <= e && static_cast<size_t>(p) < n; ++p) {
+            const int16_t local = h[p];
+            if (local < 0) continue;
+            const CorpusPos hp = s + local;
+            if (hp < 0 || static_cast<size_t>(hp) >= n) continue;
+            const int64_t d = hp - p;
+            if (d == 0 || d < INT16_MIN || d > INT16_MAX) continue;
+            rel[static_cast<size_t>(p)] = static_cast<int16_t>(d);
+        }
+    }
+    const std::string tmp = dir + "/dep.head_rel.tmp";
+    FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f || std::fwrite(rel.data(), sizeof(int16_t), n, f) != n) {
+        if (f) std::fclose(f);
+        if (err) *err = "cannot write " + tmp;
+        return false;
+    }
+    std::fclose(f);
+    if (std::rename(tmp.c_str(), (dir + "/dep.head_rel").c_str()) != 0) {
+        if (err) *err = "cannot rename " + tmp;
+        return false;
+    }
+    return true;
 }
 
 // EX-2p: Build or reuse the sentence-local children map.

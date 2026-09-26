@@ -148,6 +148,7 @@ private:
 
     // Dep files (streamed per sentence)
     FILE* dep_head_file_ = nullptr;
+    FILE* dep_head_rel_file_ = nullptr;   // P1.8: head - pos (int16), 0 = root
     FILE* dep_euler_in_file_ = nullptr;
     FILE* dep_euler_out_file_ = nullptr;
     CorpusPos dep_written_ = 0;

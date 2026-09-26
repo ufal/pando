@@ -1,5 +1,7 @@
 #include "corpus/builder.h"
 #include "core/types.h"
+#include "index/dependency_index.h"
+#include "index/structural_attr.h"
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -99,7 +101,29 @@ static void write_overlay_info(const std::string& overlay_dir,
     out << "note=standoff-only overlay; merge at query time with main index (see dev/USER-OVERLAY-ANNOTATIONS.md)\n";
 }
 
+// `pando-index --upgrade <corpus_dir>`: add derived files that newer versions
+// use when present, without re-indexing. Currently: dep.head_rel (P1.8).
+static int upgrade_index(const std::string& dir) {
+    if (!fs::exists(dir + "/dep.head") || !fs::exists(dir + "/s.rgn")) {
+        std::cerr << dir << ": no dependency index (dep.head + s.rgn); nothing to upgrade\n";
+        return 0;
+    }
+    pando::StructuralAttr sentences;
+    sentences.open(dir + "/s.rgn", false);
+    std::string err;
+    auto t0 = std::chrono::steady_clock::now();
+    if (!pando::DependencyIndex::write_head_rel_file(dir, sentences, &err)) {
+        std::cerr << "Error: " << err << "\n";
+        return 1;
+    }
+    double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::cerr << "Wrote " << dir << "/dep.head_rel (" << sec << " s)\n";
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
+    if (argc == 3 && std::string(argv[1]) == "--upgrade")
+        return upgrade_index(argv[2]);
     bool split_feats = false;
     bool format_vertical = false;
     bool format_jsonl = false;
@@ -143,7 +167,9 @@ int main(int argc, char* argv[]) {
                   << "  --overlay-index   Standoff-only JSONL: emit token-group columns + groups/ into\n"
                   << "                    output_dir (no full corpus). Requires --format jsonl and\n"
                   << "                    --index-dir <main_corpus_dir> (must contain corpus.info).\n"
-                  << "  --index-dir       Main indexed corpus directory (for overlay size / stamp)\n";
+                  << "  --index-dir       Main indexed corpus directory (for overlay size / stamp)\n"
+                  << "\n  pando-index --upgrade <corpus_dir>\n"
+                  << "                    Add derived files to an existing index (dep.head_rel)\n";
         return 1;
     }
 

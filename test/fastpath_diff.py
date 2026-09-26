@@ -128,7 +128,32 @@ def build_sample_index(pando_index, conllu):
     if p.returncode != 0:
         print(p.stdout, p.stderr, file=sys.stderr)
         raise SystemExit(2)
+    check_head_rel_upgrade(pando_index, d)
     return d
+
+
+def check_head_rel_upgrade(pando_index, d):
+    """dep.head_rel written at index time must equal the one `--upgrade` derives."""
+    built = os.path.join(d, "dep.head_rel")
+    if not os.path.exists(os.path.join(d, "dep.head")):
+        return
+    if not os.path.exists(built):
+        print("FAIL: index has dep.head but no dep.head_rel", file=sys.stderr)
+        raise SystemExit(1)
+    with open(built, "rb") as f:
+        at_index_time = f.read()
+    os.rename(built, built + ".orig")
+    p = subprocess.run([pando_index, "--upgrade", d], capture_output=True, text=True)
+    if p.returncode != 0:
+        print(p.stdout, p.stderr, file=sys.stderr)
+        raise SystemExit(2)
+    with open(built, "rb") as f:
+        upgraded = f.read()
+    os.remove(built + ".orig")
+    if upgraded != at_index_time:
+        print("FAIL: dep.head_rel from pando-index differs from --upgrade", file=sys.stderr)
+        raise SystemExit(1)
+    print("dep.head_rel: index-time file == --upgrade result")
 
 
 def main():

@@ -29,6 +29,21 @@ public:
     // Absolute corpus position of the head.  Returns NO_HEAD for root.
     CorpusPos head(CorpusPos pos) const;
 
+    /// P1.8: optional `dep.head_rel` (int16 per token: head - pos, 0 = root / none).
+    /// nullptr when the index predates it (see `pando-index --upgrade`).
+    /// With it, head(pos) = pos + rel[pos] — no sentence lookup at all.
+    const int16_t* head_rel_data() const {
+        return head_rel_file_.valid() ? head_rel_file_.as<int16_t>() : nullptr;
+    }
+    /// Raw sentence-local heads (int16 per token, -1 = root).
+    const int16_t* head_local_data() const { return head_file_.as<int16_t>(); }
+    size_t token_count() const { return head_file_.size() / sizeof(int16_t); }
+
+    /// Write `<dir>/dep.head_rel` derived from `dep.head` + sentence regions
+    /// (for indexes built before P1.8). Returns false and sets *err on failure.
+    static bool write_head_rel_file(const std::string& dir, const StructuralAttr& sentences,
+                                    std::string* err);
+
     /// Like `head`, but reuses `sentence_hint` via `find_region_from` so scanning
     /// sorted child positions is amortized O(1) per call (Manatee-style dep joins).
     CorpusPos head_from(CorpusPos pos, int64_t& sentence_hint) const;
@@ -63,6 +78,7 @@ public:
 private:
     const StructuralAttr* sentences_ = nullptr;
     MmapFile head_file_;       // int16[corpus_size]
+    MmapFile head_rel_file_;   // int16[corpus_size], optional (P1.8)
     MmapFile euler_in_file_;   // int16[corpus_size]
     MmapFile euler_out_file_;  // int16[corpus_size]
 
