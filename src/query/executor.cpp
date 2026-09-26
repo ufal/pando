@@ -379,10 +379,84 @@ enum class RegionMaskStatus : uint8_t {
     Unsupported     // non-EQ / no rev — caller must post-filter only
 };
 
+/// Positions allowed by EQ global region filters (P1.7 / P1.11).
+/// Normally a sorted list of disjoint position intervals (one per matching
+/// region, merged, intersected across filters): no corpus-sized memory, and
+/// posting lists can be *sliced* to the intervals instead of tested per
+/// position. Only when the intervals are many and short (average below
+/// kMaskMinAvgInterval tokens) is it turned into a corpus bitset.
+struct PosInterval {
+    CorpusPos s, e;  // inclusive
+};
+static constexpr CorpusPos kMaskMinAvgInterval = 512;
+
 struct RegionPosMask {
     RegionMaskStatus status = RegionMaskStatus::None;
+    std::vector<PosInterval> iv;   // sorted, disjoint (when Ready)
+    bool use_bits = false;         // fine-grained: `bits` also valid
     std::vector<uint64_t> bits;
+
+    bool ready() const { return status == RegionMaskStatus::Ready; }
+    /// Membership for positions in arbitrary order.
+    bool contains(CorpusPos p) const {
+        if (use_bits) return bitset_test(bits, p);
+        auto it = std::upper_bound(iv.begin(), iv.end(), p,
+                                   [](CorpusPos v, const PosInterval& x) { return v < x.s; });
+        if (it == iv.begin()) return false;
+        --it;
+        return p <= it->e;
+    }
 };
+
+/// Membership for ascending positions (amortised O(1), galloping over intervals).
+struct MaskCursor {
+    const RegionPosMask* m = nullptr;
+    size_t cur = 0;
+    MaskCursor() = default;
+    explicit MaskCursor(const RegionPosMask& mm) : m(&mm) {}
+    bool contains(CorpusPos p) {
+        if (m->use_bits) return bitset_test(m->bits, p);
+        const auto& v = m->iv;
+        const size_t n = v.size();
+        if (cur < n && v[cur].e < p) {
+            size_t prev = cur, step = 1, hi = cur + 1;
+            while (hi < n && v[hi].e < p) {
+                prev = hi;
+                step <<= 1;
+                hi = prev + step;
+            }
+            if (hi > n) hi = n;
+            size_t L = prev + 1, R = hi;
+            while (L < R) {
+                size_t mid = L + ((R - L) >> 1);
+                if (v[mid].e < p) L = mid + 1;
+                else R = mid;
+            }
+            cur = L;
+        }
+        return cur < n && v[cur].s <= p;
+    }
+    /// Interval mode only, after contains(p) == false: no interval at or after p.
+    bool exhausted() const { return !m->use_bits && cur >= m->iv.size(); }
+    /// Interval mode only, after contains(p) == false: start of the next interval.
+    CorpusPos next_start() const { return m->iv[cur].s; }
+    /// Interval mode only, after contains(p) == true: the interval containing p.
+    const PosInterval& current() const { return m->iv[cur]; }
+};
+
+static std::vector<PosInterval> intersect_intervals(const std::vector<PosInterval>& a,
+                                                    const std::vector<PosInterval>& b) {
+    std::vector<PosInterval> out;
+    size_t i = 0, j = 0;
+    while (i < a.size() && j < b.size()) {
+        const CorpusPos lo = std::max(a[i].s, b[j].s);
+        const CorpusPos hi = std::min(a[i].e, b[j].e);
+        if (lo <= hi) out.push_back({lo, hi});
+        if (a[i].e < b[j].e) ++i;
+        else ++j;
+    }
+    return out;
+}
 
 static RegionPosMask build_region_eq_position_mask(
         const Corpus& corpus,
@@ -394,55 +468,161 @@ static RegionPosMask build_region_eq_position_mask(
     bool any = false;
     for (const auto& gf : filters) {
         if (gf.op != CompOp::EQ || !gf.anchor_name.empty()) {
+            out = RegionPosMask{};
             out.status = RegionMaskStatus::Unsupported;
-            out.bits.clear();
             return out;
         }
         RegionAttrParts parts;
         if (!split_region_attr_name(gf.region_attr, parts) ||
             !corpus.has_structure(parts.struct_name)) {
+            out = RegionPosMask{};
             out.status = RegionMaskStatus::Unsatisfiable;
-            out.bits.clear();
             return out;
         }
         const auto& sa = corpus.structure(parts.struct_name);
         auto rkey = resolve_region_attr_key(sa, parts.struct_name, parts.attr_name);
         if (!rkey) {
+            out = RegionPosMask{};
             out.status = RegionMaskStatus::Unsatisfiable;
-            out.bits.clear();
             return out;
         }
         const int64_t* regions = nullptr;
         size_t nreg = 0;
         if (!sa.regions_for_value(*rkey, gf.value, regions, nreg)) {
+            out = RegionPosMask{};
             out.status = RegionMaskStatus::Unsupported;
-            out.bits.clear();
             return out;
         }
-        if (nreg == 0) {
-            out.status = RegionMaskStatus::Unsatisfiable;
-            out.bits.clear();
-            return out;
-        }
-        std::vector<uint64_t> layer(static_cast<size_t>((ntok + 63) / 64), 0);
+        std::vector<PosInterval> layer;
+        layer.reserve(nreg);
         for (size_t i = 0; i < nreg; ++i) {
             size_t ri = static_cast<size_t>(regions[i]);
             if (ri >= sa.region_count()) continue;
             Region r = sa.get(ri);
-            if (r.start > r.end) continue;
-            CorpusPos hi = std::min(r.end, ntok - 1);
-            bitset_set_range(layer, r.start, hi);
+            if (r.start > r.end || r.start >= ntok) continue;
+            layer.push_back({std::max<CorpusPos>(r.start, 0), std::min(r.end, ntok - 1)});
         }
-        if (!any) {
-            out.bits = std::move(layer);
-            any = true;
-        } else {
-            bitset_and_inplace(out.bits, layer);
+        std::sort(layer.begin(), layer.end(),
+                  [](const PosInterval& x, const PosInterval& y) { return x.s < y.s; });
+        std::vector<PosInterval> merged;   // union of this filter's regions
+        for (const auto& x : layer) {
+            if (!merged.empty() && x.s <= merged.back().e + 1)
+                merged.back().e = std::max(merged.back().e, x.e);
+            else
+                merged.push_back(x);
+        }
+        out.iv = any ? intersect_intervals(out.iv, merged) : std::move(merged);
+        any = true;
+        if (out.iv.empty()) {
+            out = RegionPosMask{};
+            out.status = RegionMaskStatus::Unsatisfiable;
+            return out;
         }
     }
     out.status = RegionMaskStatus::Ready;
+    // PANDO_MASK_BITS=1 forces the bitset representation (testing both paths).
+    static const bool force_bits = [] {
+        const char* v = std::getenv("PANDO_MASK_BITS");
+        return v && *v && *v != '0';
+    }();
+    if (force_bits || static_cast<CorpusPos>(out.iv.size()) * kMaskMinAvgInterval > ntok) {
+        out.use_bits = true;
+        out.bits.assign(static_cast<size_t>((ntok + 63) / 64), 0);
+        for (const auto& x : out.iv) bitset_set_range(out.bits, x.s, x.e);
+    }
     return out;
 }
+
+/// Sub-span [lo, hi) of a `.rev` posting span (zero-copy).
+static RevSpan rev_slice(const RevSpan& sp, size_t lo, size_t hi) {
+    RevSpan out;
+    out.width = sp.width;
+    if (hi <= lo || lo >= sp.count) return out;
+    out.count = hi - lo;
+    out.data = static_cast<const char*>(sp.data) + lo * static_cast<size_t>(sp.width);
+    return out;
+}
+
+/// Typed-array version of gallop_rev: first index >= lo with a[j] >= target.
+template<typename T>
+static inline size_t gallop_ptr(const T* a, size_t n, size_t lo, CorpusPos target) {
+    if (lo >= n || static_cast<CorpusPos>(a[lo]) >= target) return lo;
+    size_t prev = lo, step = 1, hi = lo + 1;
+    while (hi < n && static_cast<CorpusPos>(a[hi]) < target) {
+        prev = hi;
+        step <<= 1;
+        hi = prev + step;
+    }
+    if (hi > n) hi = n;
+    size_t L = prev + 1, R = hi;
+    while (L < R) {
+        size_t mid = L + ((R - L) >> 1);
+        if (static_cast<CorpusPos>(a[mid]) < target) L = mid + 1;
+        else R = mid;
+    }
+    return L;
+}
+
+/// P1.11: fixed-size (32 KB) ring bitset over a sliding position window, for
+/// dependency joins. Heads are always within ±32767 tokens of their dependent
+/// (sentence-local int16), so a window of 2^18 positions replaces the old
+/// corpus-sized bitset (~690 MB per query at 5.5B tokens) and stays in L1/L2.
+/// Positions below `dead` are no longer needed; set()/test() require
+/// dead <= p < dead + kWindow.
+struct SlidingBitset {
+    static constexpr CorpusPos kWindow = CorpusPos{1} << 18;
+    static constexpr size_t kWords = static_cast<size_t>(kWindow / 64);
+    uint64_t w[kWords] = {};
+    CorpusPos dead = 0;
+
+    void advance_dead(CorpusPos to) {
+        if (to <= dead) return;
+        if (to - dead >= kWindow) {
+            std::fill(w, w + kWords, uint64_t{0});
+        } else {
+            clear_slots(dead, to);
+        }
+        dead = to;
+    }
+    /// Empty window starting at `lo` (valid for [lo, lo + kWindow)).
+    void reset(CorpusPos lo) {
+        std::fill(w, w + kWords, uint64_t{0});
+        dead = lo;
+    }
+    void set(CorpusPos p) {
+        const size_t b = static_cast<size_t>(p & (kWindow - 1));
+        w[b >> 6] |= uint64_t{1} << (b & 63);
+    }
+    bool test(CorpusPos p) const {
+        const size_t b = static_cast<size_t>(p & (kWindow - 1));
+        return (w[b >> 6] >> (b & 63)) & 1u;
+    }
+private:
+    // Clear ring slots of positions [a, b), b - a < kWindow.
+    void clear_slots(CorpusPos a, CorpusPos b) {
+        size_t lo = static_cast<size_t>(a & (kWindow - 1));
+        size_t n = static_cast<size_t>(b - a);
+        while (n > 0) {
+            size_t run = std::min(n, static_cast<size_t>(kWindow) - lo);
+            clear_linear(lo, lo + run);
+            n -= run;
+            lo = 0;
+        }
+    }
+    void clear_linear(size_t a, size_t b) {   // bits [a, b)
+        if (a >= b) return;
+        size_t wa = a >> 6, wb = (b - 1) >> 6;
+        if (wa == wb) {
+            uint64_t mask = (~uint64_t{0} << (a & 63)) & (~uint64_t{0} >> (63 - ((b - 1) & 63)));
+            w[wa] &= ~mask;
+            return;
+        }
+        w[wa] &= ~(~uint64_t{0} << (a & 63));
+        for (size_t k = wa + 1; k < wb; ++k) w[k] = 0;
+        w[wb] &= ~(~uint64_t{0} >> (63 - ((b - 1) & 63)));
+    }
+};
+static constexpr CorpusPos kMaxHeadDistance = 32768;   // int16 sentence-local heads
 
 static void collect_token_and_region_labels(const TokenQuery& q,
                                             std::unordered_set<std::string>* token_labels,
@@ -3336,25 +3516,57 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 }
                 if (mask.status != RegionMaskStatus::Unsupported) {
                     result.plan_path = "single_count";
-                    const bool use_mask = mask.status == RegionMaskStatus::Ready;
                     const size_t cnt = op.span.count;
-                    size_t i = 0;
-                    for (; i < cnt; ++i) {
-                        CorpusPos p = op.span.at(i);
-                        if (use_mask && !bitset_test(mask.bits, p)) continue;
-                        if (max_matches > 0 && result.matches.size() >= max_matches) break;
-                        add_match(std::vector<CorpusPos>{p, p});
-                        if (reached_total_cap()) break;
-                    }
-                    if (count_total && i < cnt && !reached_total_cap()) {
-                        if (!use_mask) {
-                            result.total_count += cnt - i;
-                        } else {
+                    if (mask.ready() && mask.use_bits) {
+                        // Fine-grained filter: per-position bit test.
+                        size_t i = 0;
+                        for (; i < cnt; ++i) {
+                            CorpusPos p = op.span.at(i);
+                            if (!bitset_test(mask.bits, p)) continue;
+                            if (max_matches > 0 && result.matches.size() >= max_matches) break;
+                            add_match(std::vector<CorpusPos>{p, p});
+                            if (reached_total_cap()) break;
+                        }
+                        if (count_total && i < cnt && !reached_total_cap()) {
                             for (; i < cnt; ++i)
                                 if (bitset_test(mask.bits, op.span.at(i))) ++result.total_count;
+                            if (max_total_cap > 0 && result.total_count > max_total_cap)
+                                result.total_count = max_total_cap;
                         }
-                        if (max_total_cap > 0 && result.total_count > max_total_cap)
-                            result.total_count = max_total_cap;
+                    } else {
+                        // No filter, or interval filter: slice the postings per
+                        // interval; the part past the first page is counted as
+                        // index differences (O(#intervals * log) for any total).
+                        std::vector<PosInterval> whole;
+                        const std::vector<PosInterval>* ivs = &mask.iv;
+                        if (!mask.ready()) {
+                            whole.push_back({0, corpus_.size() - 1});
+                            ivs = &whole;
+                        }
+                        size_t lo = 0;
+                        for (const auto& I : *ivs) {
+                            lo = gallop_rev(op.span, lo, I.s);
+                            if (lo >= cnt) break;
+                            const size_t hi = gallop_rev(op.span, lo, I.e + 1);
+                            size_t k = lo;
+                            bool stop = false;
+                            for (; k < hi; ++k) {
+                                if (max_matches > 0 && result.matches.size() >= max_matches) break;
+                                const CorpusPos p = op.span.at(k);
+                                add_match(std::vector<CorpusPos>{p, p});
+                                if (reached_total_cap()) { stop = true; break; }
+                            }
+                            if (stop) break;
+                            if (k < hi) {             // page full, rest of this interval
+                                if (!count_total) break;
+                                result.total_count += hi - k;
+                                if (max_total_cap > 0 && result.total_count >= max_total_cap) {
+                                    result.total_count = max_total_cap;
+                                    break;
+                                }
+                            }
+                            lo = hi;
+                        }
                     }
                     result.total_exact = !reached_limit() && !reached_total_cap();
                     return result;
@@ -3536,10 +3748,13 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             }
             if (fastpath_mode() != FastPathMode::On) mergeable = false;
 
+            // Merge paths hand accept_start ascending starts: monotone mask cursor.
+            MaskCursor mask_cur(region_mask);
+            const bool mask_intervals = use_region_mask && !region_mask.use_bits;
             auto accept_start = [&](CorpusPos p0) -> bool {
                 CorpusPos pN = p0 + static_cast<int64_t>(n) - 1;
                 if (p0 < 0 || pN >= corpus_end) return true;
-                if (use_region_mask && !bitset_test(region_mask.bits, p0))
+                if (use_region_mask && !mask_cur.contains(p0))
                     return true;
                 if (within_sa) {
                     if (within_span_semantics) {
@@ -3583,7 +3798,28 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     ok = false;
                 } else if (n == 2 && first_eq == 0 && ops[1].kind == SeqMergeTok::EqRev) {
                     result.plan_path = "seq_merge2";
-                    ok = shift_merge_rev(ops[0].span, ops[1].span, /*delta=*/1, accept_start);
+                    if (mask_intervals) {
+                        // Merge only inside the allowed intervals (token 0 in [s,e],
+                        // token 1 in [s+1,e+1]) instead of over the whole corpus.
+                        const RevSpan& A = ops[0].span;
+                        const RevSpan& B = ops[1].span;
+                        size_t la = 0, lb = 0;
+                        for (const auto& I : region_mask.iv) {
+                            la = gallop_rev(A, la, I.s);
+                            if (la >= A.count) break;
+                            const size_t ha = gallop_rev(A, la, I.e + 1);
+                            lb = gallop_rev(B, lb, I.s + 1);
+                            const size_t hb = gallop_rev(B, lb, I.e + 2);
+                            if (ha > la && hb > lb
+                                && !shift_merge_rev(rev_slice(A, la, ha), rev_slice(B, lb, hb),
+                                                    /*delta=*/1, accept_start))
+                                break;
+                            la = ha;
+                            lb = hb;
+                        }
+                    } else {
+                        ok = shift_merge_rev(ops[0].span, ops[1].span, /*delta=*/1, accept_start);
+                    }
                 } else if (n == 2 && first_eq == 0 && ops[1].kind == SeqMergeTok::Wildcard) {
                     result.plan_path = "seq_merge_wild";
                     for (size_t i = 0; i < ops[0].span.count; ++i) {
@@ -3618,9 +3854,18 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                                         && ops[t].span.count > (S.count << 3);
                     const int64_t back = static_cast<int64_t>(seed_eq);
                     bool exhausted = false;
+                    MaskCursor seed_mask(region_mask);
                     for (size_t i = 0; i < S.count && !exhausted; ++i) {
                         CorpusPos p0 = S.at(i) - back;
                         if (p0 < 0) continue;
+                        if (mask_intervals && !seed_mask.contains(p0)) {
+                            if (seed_mask.exhausted()) break;
+                            // jump the seed list to the next allowed start
+                            const size_t j = gallop_rev(S, i, seed_mask.next_start() + back);
+                            if (j >= S.count) break;
+                            i = j - 1;
+                            continue;
+                        }
                         bool all = true;
                         for (size_t t = 0; t < n; ++t) {
                             if (t == seed_eq || ops[t].kind != SeqMergeTok::EqRev) continue;
@@ -3661,7 +3906,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 CorpusPos p0 = seed_p - seed_offset;
                 CorpusPos pN = p0 + static_cast<int64_t>(n) - 1;
                 if (p0 < 0 || pN >= corpus_end) return true;  // out of bounds, skip
-                if (use_region_mask && !bitset_test(region_mask.bits, p0))
+                if (use_region_mask && !region_mask.contains(p0))
                     return true;
 
                 if (within_sa) {
@@ -3779,33 +4024,28 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     const bool cheap_total_ok =
                         q.global_region_filters.empty() || use_region_mask;
 
-                    std::vector<uint64_t> parent_bits;
-                    rev_span_to_bitset(parent_span, parent_bits, corpus_.size());
-                    if (use_region_mask)
-                        bitset_and_inplace(parent_bits, region_mask.bits);
-
-                    // ── Kernel (P1.0g / P1.8 / P1.0h) ──
+                    // ── Kernel (P1.0g / P1.8 / P1.0h / P1.11) ──
                     // Raw arrays, no cross-file calls per child. head = pos + head_rel
-                    // when dep.head_rel exists; otherwise sentence start (RegionCursor,
-                    // children arrive sorted) + sentence-local head.
+                    // when dep.head_rel exists; otherwise sentence start (cursor,
+                    // children arrive sorted) + sentence-local head. Parent membership
+                    // uses a 32 KB sliding bitset filled from the (sorted) parent
+                    // postings just ahead of the child cursor — no corpus-sized bitset.
                     const auto& deps = corpus_.deps();
                     const StructuralAttr& sents = corpus_.structure("s");
                     const Region* sent_r = sents.region_data();
                     FlatRegionCursor sent_cur(sents);
                     const int16_t* hrel = deps.head_rel_data();
                     const int16_t* hloc = deps.head_local_data();
-                    const uint64_t* pbits = parent_bits.data();
-                    const uint64_t* mbits = use_region_mask ? region_mask.bits.data() : nullptr;
                     const CorpusPos corpus_end = corpus_.size();
+                    const bool mask_bits = use_region_mask && region_mask.use_bits;
+                    const bool mask_iv = use_region_mask && !region_mask.use_bits;
+                    MaskCursor child_mask(region_mask), parent_mask(region_mask);
                     // `within s` is implied: a head and its dependent share the sentence
                     // the dependency index is built on.
                     const StructuralAttr* wsa =
                         (within_sa && !within_span_semantics && within_sa == &sents)
                             ? nullptr : within_sa;
                     int64_t within_hint = -1;
-                    auto bit = [](const uint64_t* b, CorpusPos p) -> bool {
-                        return (b[static_cast<size_t>(p) >> 6] >> (static_cast<size_t>(p) & 63)) & 1u;
-                    };
 
                     // Returns false to stop the scan.
                     auto emit = [&](CorpusPos parent, CorpusPos child) -> bool {
@@ -3843,7 +4083,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     };
 
                     // Once the page is full and every remaining hit only needs counting,
-                    // switch to a tight loop with a local counter (no per-hit call).
+                    // count with a local counter (no per-hit call).
                     const bool can_fast_count = count_total && cheap_total_ok && !wsa
                         && max_matches > 0 && !agg_ptr && sample_size == 0;
                     auto head_of = [&](CorpusPos child, CorpusPos& parent) -> bool {
@@ -3859,32 +4099,90 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                         parent = sent_r[si].start + l;
                         return parent < corpus_end;
                     };
-                    auto scan = [&](const auto* cp, size_t cn) {
-                        size_t i = 0;
-                        for (; i < cn; ++i) {
-                            if (can_fast_count && result.matches.size() >= max_matches) break;
-                            const CorpusPos child = static_cast<CorpusPos>(cp[i]);
-                            if (mbits && !bit(mbits, child)) continue;
-                            CorpusPos parent;
-                            if (!head_of(child, parent) || !bit(pbits, parent)) continue;
-                            if (!emit(parent, child)) return;
-                        }
-                        if (i >= cn) return;
+                    auto bit = [](const std::vector<uint64_t>& b, CorpusPos p) -> bool {
+                        return (b[static_cast<size_t>(p) >> 6] >> (static_cast<size_t>(p) & 63)) & 1u;
+                    };
+                    auto run = [&](const auto* cp, size_t cn, const auto* pp, size_t pn) {
+                        SlidingBitset par;
+                        size_t pi = 0;            // next parent posting to load
                         size_t cnt = 0;
-                        for (; i < cn; ++i) {
+                        bool counting = false;
+                        for (size_t i = 0; i < cn; ++i) {
                             const CorpusPos child = static_cast<CorpusPos>(cp[i]);
-                            if (mbits && !bit(mbits, child)) continue;
+                            if (mask_iv && !child_mask.contains(child)) {
+                                if (child_mask.exhausted()) break;
+                                const size_t j = gallop_ptr(cp, cn, i, child_mask.next_start());
+                                if (j >= cn) break;
+                                i = j - 1;
+                                continue;
+                            }
+                            if (mask_bits && !bit(region_mask.bits, child)) continue;
+                            // Parents lie in [child - D, child + D). The window may lag by
+                            // up to W - 2D, so advance it in coarse steps (amortised clears).
+                            if (child - kMaxHeadDistance - par.dead > kMaxHeadDistance)
+                                par.advance_dead(child - kMaxHeadDistance);
+                            const CorpusPos fill_to = child + kMaxHeadDistance;
+                            while (pi < pn && static_cast<CorpusPos>(pp[pi]) < fill_to) {
+                                const CorpusPos p = static_cast<CorpusPos>(pp[pi++]);
+                                if (p < par.dead) continue;
+                                if (mask_iv && !parent_mask.contains(p)) continue;
+                                if (mask_bits && !bit(region_mask.bits, p)) continue;
+                                par.set(p);
+                            }
                             CorpusPos parent;
-                            if (head_of(child, parent)) cnt += bit(pbits, parent);
+                            if (!head_of(child, parent)) continue;
+                            if (parent < par.dead || parent >= fill_to || !par.test(parent)) continue;
+                            if (counting) { ++cnt; continue; }
+                            if (!emit(parent, child)) break;
+                            if (can_fast_count && result.matches.size() >= max_matches) {
+                                counting = true;
+                                if (hrel && !use_region_mask) {
+                                    // Hot path for exact totals (no mask, relative heads):
+                                    // children in chunks of W - 2D positions; per chunk,
+                                    // reset the 32 KB window, load the parents of
+                                    // [base - D, base + W - D) in one tight loop, then
+                                    // count the chunk's children branch-free.
+                                    constexpr CorpusPos kChunk =
+                                        SlidingBitset::kWindow - 2 * kMaxHeadDistance;
+                                    size_t ps = 0;    // first parent of the current window
+                                    ++i;
+                                    while (i < cn) {
+                                        const CorpusPos base = static_cast<CorpusPos>(cp[i]);
+                                        const CorpusPos lo = base - kMaxHeadDistance;
+                                        const CorpusPos hi = base + kChunk + kMaxHeadDistance;
+                                        par.reset(lo);
+                                        ps = gallop_ptr(pp, pn, ps, lo);
+                                        for (size_t k = ps; k < pn && static_cast<CorpusPos>(pp[k]) < hi; ++k)
+                                            par.set(static_cast<CorpusPos>(pp[k]));
+                                        const CorpusPos chunk_end = base + kChunk;
+                                        for (; i < cn && static_cast<CorpusPos>(cp[i]) < chunk_end; ++i) {
+                                            const CorpusPos c = static_cast<CorpusPos>(cp[i]);
+                                            const int16_t d = hrel[c];
+                                            cnt += static_cast<size_t>((d != 0) & par.test(c + d));
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
                         }
                         result.total_count += cnt;
                         if (max_total_cap > 0 && result.total_count > max_total_cap)
                             result.total_count = max_total_cap;
                     };
-                    switch (child_span.width) {
-                        case 2: scan(static_cast<const int16_t*>(child_span.data), child_span.count); break;
-                        case 4: scan(static_cast<const int32_t*>(child_span.data), child_span.count); break;
-                        default: scan(static_cast<const int64_t*>(child_span.data), child_span.count); break;
+                    if (child_span.width == parent_span.width) {
+                        switch (child_span.width) {
+                            case 2: run(static_cast<const int16_t*>(child_span.data), child_span.count,
+                                        static_cast<const int16_t*>(parent_span.data), parent_span.count); break;
+                            case 4: run(static_cast<const int32_t*>(child_span.data), child_span.count,
+                                        static_cast<const int32_t*>(parent_span.data), parent_span.count); break;
+                            default: run(static_cast<const int64_t*>(child_span.data), child_span.count,
+                                         static_cast<const int64_t*>(parent_span.data), parent_span.count); break;
+                        }
+                    } else {
+                        std::vector<int64_t> c64(child_span.count), p64(parent_span.count);
+                        for (size_t i = 0; i < child_span.count; ++i) c64[i] = child_span.at(i);
+                        for (size_t i = 0; i < parent_span.count; ++i) p64[i] = parent_span.at(i);
+                        run(c64.data(), c64.size(), p64.data(), p64.size());
                     }
 
                     apply_anchor_filters(token_anchor_constraints, result);
@@ -3948,16 +4246,17 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     const size_t ns = sents.region_count();
                     const int16_t* ein = deps.euler_in_data();
                     const int16_t* eout = deps.euler_out_data();
-                    const uint64_t* mbits = use_region_mask ? region_mask.bits.data() : nullptr;
+                    const bool mask_iv = use_region_mask && !region_mask.use_bits;
+                    MaskCursor dmask(region_mask);
+                    auto allowed = [&](CorpusPos p) -> bool {   // any order
+                        return !use_region_mask || region_mask.contains(p);
+                    };
                     // Ancestor and descendant share the sentence the dep index is built
                     // on, so `within s` is implied.
                     const StructuralAttr* wsa =
                         (within_sa && !within_span_semantics && within_sa == &sents)
                             ? nullptr : within_sa;
                     int64_t within_hint = -1;
-                    auto bit = [](const uint64_t* b, CorpusPos p) -> bool {
-                        return (b[static_cast<size_t>(p) >> 6] >> (static_cast<size_t>(p) & 63)) & 1u;
-                    };
                     const bool can_fast_count = count_total && cheap_total_ok && !wsa
                         && max_matches > 0 && !agg_ptr && sample_size == 0;
 
@@ -3997,6 +4296,12 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                         bool stop = false;
                         while (id < nd && !stop) {
                             const CorpusPos d0 = Dp[id];
+                            if (mask_iv && !dmask.contains(d0)) {
+                                // skip driver postings up to the next allowed interval
+                                if (dmask.exhausted()) break;
+                                id = gallop_ptr(Dp, nd, id, dmask.next_start());
+                                continue;
+                            }
                             // Sentence of d0 (driver positions ascend; galloping cursor).
                             {
                                 const int64_t r = scur.find(d0);
@@ -4017,11 +4322,14 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                             }
                             size_t jo = io;
                             while (jo < no && Op[jo] <= en) ++jo;
+                            // Whole sentence inside the allowed interval → no per-position tests.
+                            const bool whole = !use_region_mask
+                                || (mask_iv && dmask.current().s <= st && en <= dmask.current().e);
                             for (size_t x = id; x < jd && !stop; ++x) {
                                 const CorpusPos dp = Dp[x];
-                                if (mbits && !bit(mbits, dp)) continue;
+                                if (!whole && !allowed(dp)) continue;
                                 const int16_t din = ein[dp], dout = eout[dp];
-                                if (counting && !mbits) {
+                                if (counting && whole) {
                                     // Branch-free count once the page is full.
                                     size_t c = 0;
                                     if (driver_is_anc) {
@@ -4041,7 +4349,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                                         ? (din < oin && dout > oout)
                                         : (oin < din && oout > dout);
                                     if (!related) continue;
-                                    if (mbits && !bit(mbits, op)) continue;
+                                    if (!whole && !allowed(op)) continue;
                                     if (counting) { ++cnt; continue; }
                                     const CorpusPos t0 = driver_is_token0 ? dp : op;
                                     const CorpusPos t1 = driver_is_token0 ? op : dp;
@@ -4125,21 +4433,20 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     const int16_t* hrel = deps.head_rel_data();
                     const int16_t* hloc = deps.head_local_data();
                     const CorpusPos corpus_end = corpus_.size();
-                    const uint64_t* mbits = use_region_mask ? region_mask.bits.data() : nullptr;
-                    auto bit = [](const uint64_t* b, CorpusPos p) -> bool {
-                        return (b[static_cast<size_t>(p) >> 6] >> (static_cast<size_t>(p) & 63)) & 1u;
-                    };
-                    // head(p) for p in ascending order (cursor over sentences).
-                    FlatRegionCursor sent_cur(sents);
-                    auto head_of = [&](CorpusPos p, FlatRegionCursor& cur) -> CorpusPos {
+                    const bool mask_bits = use_region_mask && region_mask.use_bits;
+                    const bool mask_iv = use_region_mask && !region_mask.use_bits;
+                    MaskCursor gmask(region_mask);
+                    int64_t sent_hint = -1;
+                    auto head_of = [&](CorpusPos p) -> CorpusPos {
                         if (hrel) {
                             const int16_t d = hrel[p];
                             return d ? p + d : NO_HEAD;
                         }
                         const int16_t l = hloc[p];
                         if (l < 0) return NO_HEAD;
-                        const int64_t si = cur.find(p);
+                        const int64_t si = sents.find_region_from(p, sent_hint);
                         if (si < 0) return NO_HEAD;
+                        sent_hint = si;
                         const CorpusPos h = sent_r[si].start + l;
                         return h < corpus_end ? h : NO_HEAD;
                     };
@@ -4149,14 +4456,11 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     const RevSpan& Dd = keep_token0 ? right.span : left.span;   // dependent side
                     result.seed_token = keep_token0 ? 0 : 1;
 
-                    // Forbidden governors: heads of the dependent side.
-                    std::vector<uint64_t> forbid(static_cast<size_t>((corpus_end + 63) / 64), 0);
-                    for (size_t i = 0; i < Dd.count; ++i) {
-                        const CorpusPos h = head_of(Dd.at(i), sent_cur);
-                        if (h != NO_HEAD)
-                            forbid[static_cast<size_t>(h) >> 6] |= uint64_t{1} << (static_cast<size_t>(h) & 63);
-                    }
-                    const uint64_t* fb = forbid.data();
+                    // Forbidden governors = heads of the dependent side, kept in a
+                    // 32 KB window (P1.11) instead of a corpus-sized bitset: governors
+                    // are processed in chunks of kWindow positions; a chunk's
+                    // forbidden set comes from the dependents within ±D of it.
+                    SlidingBitset forbid;
 
                     const StructuralAttr* wsa =
                         (within_sa && !within_span_semantics && within_sa == &sents)
@@ -4188,17 +4492,59 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                         return !(reached_limit() || reached_total_cap());
                     };
                     size_t cnt = 0;
-                    size_t i = 0;
-                    for (; i < G.count; ++i) {
-                        if (can_fast_count && result.matches.size() >= max_matches) break;
-                        const CorpusPos g = G.at(i);
-                        if (mbits && !bit(mbits, g)) continue;
-                        if (!bit(fb, g) && !emit(g)) { i = G.count; break; }
-                    }
-                    for (; i < G.count; ++i) {
-                        const CorpusPos g = G.at(i);
-                        if (mbits && !bit(mbits, g)) continue;
-                        cnt += !bit(fb, g);
+                    auto run = [&](const auto* Gp, size_t gn, const auto* Dp, size_t dn) {
+                        bool counting = false, stop = false;
+                        size_t i = 0, ds = 0;
+                        while (i < gn && !stop) {
+                            const CorpusPos g0 = static_cast<CorpusPos>(Gp[i]);
+                            if (mask_iv && !gmask.contains(g0)) {
+                                if (gmask.exhausted()) break;
+                                i = gallop_ptr(Gp, gn, i, gmask.next_start());
+                                continue;
+                            }
+                            const CorpusPos base = g0;
+                            const CorpusPos chunk_end = base + SlidingBitset::kWindow;
+                            forbid.reset(base);
+                            ds = gallop_ptr(Dp, dn, ds, base - kMaxHeadDistance);
+                            const CorpusPos dend = chunk_end + kMaxHeadDistance;
+                            for (size_t k = ds; k < dn && static_cast<CorpusPos>(Dp[k]) < dend; ++k) {
+                                const CorpusPos h = head_of(static_cast<CorpusPos>(Dp[k]));
+                                if (h >= base && h < chunk_end) forbid.set(h);   // NO_HEAD (-1) < base
+                            }
+                            if (counting && !use_region_mask) {
+                                size_t c = 0;
+                                for (; i < gn && static_cast<CorpusPos>(Gp[i]) < chunk_end; ++i)
+                                    c += !forbid.test(static_cast<CorpusPos>(Gp[i]));
+                                cnt += c;
+                                continue;
+                            }
+                            for (; i < gn; ++i) {
+                                const CorpusPos g = static_cast<CorpusPos>(Gp[i]);
+                                if (g >= chunk_end) break;
+                                if (mask_iv && !gmask.contains(g)) break;   // outer round skips ahead
+                                if (mask_bits && !bitset_test(region_mask.bits, g)) continue;
+                                if (forbid.test(g)) continue;
+                                if (counting) { ++cnt; continue; }
+                                if (!emit(g)) { stop = true; break; }
+                                if (can_fast_count && result.matches.size() >= max_matches)
+                                    counting = true;
+                            }
+                        }
+                    };
+                    if (G.width == Dd.width) {
+                        switch (G.width) {
+                            case 2: run(static_cast<const int16_t*>(G.data), G.count,
+                                        static_cast<const int16_t*>(Dd.data), Dd.count); break;
+                            case 4: run(static_cast<const int32_t*>(G.data), G.count,
+                                        static_cast<const int32_t*>(Dd.data), Dd.count); break;
+                            default: run(static_cast<const int64_t*>(G.data), G.count,
+                                         static_cast<const int64_t*>(Dd.data), Dd.count); break;
+                        }
+                    } else {
+                        std::vector<int64_t> g64(G.count), d64(Dd.count);
+                        for (size_t k = 0; k < G.count; ++k) g64[k] = G.at(k);
+                        for (size_t k = 0; k < Dd.count; ++k) d64[k] = Dd.at(k);
+                        run(g64.data(), g64.size(), d64.data(), d64.size());
                     }
                     result.total_count += cnt;
                     if (max_total_cap > 0 && result.total_count > max_total_cap)

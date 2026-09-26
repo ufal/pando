@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Differential test: fast paths vs generic executor.
 
-Runs every query under PANDO_FASTPATH=on / nomerge / off and requires
+Runs every query under PANDO_FASTPATH=on / nomerge / off (and "onbits": on with
+region filters forced to bitsets, PANDO_MASK_BITS=1) and requires
 
   * identical exact totals (``--count-only``) in every mode,
   * identical totals from the concordance path (``--limit K --total``),
@@ -31,11 +32,16 @@ import sys
 import tempfile
 import time
 
-MODES = ("on", "nomerge", "off")
+MODES = ("on", "onbits", "nomerge", "off")
+# onbits = fast paths with region filters forced to the bitset representation
+# (PANDO_MASK_BITS=1) instead of position intervals.
 
 
 def run(pando, corpus, query, args, mode, timeout):
-    env = dict(os.environ, PANDO_FASTPATH=mode)
+    env = dict(os.environ, PANDO_FASTPATH="on" if mode == "onbits" else mode)
+    env.pop("PANDO_MASK_BITS", None)
+    if mode == "onbits":
+        env["PANDO_MASK_BITS"] = "1"
     t0 = time.monotonic()
     p = subprocess.run([pando, corpus, query, "--timing", *args],
                        capture_output=True, text=True, env=env, timeout=timeout)

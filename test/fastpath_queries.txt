@@ -22,6 +22,9 @@
 [upos="ADJ"] [upos="NOUN"] within text_langcode="en"
 [upos="ADJ"] [upos="NOUN"] :: match.text_langcode="cs"
 [upos="ADJ"] [upos="NOUN"] within s
+[lemma="book"] [upos="NOUN"] within text_langcode="en"
+[upos="NOUN"] [upos="NOUN"] :: match.text_langcode="cs"
+[] [upos="NOUN"] within text_langcode="en"
 
 # --- sequences, n >= 3 (seq_merge_n) ---
 [upos="DET"] [upos="ADJ"] [upos="NOUN"]
