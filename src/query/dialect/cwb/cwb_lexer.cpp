@@ -302,8 +302,11 @@ CwbToken CwbLexer::next() {
         return make_tok(CwbTok::FLAG, start, std::string(s_.data() + p0, i_ - p0));
     }
 
-    // Numbers
-    if (c == '+' || c == '-' || (c >= '0' && c <= '9')) {
+    // Numbers. A sign only starts a number when a digit follows; otherwise '+'
+    // and '-' are operators (`[]+ [x]`, `[]+[x]` are repetition, not "+<num>").
+    const bool signed_num = (c == '+' || c == '-') && i_ + 1 < s_.size()
+                            && s_[i_ + 1] >= '0' && s_[i_ + 1] <= '9';
+    if (signed_num || (c >= '0' && c <= '9')) {
         bool neg = false;
         if (c == '+' || c == '-') {
             neg = (c == '-');

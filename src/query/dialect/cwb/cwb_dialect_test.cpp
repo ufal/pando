@@ -1,6 +1,7 @@
 #include "query/dialect/cwb/cwb_translate.h"
 
 #include <cassert>
+#include <cstdio>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -28,6 +29,28 @@ int main() {
     expect_ok("[lemma=\"a\"][lemma=\"b\"]", 1);
     assert(pando::translate_cwb_program("[lemma=\"a\"][lemma=\"b\"]", 0, nullptr)[0]
                .query.tokens.size() == 2);
+
+    // repetition suffixes (the '+' used to be lexed as a signed number).
+    // CHECK, not assert: this test also has to fail in Release (NDEBUG) builds.
+    struct RepCase { const char* q; std::size_t ntok; int rep_tok, min, max; };
+    const RepCase rep_cases[] = {
+        {"[pos=\"DET\"] []+ [pos=\"NOUN\"]", 3, 1, 1, pando::REPEAT_UNBOUNDED},
+        {"[pos=\"DET\"] []+[pos=\"NOUN\"]", 3, 1, 1, pando::REPEAT_UNBOUNDED},
+        {"[pos=\"ADJ\"]+ [pos=\"NOUN\"]", 2, 0, 1, pando::REPEAT_UNBOUNDED},
+        {"[pos=\"DET\"] []* [pos=\"NOUN\"]", 3, 1, 0, pando::REPEAT_UNBOUNDED},
+        {"[pos=\"DET\"] []{0,3} [pos=\"NOUN\"]", 3, 1, 0, 3},
+        {"[pos=\"DET\"] [pos=\"ADJ\"]? [pos=\"NOUN\"]", 3, 1, 0, 1},
+    };
+    for (const auto& c : rep_cases) {
+        auto p = pando::translate_cwb_program(c.q, 0, nullptr);
+        const auto& toks = p.at(0).query.tokens;
+        if (p.size() != 1 || toks.size() != c.ntok
+            || toks[static_cast<std::size_t>(c.rep_tok)].min_repeat != c.min
+            || toks[static_cast<std::size_t>(c.rep_tok)].max_repeat != c.max) {
+            std::fprintf(stderr, "FAIL repetition: %s\n", c.q);
+            return 1;
+        }
+    }
 
     expect_throw("count [lemma=\"x\"]");
     expect_throw("[lemma=\"a\"] | [lemma=\"b\"]");
