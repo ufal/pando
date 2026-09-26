@@ -184,6 +184,39 @@ static inline size_t gallop_rev(const RevSpan& B, size_t lo, CorpusPos target) {
     return L;
 }
 
+/// Cursor over a *flat* (sorted, non-overlapping) region array for ascending
+/// positions: find(pos) returns the region containing pos or -1. Advances by
+/// exponential search on region ends, so sparse positions skip whole runs of
+/// regions instead of stepping through them (sentence tables are ~5 GB at 6B tokens).
+struct FlatRegionCursor {
+    const Region* r = nullptr;
+    size_t n = 0;
+    size_t cur = 0;
+    FlatRegionCursor() = default;
+    explicit FlatRegionCursor(const StructuralAttr& sa)
+        : r(sa.region_data()), n(sa.region_count()) {}
+    int64_t find(CorpusPos pos) {
+        if (cur < n && r[cur].end < pos) {
+            size_t prev = cur, step = 1, hi = cur + 1;   // r[prev].end < pos
+            while (hi < n && r[hi].end < pos) {
+                prev = hi;
+                step <<= 1;
+                hi = prev + step;
+            }
+            if (hi > n) hi = n;
+            size_t L = prev + 1, R = hi;
+            while (L < R) {
+                size_t mid = L + ((R - L) >> 1);
+                if (r[mid].end < pos) L = mid + 1;
+                else R = mid;
+            }
+            cur = L;
+        }
+        if (cur < n && r[cur].start <= pos) return static_cast<int64_t>(cur);
+        return -1;
+    }
+};
+
 /// Balanced two-pointer shift-merge on typed posting arrays (width dispatched once
 /// by the caller instead of a switch per element in RevSpan::at).
 template<typename T, typename Emit>
@@ -3475,8 +3508,8 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             // Candidates mostly arrive in position order: reuse the last region
             // (find_region_from) instead of a full binary search per candidate.
             int64_t within_hint = -1;
-            RegionCursor within_cur;
-            if (within_sa && !within_span_semantics) within_cur = RegionCursor(*within_sa);
+            FlatRegionCursor within_cur;
+            if (within_sa && !within_span_semantics) within_cur = FlatRegionCursor(*within_sa);
 
             RegionPosMask region_mask =
                 build_region_eq_position_mask(corpus_, q.global_region_filters);
@@ -3516,7 +3549,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                         // (amortised O(1), inline) instead of a lookup per candidate.
                         int64_t rgn = within_cur.find(p0);
                         if (rgn < 0) return true;
-                        if (pN > within_cur.regions[rgn].end) return true;
+                        if (pN > within_cur.r[rgn].end) return true;
                     }
                 }
                 // Past page capacity: count only (no Match alloc) when totaling.
@@ -3758,7 +3791,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     const auto& deps = corpus_.deps();
                     const StructuralAttr& sents = corpus_.structure("s");
                     const Region* sent_r = sents.region_data();
-                    RegionCursor sent_cur(sents);
+                    FlatRegionCursor sent_cur(sents);
                     const int16_t* hrel = deps.head_rel_data();
                     const int16_t* hloc = deps.head_local_data();
                     const uint64_t* pbits = parent_bits.data();
@@ -3959,21 +3992,20 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                         const size_t nd = D.count, no = O.count;
                         const bool gallop_other = no > (nd << 3);
                         size_t id = 0, io = 0, si = 0;
-                        int64_t sent_hint = -1;
+                        FlatRegionCursor scur(sents);
                         bool counting = false;
                         bool stop = false;
                         while (id < nd && !stop) {
                             const CorpusPos d0 = Dp[id];
-                            // Sentence of d0 (driver positions ascend).
-                            if (gallop_other) {
-                                int64_t r = sents.find_region_from(d0, sent_hint);
-                                if (r < 0) { ++id; continue; }
-                                sent_hint = r;
+                            // Sentence of d0 (driver positions ascend; galloping cursor).
+                            {
+                                const int64_t r = scur.find(d0);
+                                if (r < 0) {
+                                    if (scur.cur >= ns) break;
+                                    ++id;
+                                    continue;
+                                }
                                 si = static_cast<size_t>(r);
-                            } else {
-                                while (si < ns && sr[si].end < d0) ++si;
-                                if (si >= ns) break;
-                                if (d0 < sr[si].start) { ++id; continue; }
                             }
                             const CorpusPos st = sr[si].start, en = sr[si].end;
                             size_t jd = id;
@@ -4098,8 +4130,8 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                         return (b[static_cast<size_t>(p) >> 6] >> (static_cast<size_t>(p) & 63)) & 1u;
                     };
                     // head(p) for p in ascending order (cursor over sentences).
-                    RegionCursor sent_cur(sents);
-                    auto head_of = [&](CorpusPos p, RegionCursor& cur) -> CorpusPos {
+                    FlatRegionCursor sent_cur(sents);
+                    auto head_of = [&](CorpusPos p, FlatRegionCursor& cur) -> CorpusPos {
                         if (hrel) {
                             const int16_t d = hrel[p];
                             return d ? p + d : NO_HEAD;
