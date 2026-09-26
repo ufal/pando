@@ -114,6 +114,9 @@ static bool within_span_in_some_region(const StructuralAttr& sa, CorpusPos min_p
 // same matches and totals as the generic executor.
 enum class FastPathMode : uint8_t { On, NoMerge, Off };
 
+// Dep bitset join is only used when max(|A|,|B|) <= kDepBitsetMaxSkew * min(|A|,|B|).
+static constexpr size_t kDepBitsetMaxSkew = 64;
+
 static FastPathMode fastpath_mode() {
     static const FastPathMode mode = [] {
         const char* v = std::getenv("PANDO_FASTPATH");
@@ -157,6 +160,52 @@ static SeqMergeOperand seq_merge_operand(const Corpus& corpus, const ConditionPt
     return out;
 }
 
+/// First index j in [lo, B.count) with B.at(j) >= target (B.count if none).
+/// Exponential ("galloping") search from `lo`, then binary search inside the
+/// bracket: O(log gap) comparisons, and the probes stay near the cursor.
+static inline size_t gallop_rev(const RevSpan& B, size_t lo, CorpusPos target) {
+    const size_t n = B.count;
+    if (lo >= n || B.at(lo) >= target) return lo;
+    size_t prev = lo;            // invariant: B.at(prev) < target
+    size_t step = 1;
+    size_t hi = lo + 1;
+    while (hi < n && B.at(hi) < target) {
+        prev = hi;
+        step <<= 1;
+        hi = prev + step;
+    }
+    if (hi > n) hi = n;          // answer in (prev, hi]
+    size_t L = prev + 1, R = hi;
+    while (L < R) {
+        size_t mid = L + ((R - L) >> 1);
+        if (B.at(mid) < target) L = mid + 1;
+        else R = mid;
+    }
+    return L;
+}
+
+/// Balanced two-pointer shift-merge on typed posting arrays (width dispatched once
+/// by the caller instead of a switch per element in RevSpan::at).
+template<typename T, typename Emit>
+static bool shift_merge_typed(const T* a, size_t na, const T* b, size_t nb, int64_t delta,
+                              Emit& emit) {
+    size_t ia = 0, ib = 0;
+    while (ia < na && ib < nb) {
+        const CorpusPos av = static_cast<CorpusPos>(a[ia]);
+        const CorpusPos need = av + delta;
+        const CorpusPos bv = static_cast<CorpusPos>(b[ib]);
+        if (need == bv) {
+            if (!emit(av)) return false;
+            ++ia;
+            ++ib;
+        } else {
+            ia += (need < bv);
+            ib += (need > bv);
+        }
+    }
+    return true;
+}
+
 /// Emit every `a` in A such that `a + delta` is in B (both sorted, unique positions).
 /// `emit(a)` return false to stop. Returns false if stopped early.
 template<typename Emit>
@@ -169,13 +218,7 @@ static bool shift_merge_rev(const RevSpan& A, const RevSpan& B, int64_t delta, E
         size_t lo = 0;
         while (ia < na) {
             CorpusPos need = A.at(ia) + delta;
-            // lower_bound in B[lo..]
-            size_t L = lo, R = nb;
-            while (L < R) {
-                size_t mid = L + ((R - L) >> 1);
-                if (B.at(mid) < need) L = mid + 1;
-                else R = mid;
-            }
+            size_t L = gallop_rev(B, lo, need);
             if (L >= nb) break;
             lo = L;
             if (B.at(L) == need) {
@@ -192,12 +235,7 @@ static bool shift_merge_rev(const RevSpan& A, const RevSpan& B, int64_t delta, E
         while (ib < nb) {
             CorpusPos b = B.at(ib);
             CorpusPos need = b - delta;
-            size_t L = lo, R = na;
-            while (L < R) {
-                size_t mid = L + ((R - L) >> 1);
-                if (A.at(mid) < need) L = mid + 1;
-                else R = mid;
-            }
+            size_t L = gallop_rev(A, lo, need);
             if (L >= na) break;
             lo = L;
             if (A.at(L) == need) {
@@ -209,6 +247,17 @@ static bool shift_merge_rev(const RevSpan& A, const RevSpan& B, int64_t delta, E
         return true;
     }
     // Balanced two-pointer merge
+    if (A.width == B.width) {
+        switch (A.width) {
+            case 2: return shift_merge_typed(static_cast<const int16_t*>(A.data), na,
+                                             static_cast<const int16_t*>(B.data), nb, delta, emit);
+            case 4: return shift_merge_typed(static_cast<const int32_t*>(A.data), na,
+                                             static_cast<const int32_t*>(B.data), nb, delta, emit);
+            case 8: return shift_merge_typed(static_cast<const int64_t*>(A.data), na,
+                                             static_cast<const int64_t*>(B.data), nb, delta, emit);
+            default: break;
+        }
+    }
     while (ia < na && ib < nb) {
         CorpusPos a = A.at(ia);
         CorpusPos b = B.at(ib);
@@ -220,25 +269,6 @@ static bool shift_merge_rev(const RevSpan& A, const RevSpan& B, int64_t delta, E
         } else if (need < b) {
             ++ia;
         } else {
-            ++ib;
-        }
-    }
-    return true;
-}
-
-/// Intersect sorted start-positions `starts` with B shifted so start+delta ∈ B.
-template<typename Emit>
-static bool shift_merge_starts(const std::vector<CorpusPos>& starts, const RevSpan& B,
-                               int64_t delta, Emit&& emit) {
-    if (starts.empty() || B.empty()) return true;
-    size_t ib = 0;
-    const size_t nb = B.count;
-    for (CorpusPos a : starts) {
-        CorpusPos need = a + delta;
-        while (ib < nb && B.at(ib) < need) ++ib;
-        if (ib >= nb) break;
-        if (B.at(ib) == need) {
-            if (!emit(a)) return false;
             ++ib;
         }
     }
@@ -3232,6 +3262,50 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
         int max_rep = q.tokens[0].max_repeat;
         const ConditionPtr& tok_cond = q.tokens[0].conditions;
 
+        // ── Single EQ token: first page straight from `.rev`, the rest only counted
+        // (optionally through the EQ region mask). Avoids one Match per hit.
+        if (fastpath_mode() == FastPathMode::On && sample_size == 0 && !agg_ptr
+            && !q.tokens[0].has_repetition() && token_anchor_constraints.empty()
+            && !q.within_having && !q.not_within && q.containing_clauses.empty()
+            && q.position_orders.empty() && q.global_alignment_filters.empty()
+            && q.global_function_filters.empty()) {
+            SeqMergeOperand op = seq_merge_operand(corpus_, tok_cond);
+            if (op.kind == SeqMergeTok::EqRev) {
+                RegionPosMask mask =
+                    build_region_eq_position_mask(corpus_, q.global_region_filters);
+                if (mask.status == RegionMaskStatus::Unsatisfiable) {
+                    result.plan_path = "single_count";
+                    result.total_exact = true;
+                    return result;
+                }
+                if (mask.status != RegionMaskStatus::Unsupported) {
+                    result.plan_path = "single_count";
+                    const bool use_mask = mask.status == RegionMaskStatus::Ready;
+                    const size_t cnt = op.span.count;
+                    size_t i = 0;
+                    for (; i < cnt; ++i) {
+                        CorpusPos p = op.span.at(i);
+                        if (use_mask && !bitset_test(mask.bits, p)) continue;
+                        if (max_matches > 0 && result.matches.size() >= max_matches) break;
+                        add_match(std::vector<CorpusPos>{p, p});
+                        if (reached_total_cap()) break;
+                    }
+                    if (count_total && i < cnt && !reached_total_cap()) {
+                        if (!use_mask) {
+                            result.total_count += cnt - i;
+                        } else {
+                            for (; i < cnt; ++i)
+                                if (bitset_test(mask.bits, op.span.at(i))) ++result.total_count;
+                        }
+                        if (max_total_cap > 0 && result.total_count > max_total_cap)
+                            result.total_count = max_total_cap;
+                    }
+                    result.total_exact = !reached_limit() && !reached_total_cap();
+                    return result;
+                }
+            }
+        }
+
         // Non-repeating single token only: one span [p,p] per matching seed (min=max=1).
         auto try_spans_from = [&](CorpusPos p) {
             for (int len = min_rep; len <= max_rep; ++len) {
@@ -3375,6 +3449,9 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                                corpus_.is_overlapping(effective_within));
 
             CorpusPos corpus_end = corpus_.size();
+            // Candidates mostly arrive in position order: reuse the last region
+            // (find_region_from) instead of a full binary search per candidate.
+            int64_t within_hint = -1;
 
             RegionPosMask region_mask =
                 build_region_eq_position_mask(corpus_, q.global_region_filters);
@@ -3410,8 +3487,9 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     if (within_span_semantics) {
                         if (!within_span_in_some_region(*within_sa, p0, pN)) return true;
                     } else {
-                        int64_t rgn = within_sa->find_region(p0);
+                        int64_t rgn = within_sa->find_region_from(p0, within_hint);
                         if (rgn < 0) return true;
+                        within_hint = rgn;
                         Region r = within_sa->get(static_cast<size_t>(rgn));
                         if (pN > r.end) return true;
                     }
@@ -3462,33 +3540,45 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                         if (!accept_start(b - 1)) { ok = true; break; }
                     }
                 } else {
-                    // n>=3 or mixed: start from first_eq postings as candidate starts
-                    // shifted so token[0] = start.
+                    // n>=3 or mixed: leapfrog join driven by the rarest EQ token.
+                    // For each position s of the rarest list, gallop every other EQ
+                    // list to s - seed + t; emit the start when all agree. Streams
+                    // (first page stops early) and costs O(|rarest| * log gap).
                     result.plan_path = "seq_merge_n";
-                    std::vector<CorpusPos> starts;
-                    {
-                        const RevSpan& S = ops[first_eq].span;
-                        starts.reserve(S.count);
-                        int64_t back = static_cast<int64_t>(first_eq);
-                        for (size_t i = 0; i < S.count; ++i) {
-                            CorpusPos p = S.at(i) - back;
-                            if (p >= 0) starts.push_back(p);
+                    size_t seed_eq = first_eq;
+                    for (size_t t = 0; t < n; ++t)
+                        if (ops[t].kind == SeqMergeTok::EqRev
+                            && ops[t].span.count < ops[seed_eq].span.count)
+                            seed_eq = t;
+                    std::vector<size_t> cur(n, 0);
+                    const RevSpan& S = ops[seed_eq].span;
+                    // Gallop only into lists much longer than the seed; for similar
+                    // sizes a linear advance is cheaper (a few steps per seed).
+                    std::vector<char> use_gallop(n, 0);
+                    for (size_t t = 0; t < n; ++t)
+                        use_gallop[t] = ops[t].kind == SeqMergeTok::EqRev
+                                        && ops[t].span.count > (S.count << 3);
+                    const int64_t back = static_cast<int64_t>(seed_eq);
+                    bool exhausted = false;
+                    for (size_t i = 0; i < S.count && !exhausted; ++i) {
+                        CorpusPos p0 = S.at(i) - back;
+                        if (p0 < 0) continue;
+                        bool all = true;
+                        for (size_t t = 0; t < n; ++t) {
+                            if (t == seed_eq || ops[t].kind != SeqMergeTok::EqRev) continue;
+                            const RevSpan& B = ops[t].span;
+                            CorpusPos need = p0 + static_cast<int64_t>(t);
+                            if (use_gallop[t]) {
+                                cur[t] = gallop_rev(B, cur[t], need);
+                            } else {
+                                size_t c = cur[t];
+                                while (c < B.count && B.at(c) < need) ++c;
+                                cur[t] = c;
+                            }
+                            if (cur[t] >= B.count) { exhausted = true; all = false; break; }
+                            if (B.at(cur[t]) != need) { all = false; break; }
                         }
-                    }
-                    for (size_t t = 0; t < n && ok; ++t) {
-                        if (t == first_eq) continue;
-                        if (ops[t].kind == SeqMergeTok::Wildcard) continue;
-                        std::vector<CorpusPos> next;
-                        next.reserve(starts.size());
-                        shift_merge_starts(starts, ops[t].span, static_cast<int64_t>(t),
-                                          [&](CorpusPos s) {
-                                              next.push_back(s);
-                                              return true;
-                                          });
-                        starts.swap(next);
-                    }
-                    for (CorpusPos p0 : starts) {
-                        if (!accept_start(p0)) break;
+                        if (all && !accept_start(p0)) break;
                     }
                 }
 
@@ -3520,8 +3610,9 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     if (within_span_semantics) {
                         if (!within_span_in_some_region(*within_sa, p0, pN)) return true;
                     } else {
-                        int64_t rgn = within_sa->find_region(p0);
+                        int64_t rgn = within_sa->find_region_from(p0, within_hint);
                         if (rgn < 0) return true;
+                        within_hint = rgn;
                         Region r = within_sa->get(static_cast<size_t>(rgn));
                         if (pN > r.end) return true;
                     }
@@ -3579,8 +3670,15 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             if (rt == RelationType::GOVERNS || rt == RelationType::GOVERNED_BY) {
                 SeqMergeOperand left = seq_merge_operand(corpus_, q.tokens[0].conditions);
                 SeqMergeOperand right = seq_merge_operand(corpus_, q.tokens[1].conditions);
+                // The bitset join costs O(|A| + |B|) plus a corpus-sized bitset; when
+                // one side is much rarer, the generic planner (seed from the rare side,
+                // probe head()/children()) is an order of magnitude faster.
+                const bool skewed = left.kind == SeqMergeTok::EqRev
+                    && right.kind == SeqMergeTok::EqRev
+                    && std::min(left.span.count, right.span.count) * kDepBitsetMaxSkew
+                           < std::max(left.span.count, right.span.count);
                 if (left.kind == SeqMergeTok::EqRev && right.kind == SeqMergeTok::EqRev
-                    && !left.span.empty() && !right.span.empty()) {
+                    && !left.span.empty() && !right.span.empty() && !skewed) {
                     // GOVERNS: head(right)=left.  GOVERNED_BY: head(left)=right.
                     const RevSpan& parent_span =
                         (rt == RelationType::GOVERNS) ? left.span : right.span;
@@ -3630,6 +3728,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
 
                     const auto& deps = corpus_.deps();
                     int64_t sent_hint = -1;
+                    int64_t within_hint = -1;
                     CorpusPos corpus_end = corpus_.size();
 
                     for (size_t i = 0; i < child_span.count; ++i) {
@@ -3648,8 +3747,9 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                                 if (!within_span_in_some_region(*within_sa, lo, hi))
                                     continue;
                             } else {
-                                int64_t rgn = within_sa->find_region(lo);
+                                int64_t rgn = within_sa->find_region_from(lo, within_hint);
                                 if (rgn < 0) continue;
+                                within_hint = rgn;
                                 Region r = within_sa->get(static_cast<size_t>(rgn));
                                 if (hi > r.end) continue;
                             }

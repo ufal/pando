@@ -11,6 +11,8 @@ corpus open are excluded), the exact total, and the execution path
   * With --baseline, a query is flagged SLOWER when its median is more than
     --tol (fraction) and more than --min-ms slower than the baseline.
   * --out writes all results as JSON (use it later as --baseline).
+    Timings only compare on the same machine in the same state; across
+    machines (or after a VM restart) prefer two binaries side by side.
 
 Examples:
   test/perf_bench.py --corpus /data/ud_demo --queries test/perf_queries.tsv \\

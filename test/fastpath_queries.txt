@@ -7,6 +7,8 @@
 [upos="NOUN"]
 [lemma="house"]
 [upos="NOUN"] within text_langcode="en"
+[upos="NOUN"] :: match.text_langcode="cs"
+[lemma="book"] within text_langcode="en"
 
 # --- sequences, n = 2 (seq_merge2 / seq_merge_wild) ---
 [upos="ADJ"] [upos="NOUN"]
@@ -28,6 +30,9 @@
 [] [upos="DET"] [lemma="book"]
 [upos="ADP"] [upos="DET"] [upos="ADJ"] [upos="NOUN"]
 [upos="DET"] [upos="ADJ"] [upos="NOUN"] within text_langcode="en"
+[upos="DET"] [upos="ADJ"] [] [upos="NOUN"] within s
+[upos="PUNCT"] [upos="PUNCT"] [upos="PUNCT"]
+[upos="ADP"] [] [upos="DET"] [] [lemma="book"]
 
 # --- sequences that are not mergeable today (probe / generic) ---
 [upos="ADJ" & lemma="good"] [upos="NOUN"]
@@ -41,6 +46,8 @@
 [upos="VERB"] > [deprel="nsubj"]
 [lemma="book"] > [upos="ADJ"]
 [upos="NOUN"] > [lemma="big"]
+[lemma="book"] > [upos="ADJ"] within text_langcode="en"
+[upos="ADJ"] < [lemma="book"]
 [upos="VERB"] > [upos="NOUN"] within text_langcode="en"
 [upos="VERB"] > [upos="NOUN"] :: match.text_langcode="cs"
 [upos="VERB"] > [upos="NOUN"] within s

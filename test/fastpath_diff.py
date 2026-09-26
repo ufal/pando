@@ -5,6 +5,7 @@ Runs every query under PANDO_FASTPATH=on / nomerge / off and requires
 
   * identical exact totals (``--count-only``) in every mode,
   * identical totals from the concordance path (``--limit K --total``),
+  * the same capped total with ``--max-total`` (half the exact total),
   * identical full match sets (``--dump-matches``, compared as sorted sets)
     when the total is at most ``--max-full``,
   * the first page (``--dump-page --limit K``, the normal concordance path
@@ -76,6 +77,16 @@ def check_query(opts, query, max_full):
         t = total_from_timing(err)
         if t != ref_total:
             problems.append(f"[{mode}] --limit {k} --total gives {t}, expected {ref_total}")
+
+    # capped total (--max-total): every mode must stop at the same cap
+    if ref_total >= 2:
+        cap = ref_total // 2
+        for mode in MODES:
+            _, _, _, err = run(opts.pando, opts.corpus, query,
+                               ["--limit", str(k), "--total", "--max-total", str(cap)], mode, opts.timeout)
+            t = total_from_timing(err)
+            if t != cap:
+                problems.append(f"[{mode}] --max-total {cap} gives total {t}, expected {cap}")
 
     if ref_total <= max_full:
         sets = {}
