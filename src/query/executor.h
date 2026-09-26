@@ -530,6 +530,10 @@ struct MatchSet {
     // Debug info (always populated)
     size_t seed_token = 0;
     std::vector<size_t> cardinalities;
+    /// Which execution path produced this result (e.g. "seq_merge2", "dep_bitset",
+    /// "seq_probe", "generic"). Reported by `--timing` / JSON debug so benchmarks
+    /// can detect a query silently falling off a fast path.
+    std::string plan_path = "other";
 };
 
 // Query plan: start from the most selective token, expand outward.

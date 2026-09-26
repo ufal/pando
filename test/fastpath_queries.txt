@@ -1,0 +1,51 @@
+# Queries for test/fastpath_diff.py (fast paths vs generic executor).
+# Written for UD-style corpora (upos / lemma / form / deprel, s + text regions);
+# lemma/form values that do not exist in a corpus simply yield 0 hits.
+# Optional prefix `fullmax=N<TAB>` limits the full match-set comparison.
+
+# --- single token ---
+[upos="NOUN"]
+[lemma="house"]
+[upos="NOUN"] within text_langcode="en"
+
+# --- sequences, n = 2 (seq_merge2 / seq_merge_wild) ---
+[upos="ADJ"] [upos="NOUN"]
+[upos="NOUN"] [upos="NOUN"]
+[upos="DET"] [lemma="book"]
+[lemma="house"] [upos="NOUN"]
+[form="the"] [upos="NOUN"]
+[lemma="book"] []
+[] [lemma="book"]
+[form="nonexistent_zz_token"] [upos="NOUN"]
+[upos="ADJ"] [upos="NOUN"] within text_langcode="en"
+[upos="ADJ"] [upos="NOUN"] :: match.text_langcode="cs"
+[upos="ADJ"] [upos="NOUN"] within s
+
+# --- sequences, n >= 3 (seq_merge_n) ---
+[upos="DET"] [upos="ADJ"] [upos="NOUN"]
+[upos="DET"] [lemma="book"] [upos="NOUN"]
+[upos="DET"] [] [upos="NOUN"]
+[] [upos="DET"] [lemma="book"]
+[upos="ADP"] [upos="DET"] [upos="ADJ"] [upos="NOUN"]
+[upos="DET"] [upos="ADJ"] [upos="NOUN"] within text_langcode="en"
+
+# --- sequences that are not mergeable today (probe / generic) ---
+[upos="ADJ" & lemma="good"] [upos="NOUN"]
+[upos="ADJ"] [upos="NOUN" & text_langcode="en"]
+[form="the" %c] [upos="NOUN"]
+
+# --- dependencies, direct (dep_bitset) ---
+[upos="VERB"] > [upos="NOUN"]
+[upos="VERB"] > [upos="ADJ"]
+[upos="NOUN"] < [upos="DET"]
+[upos="VERB"] > [deprel="nsubj"]
+[lemma="book"] > [upos="ADJ"]
+[upos="NOUN"] > [lemma="big"]
+[upos="VERB"] > [upos="NOUN"] within text_langcode="en"
+[upos="VERB"] > [upos="NOUN"] :: match.text_langcode="cs"
+[upos="VERB"] > [upos="NOUN"] within s
+
+# --- dependencies, transitive / negated (generic today) ---
+fullmax=0	[upos="VERB"] >> [upos="NOUN"]
+[lemma="book"] >> [upos="ADJ"]
+fullmax=0	[upos="NOUN"] << [upos="VERB"]

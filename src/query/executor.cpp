@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <queue>
@@ -101,6 +102,28 @@ static bool within_span_in_some_region(const StructuralAttr& sa, CorpusPos min_p
         return true;
     });
     return ok;
+}
+
+// ── Fast-path switch (testing) ───────────────────────────────────────────
+//
+// PANDO_FASTPATH=on (default) | nomerge | off
+//   nomerge: disable .rev shift-merge (S1) and the dep bitset+head join, so the
+//            same query runs through the older seed+probe / generic paths;
+//   off:     additionally disable the sequence seed+probe fast path.
+// Used by test/fastpath_diff.py to check that fast paths return exactly the
+// same matches and totals as the generic executor.
+enum class FastPathMode : uint8_t { On, NoMerge, Off };
+
+static FastPathMode fastpath_mode() {
+    static const FastPathMode mode = [] {
+        const char* v = std::getenv("PANDO_FASTPATH");
+        if (!v) return FastPathMode::On;
+        const std::string s(v);
+        if (s == "off" || s == "0") return FastPathMode::Off;
+        if (s == "nomerge") return FastPathMode::NoMerge;
+        return FastPathMode::On;
+    }();
+    return mode;
 }
 
 // ── Manatee-style adjacent sequence merge (QUERY-PERF-MERGE S1) ─────────
@@ -3191,6 +3214,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
         size_t est = estimate_cardinality(q.tokens[0].conditions);
         result.cardinalities = {est};
         result.seed_token = 0;
+        result.plan_path = "single";
 
         // ── Try fast aggregation path (no Match construction) ────────────
         if (agg_ptr && !agg_fast_path_blocked) {
@@ -3323,7 +3347,8 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             if (tok.is_dep_subtree) any_dep_subtree = true;
         }
 
-        if (all_seq && no_rep && no_anchor && !any_dep_subtree && n >= 2) {
+        if (all_seq && no_rep && no_anchor && !any_dep_subtree && n >= 2
+            && fastpath_mode() != FastPathMode::Off) {
             // Pick cheapest token as seed (cardinalities for debug / fallback)
             size_t seed = 0;
             size_t best_est = SIZE_MAX;
@@ -3336,6 +3361,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             }
             result.seed_token = seed;
             result.cardinalities = card;
+            result.plan_path = "seq_probe";
 
             // Within-region support
             std::string effective_within = q.within.empty()
@@ -3373,6 +3399,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     return result;
                 }
             }
+            if (fastpath_mode() != FastPathMode::On) mergeable = false;
 
             auto accept_start = [&](CorpusPos p0) -> bool {
                 CorpusPos pN = p0 + static_cast<int64_t>(n) - 1;
@@ -3419,13 +3446,16 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     // Fall through to seed path (degenerate).
                     ok = false;
                 } else if (n == 2 && first_eq == 0 && ops[1].kind == SeqMergeTok::EqRev) {
+                    result.plan_path = "seq_merge2";
                     ok = shift_merge_rev(ops[0].span, ops[1].span, /*delta=*/1, accept_start);
                 } else if (n == 2 && first_eq == 0 && ops[1].kind == SeqMergeTok::Wildcard) {
+                    result.plan_path = "seq_merge_wild";
                     for (size_t i = 0; i < ops[0].span.count; ++i) {
                         if (!accept_start(ops[0].span.at(i))) { ok = true; break; }
                     }
                 } else if (n == 2 && first_eq == 1 && ops[0].kind == SeqMergeTok::Wildcard) {
                     // [][B]: starts at b-1
+                    result.plan_path = "seq_merge_wild";
                     for (size_t i = 0; i < ops[1].span.count; ++i) {
                         CorpusPos b = ops[1].span.at(i);
                         if (b == 0) continue;
@@ -3434,6 +3464,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 } else {
                     // n>=3 or mixed: start from first_eq postings as candidate starts
                     // shifted so token[0] = start.
+                    result.plan_path = "seq_merge_n";
                     std::vector<CorpusPos> starts;
                     {
                         const RevSpan& S = ops[first_eq].span;
@@ -3542,7 +3573,8 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             if (tok.is_dep_subtree) any_dep_subtree = true;
         }
         if (n == 2 && no_rep && no_anchor && !any_dep_subtree
-            && q.relations.size() == 1 && corpus_.has_deps()) {
+            && q.relations.size() == 1 && corpus_.has_deps()
+            && fastpath_mode() == FastPathMode::On) {
             RelationType rt = q.relations[0].type;
             if (rt == RelationType::GOVERNS || rt == RelationType::GOVERNED_BY) {
                 SeqMergeOperand left = seq_merge_operand(corpus_, q.tokens[0].conditions);
@@ -3557,6 +3589,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     const bool parent_is_token0 = (rt == RelationType::GOVERNS);
 
                     result.seed_token = parent_is_token0 ? 0 : 1;
+                    result.plan_path = "dep_bitset";
                     result.cardinalities = {
                         estimate_cardinality(q.tokens[0].conditions),
                         estimate_cardinality(q.tokens[1].conditions)};
@@ -3663,6 +3696,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
     QueryPlan plan = plan_query(q);
     result.seed_token = plan.seed;
     result.cardinalities = plan.cardinalities;
+    result.plan_path = (eff_threads > 1 && n > 1) ? "generic_mt" : "generic";
 
     // #9: Use default_within from corpus when query does not specify within
     std::string effective_within = q.within.empty()

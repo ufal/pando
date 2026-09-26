@@ -74,6 +74,12 @@ struct Options {
     bool total    = false;
     std::vector<std::string> attrs;  // empty = all attributes in JSON tokens; else only these
     bool count_only = false;  // print only total (for benchmarking)
+    /// `--dump-matches`: print `total=N exact=0|1` then one line per match
+    /// (`starts;ends`), all matches, no KWIC. Used by test/fastpath_diff.py.
+    bool dump_matches = false;
+    /// `--dump-page`: same output format, but for the normal concordance page
+    /// (offset+limit, with --total if given) instead of all matches.
+    bool dump_page = false;
     bool timing     = false;  // print open_sec, query_sec, fetch_sec, total, returned to stderr
     size_t sample   = 0;      // return N randomly sampled matches (reservoir sampling)
     uint32_t sample_seed = 0; // RNG seed for --sample (0 = non-deterministic)
@@ -114,6 +120,7 @@ struct Options {
 struct QueryTiming {
     double open_sec = 0, query_sec = 0, fetch_sec = 0;
     size_t total = 0, returned = 0;
+    std::string path;  // MatchSet::plan_path of the last query step
 };
 
 // ── JSON output ─────────────────────────────────────────────────────────
@@ -283,6 +290,7 @@ static void emit_json(const Corpus& corpus, const std::string& query_text,
         std::cout << "      \"has_deps\": " << (corpus.has_deps() ? "true" : "false") << ",\n";
         std::cout << "      \"elapsed_ms\": " << elapsed_ms << ",\n";
         std::cout << "      \"seed_token\": " << ms.seed_token << ",\n";
+        std::cout << "      \"plan_path\": \"" << ms.plan_path << "\",\n";
         std::cout << "      \"cardinalities\": [";
         for (size_t i = 0; i < ms.cardinalities.size(); ++i) {
             if (i > 0) std::cout << ", ";
@@ -2610,8 +2618,15 @@ static void run_query(const Corpus& corpus, const std::string& input,
             size_t max_m = 0;
             bool count_t = false;
             size_t max_total_cap = 0;
-            if (opts.count_only) {
+            if (opts.dump_matches) {
                 max_m = 0;
+                count_t = true;
+            } else if (opts.count_only) {
+                // Count only: keep one match and count the rest (no Match objects for
+                // millions of hits). Named binds / chained steps still need the full set.
+                const bool final_anon = stmt.name.empty() && !is_dep_subtree_prelude
+                                        && !next_is_command && !stmt.is_parallel;
+                max_m = final_anon ? 1 : 0;
                 count_t = true;
             } else if (opts.sample > 0) {
                 max_m = 0;
@@ -2732,11 +2747,26 @@ static void run_query(const Corpus& corpus, const std::string& input,
                 out_timing->query_sec += query_ms / 1000.0;
                 out_timing->total = session.last_ms.total_count;
                 out_timing->returned = session.last_ms.matches.size();
+                out_timing->path = session.last_ms.plan_path;
             }
 
             if (!next_is_command) {
                 if (opts.count_only) {
                     std::cout << session.last_ms.total_count << "\n";
+                    return;
+                }
+                if (opts.dump_matches || opts.dump_page) {
+                    const auto& ms = session.last_ms;
+                    std::cout << "total=" << ms.total_count
+                              << " exact=" << (ms.total_exact ? 1 : 0) << "\n";
+                    for (const auto& m : ms.matches) {
+                        for (size_t i = 0; i < m.positions.size(); ++i)
+                            std::cout << (i ? " " : "") << m.positions[i];
+                        std::cout << ';';
+                        for (size_t i = 0; i < m.span_ends.size(); ++i)
+                            std::cout << (i ? " " : "") << m.span_ends[i];
+                        std::cout << '\n';
+                    }
                     return;
                 }
                 // `Name = …` binds a match set only; do not print concordance for that
@@ -3511,6 +3541,8 @@ static Options parse_args(int argc, char* argv[]) {
         else if (arg == "--offset" && i + 1 < argc) { opts.offset = std::stoul(argv[++i]); }
         else if (arg == "--context" && i + 1 < argc) { opts.context = std::stoi(argv[++i]); }
         else if (arg == "--count-only") { opts.count_only = true; }
+        else if (arg == "--dump-matches") { opts.dump_matches = true; }
+        else if (arg == "--dump-page") { opts.dump_page = true; }
         else if (arg == "--interactive") { request_interactive_repl = true; }
         else if (arg == "--print-all-steps") { opts.print_all_program_steps = true; }
         else if (arg == "--timing")     { opts.timing = true; }
@@ -3625,7 +3657,8 @@ static Options parse_args(int argc, char* argv[]) {
                   << "  --interactive    Open stdin REPL (`pando>`): type one CQL command per line (session persists).\n"
                   << "                    On a TTY, line editing uses linenoise (arrows, history); history file: ~/.pando_history\n"
                   << "  --print-all-steps  Multi-statement CQL: print hits for each query step, not only the last\n"
-                  << "  --timing         Print open_sec, query_sec, fetch_sec, total, returned to stderr\n"
+                  << "  --timing         Print open_sec, query_sec, fetch_sec, total, returned, path to stderr\n"
+                  << "  --dump-matches   Print total and every match as `starts;ends` (testing)\n"
                   << "  --sample N       Return N randomly sampled matches (reservoir sampling)\n"
                   << "  --seed N         RNG seed for --sample (reproducible runs)\n"
                   << "  --threads N      Parallel seed processing for multi-token queries (default: 1)\n"
@@ -3762,7 +3795,8 @@ int main(int argc, char* argv[]) {
                           << " query_sec=" << timing.query_sec
                           << " fetch_sec=" << timing.fetch_sec
                           << " total=" << timing.total
-                          << " returned=" << timing.returned << "\n";
+                          << " returned=" << timing.returned
+                          << " path=" << (timing.path.empty() ? "-" : timing.path) << "\n";
         } catch (const std::exception& e) {
             if (opts.json || opts.api) {
                 std::cout << "{\"ok\": false, \"error\": {\"stage\": \"query\", \"message\": "

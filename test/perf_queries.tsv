@@ -1,0 +1,43 @@
+# Benchmark battery for test/perf_bench.py (UD-style corpora; ud_demo ~38M tokens).
+# id<TAB>query. Keep ids stable: results JSON files are compared by id.
+
+# single token
+S1	[upos="NOUN"]
+S2	[lemma="house"]
+S3	[upos="NOUN"] within text_langcode="en"
+
+# sequences n=2
+Q2a	[upos="ADJ"] [upos="NOUN"]
+Q2b	[upos="VERB"] [upos="DET"]
+Q2c	[upos="DET"] [lemma="book"]
+Q2d	[lemma="house"] [upos="NOUN"]
+Q2e	[] [lemma="book"]
+Q2f	[upos="ADJ"] [upos="NOUN"] within text_langcode="en"
+Q2g	[upos="ADJ"] [upos="NOUN"] within s
+Q2h	[upos="ADJ" & lemma="good"] [upos="NOUN"]
+Q2i	[upos="ADJ"] [upos="NOUN" & text_langcode="en"]
+Q2j	[form="the" %c] [upos="NOUN"]
+
+# sequences n>=3
+Q3a	[upos="DET"] [upos="ADJ"] [upos="NOUN"]
+Q3b	[upos="DET"] [lemma="book"] [upos="NOUN"]
+Q3c	[upos="DET"] [] [upos="NOUN"]
+Q4a	[upos="ADP"] [upos="DET"] [upos="ADJ"] [upos="NOUN"]
+
+# gaps / optional / repetition (probe or generic today)
+G1	[upos="DET"] []{0,2} [upos="NOUN"]
+G2	[upos="DET"] [upos="ADJ"]? [upos="NOUN"]
+G3	[upos="ADJ"]+ [upos="NOUN"]
+
+# dependencies
+D1	[upos="VERB"] > [upos="NOUN"]
+D2	[upos="VERB"] > [upos="ADJ"]
+D3	[upos="NOUN"] < [upos="DET"]
+D4	[upos="VERB"] > [deprel="nsubj"]
+D5	[lemma="book"] > [upos="ADJ"]
+D6	[upos="VERB"] > [upos="NOUN"] within text_langcode="en"
+D7	[upos="VERB"] > [upos="NOUN"] within s
+D8	[upos="VERB" & text_langcode="en"] > [upos="NOUN"]
+T1	[upos="VERB"] >> [upos="NOUN"]
+T2	[lemma="book"] >> [upos="ADJ"]
+T3	[upos="NOUN"] << [upos="VERB"]

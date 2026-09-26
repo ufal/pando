@@ -204,6 +204,17 @@ if(BUILD_TESTING)
     target_link_libraries(mv_stage1_executor_test PRIVATE pando_core)
     add_test(NAME mv_stage1_executor COMMAND mv_stage1_executor_test)
 
+    # Differential test: fast paths (S1 merge, dep bitset, seq probe) must return exactly
+    # the same matches and totals as the generic executor (PANDO_FASTPATH=on|nomerge|off).
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME fastpath_diff
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/fastpath_diff.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
+                --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu
+                --queries ${CMAKE_CURRENT_SOURCE_DIR}/test/fastpath_queries.txt)
+    endif()
+
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/index/dep_jsonl_alignment_test.cpp")
         add_executable(dep_jsonl_alignment_test src/index/dep_jsonl_alignment_test.cpp)
         target_link_libraries(dep_jsonl_alignment_test PRIVATE pando_core)
