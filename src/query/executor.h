@@ -46,11 +46,12 @@ struct Match {
     // Overall match extent: min/max across ALL positions and span_ends.
     // Safe for dependency queries where positions may not be in corpus order.
     CorpusPos first_pos() const {
-        if (positions.empty()) return 0;
-        CorpusPos mn = positions[0];
+        // Skip NO_HEAD slots (negated / skipped optional tokens): starting from
+        // positions[0] returned -1 whenever the first slot was empty.
+        CorpusPos mn = NO_HEAD;
         for (CorpusPos p : positions)
-            if (p != NO_HEAD && p < mn) mn = p;
-        return mn;
+            if (p != NO_HEAD && (mn == NO_HEAD || p < mn)) mn = p;
+        return mn == NO_HEAD ? 0 : mn;
     }
     CorpusPos last_pos() const {
         if (positions.empty()) return 0;

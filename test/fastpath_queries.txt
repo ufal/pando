@@ -52,7 +52,25 @@
 [upos="VERB"] > [upos="NOUN"] :: match.text_langcode="cs"
 [upos="VERB"] > [upos="NOUN"] within s
 
-# --- dependencies, transitive / negated (generic today) ---
+# --- dependencies, transitive (dep_trans) ---
 fullmax=0	[upos="VERB"] >> [upos="NOUN"]
 [lemma="book"] >> [upos="ADJ"]
 fullmax=0	[upos="NOUN"] << [upos="VERB"]
+[lemma="be"] >> [upos="NOUN"]
+[upos="DET"] << [lemma="book"]
+[upos="ADJ"] << [upos="AUX"]
+[upos="VERB"] >> [upos="ADJ"]
+fullmax=0	[upos="NOUN"] >> [upos="NOUN"]
+[upos="NOUN"] << [upos="VERB"] :: match.text_langcode="cs"
+[upos="VERB"] >> [upos="NOUN"] within text_langcode="en"
+fullmax=0	[upos="VERB"] >> [upos="NOUN"] within text
+
+# --- dependencies, negated (dep_not); kept token = governor side ---
+[upos="VERB"] !> [deprel="nsubj"]
+[upos="NOUN"] !< [upos="VERB"]
+[upos="DET"] !< [lemma="book"]
+[lemma="book"] !> [upos="DET"]
+[upos="ADJ"] !< [upos="NOUN"]
+[upos="VERB"] !> [deprel="nsubj"] :: match.text_langcode="en"
+[upos="DET"] !< [lemma="book"] within text_langcode="en"
+[upos="VERB"] !> [deprel="nsubj"] within s

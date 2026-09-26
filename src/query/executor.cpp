@@ -1437,15 +1437,29 @@ QueryPlan QueryExecutor::plan_query(const TokenQuery& query) const {
     // terrible anchors — seed_len=0 would create a corrupt span (end < start).
     // If every token is optional, fall back to the lowest-cardinality one;
     // the seed_len guard below still protects us.
-    plan.seed = 0;
-    for (size_t i = 1; i < n; ++i) {
-        bool cur_optional  = (query.tokens[plan.seed].min_repeat == 0);
-        bool cand_optional = (query.tokens[i].min_repeat == 0);
-        // Prefer non-optional over optional; among same optionality, prefer lower cardinality
-        if ((!cand_optional && cur_optional) ||
-            (cand_optional == cur_optional && card[i] < card[plan.seed]))
-            plan.seed = i;
+    //
+    // Never seed from the negated side of `!>` / `!<`: `[A] !> [B]` keeps A tokens
+    // without a B dependent and `[A] !< [B]` keeps B tokens without an A dependent
+    // (wiki: `[upos="DET"] !< [lemma="book"]` = *book* without a determiner).
+    // Seeding from the dependent side silently answered a different query
+    // (dependent tokens without such a head) whenever that side was rarer.
+    std::vector<char> negated(n, 0);
+    for (size_t r = 0; r < query.relations.size() && r + 1 < n; ++r) {
+        if (query.relations[r].type == RelationType::NOT_GOVERNS) negated[r + 1] = 1;
+        else if (query.relations[r].type == RelationType::NOT_GOV_BY) negated[r] = 1;
     }
+    auto better = [&](size_t cand, size_t cur) {
+        // true when `cand` is a better seed than `cur`
+        if (negated[cand] != negated[cur]) return !negated[cand];
+        bool cur_optional  = (query.tokens[cur].min_repeat == 0);
+        bool cand_optional = (query.tokens[cand].min_repeat == 0);
+        // Prefer non-optional over optional; among same optionality, prefer lower cardinality
+        return (!cand_optional && cur_optional) ||
+               (cand_optional == cur_optional && card[cand] < card[cur]);
+    };
+    plan.seed = 0;
+    for (size_t i = 1; i < n; ++i)
+        if (better(i, plan.seed)) plan.seed = i;
 
     // BFS from seed along the linear chain
     std::vector<bool> visited(n, false);
@@ -3839,6 +3853,324 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                         case 4: scan(static_cast<const int32_t*>(child_span.data), child_span.count); break;
                         default: scan(static_cast<const int64_t*>(child_span.data), child_span.count); break;
                     }
+
+                    apply_anchor_filters(token_anchor_constraints, result);
+                    apply_within_having(q, result);
+                    apply_not_within(q, result);
+                    apply_containing(q, result);
+                    apply_position_orders(q, name_map, result);
+                    apply_global_filters(q, name_map, result);
+                    result.total_exact = !reached_limit() && !reached_total_cap();
+                    return result;
+                }
+            } else if (rt == RelationType::TRANS_GOVERNS || rt == RelationType::TRANS_GOV_BY) {
+                // ── Transitive deps (P1.9): sentence-windowed Euler join ──
+                // Both operands' postings are walked sentence by sentence (the rarer
+                // list drives, the other is galloped to the sentence start); inside a
+                // sentence every candidate pair is tested with the Euler interval
+                // (in(a) < in(d) && out(a) > out(d)): O(|A| + |B| + pairs per sentence),
+                // no subtree()/ancestors() vectors per seed.
+                SeqMergeOperand left = seq_merge_operand(corpus_, q.tokens[0].conditions);
+                SeqMergeOperand right = seq_merge_operand(corpus_, q.tokens[1].conditions);
+                if (left.kind == SeqMergeTok::EqRev && right.kind == SeqMergeTok::EqRev
+                    && !left.span.empty() && !right.span.empty()
+                    && left.span.width == right.span.width) {
+                    // TRANS_GOVERNS: token0 is an ancestor of token1; TRANS_GOV_BY: the reverse.
+                    const bool anc_is_token0 = (rt == RelationType::TRANS_GOVERNS);
+                    const bool driver_is_token0 = left.span.count <= right.span.count;
+                    const RevSpan& D = driver_is_token0 ? left.span : right.span;
+                    const RevSpan& O = driver_is_token0 ? right.span : left.span;
+                    const bool driver_is_anc = (driver_is_token0 == anc_is_token0);
+
+                    result.seed_token = driver_is_token0 ? 0 : 1;
+                    result.plan_path = "dep_trans";
+                    result.cardinalities = {
+                        estimate_cardinality(q.tokens[0].conditions),
+                        estimate_cardinality(q.tokens[1].conditions)};
+
+                    std::string effective_within = q.within.empty()
+                        ? corpus_.default_within() : q.within;
+                    bool has_within = !effective_within.empty() &&
+                                      corpus_.has_structure(effective_within);
+                    const StructuralAttr* within_sa = has_within
+                        ? &corpus_.structure(effective_within) : nullptr;
+                    const bool within_span_semantics =
+                        has_within && (corpus_.is_nested(effective_within) ||
+                                       corpus_.is_overlapping(effective_within));
+
+                    RegionPosMask region_mask =
+                        build_region_eq_position_mask(corpus_, q.global_region_filters);
+                    if (region_mask.status == RegionMaskStatus::Unsatisfiable) {
+                        result.total_exact = true;
+                        return result;
+                    }
+                    const bool use_region_mask =
+                        region_mask.status == RegionMaskStatus::Ready;
+                    const bool cheap_total_ok =
+                        q.global_region_filters.empty() || use_region_mask;
+
+                    const auto& deps = corpus_.deps();
+                    const StructuralAttr& sents = corpus_.structure("s");
+                    const Region* sr = sents.region_data();
+                    const size_t ns = sents.region_count();
+                    const int16_t* ein = deps.euler_in_data();
+                    const int16_t* eout = deps.euler_out_data();
+                    const uint64_t* mbits = use_region_mask ? region_mask.bits.data() : nullptr;
+                    // Ancestor and descendant share the sentence the dep index is built
+                    // on, so `within s` is implied.
+                    const StructuralAttr* wsa =
+                        (within_sa && !within_span_semantics && within_sa == &sents)
+                            ? nullptr : within_sa;
+                    int64_t within_hint = -1;
+                    auto bit = [](const uint64_t* b, CorpusPos p) -> bool {
+                        return (b[static_cast<size_t>(p) >> 6] >> (static_cast<size_t>(p) & 63)) & 1u;
+                    };
+                    const bool can_fast_count = count_total && cheap_total_ok && !wsa
+                        && max_matches > 0 && !agg_ptr && sample_size == 0;
+
+                    // Returns false to stop the scan.
+                    auto emit = [&](CorpusPos t0, CorpusPos t1) -> bool {
+                        if (wsa) {
+                            CorpusPos lo = t0 < t1 ? t0 : t1;
+                            CorpusPos hi = t0 < t1 ? t1 : t0;
+                            if (within_span_semantics) {
+                                if (!within_span_in_some_region(*wsa, lo, hi)) return true;
+                            } else {
+                                int64_t rgn = wsa->find_region_from(lo, within_hint);
+                                if (rgn < 0) return true;
+                                within_hint = rgn;
+                                if (hi > wsa->get(static_cast<size_t>(rgn)).end) return true;
+                            }
+                        }
+                        if (max_matches > 0 && result.matches.size() >= max_matches) {
+                            if (!count_total) return false;
+                            if (cheap_total_ok) {
+                                ++result.total_count;
+                                return !reached_total_cap();
+                            }
+                        }
+                        std::vector<CorpusPos> pm{t0, t1, t0, t1};
+                        add_match(std::move(pm));
+                        return !(reached_limit() || reached_total_cap());
+                    };
+
+                    size_t cnt = 0;           // hits counted after the page is full
+                    auto run = [&](const auto* Dp, const auto* Op) {
+                        const size_t nd = D.count, no = O.count;
+                        const bool gallop_other = no > (nd << 3);
+                        size_t id = 0, io = 0, si = 0;
+                        int64_t sent_hint = -1;
+                        bool counting = false;
+                        bool stop = false;
+                        while (id < nd && !stop) {
+                            const CorpusPos d0 = Dp[id];
+                            // Sentence of d0 (driver positions ascend).
+                            if (gallop_other) {
+                                int64_t r = sents.find_region_from(d0, sent_hint);
+                                if (r < 0) { ++id; continue; }
+                                sent_hint = r;
+                                si = static_cast<size_t>(r);
+                            } else {
+                                while (si < ns && sr[si].end < d0) ++si;
+                                if (si >= ns) break;
+                                if (d0 < sr[si].start) { ++id; continue; }
+                            }
+                            const CorpusPos st = sr[si].start, en = sr[si].end;
+                            size_t jd = id;
+                            while (jd < nd && Dp[jd] <= en) ++jd;
+                            if (gallop_other) {
+                                io = gallop_rev(O, io, st);  // RevSpan view of Op
+                            } else {
+                                while (io < no && Op[io] < st) ++io;
+                            }
+                            size_t jo = io;
+                            while (jo < no && Op[jo] <= en) ++jo;
+                            for (size_t x = id; x < jd && !stop; ++x) {
+                                const CorpusPos dp = Dp[x];
+                                if (mbits && !bit(mbits, dp)) continue;
+                                const int16_t din = ein[dp], dout = eout[dp];
+                                if (counting && !mbits) {
+                                    // Branch-free count once the page is full.
+                                    size_t c = 0;
+                                    if (driver_is_anc) {
+                                        for (size_t y = io; y < jo; ++y)
+                                            c += (din < ein[Op[y]]) & (dout > eout[Op[y]]);
+                                    } else {
+                                        for (size_t y = io; y < jo; ++y)
+                                            c += (ein[Op[y]] < din) & (eout[Op[y]] > dout);
+                                    }
+                                    cnt += c;
+                                    continue;
+                                }
+                                for (size_t y = io; y < jo; ++y) {
+                                    const CorpusPos op = Op[y];
+                                    const int16_t oin = ein[op], oout = eout[op];
+                                    const bool related = driver_is_anc
+                                        ? (din < oin && dout > oout)
+                                        : (oin < din && oout > dout);
+                                    if (!related) continue;
+                                    if (mbits && !bit(mbits, op)) continue;
+                                    if (counting) { ++cnt; continue; }
+                                    const CorpusPos t0 = driver_is_token0 ? dp : op;
+                                    const CorpusPos t1 = driver_is_token0 ? op : dp;
+                                    if (!emit(t0, t1)) { stop = true; break; }
+                                    if (can_fast_count && result.matches.size() >= max_matches)
+                                        counting = true;
+                                }
+                            }
+                            if (counting && max_total_cap > 0
+                                && result.total_count + cnt >= max_total_cap)
+                                break;
+                            id = jd;
+                            io = jo;
+                        }
+                    };
+                    switch (D.width) {
+                        case 2: run(static_cast<const int16_t*>(D.data), static_cast<const int16_t*>(O.data)); break;
+                        case 4: run(static_cast<const int32_t*>(D.data), static_cast<const int32_t*>(O.data)); break;
+                        default: run(static_cast<const int64_t*>(D.data), static_cast<const int64_t*>(O.data)); break;
+                    }
+                    result.total_count += cnt;
+                    if (max_total_cap > 0 && result.total_count > max_total_cap)
+                        result.total_count = max_total_cap;
+
+                    apply_anchor_filters(token_anchor_constraints, result);
+                    apply_within_having(q, result);
+                    apply_not_within(q, result);
+                    apply_containing(q, result);
+                    apply_position_orders(q, name_map, result);
+                    apply_global_filters(q, name_map, result);
+                    result.total_exact = !reached_limit() && !reached_total_cap();
+                    return result;
+                }
+            } else if (rt == RelationType::NOT_GOVERNS || rt == RelationType::NOT_GOV_BY) {
+                // ── Negated direct deps (P1.10) ──
+                // Same semantics as the generic executor (wiki: `[upos="DET"] !< [lemma="book"]`
+                // = *book* without a determiner): the kept token is the governor side,
+                // the negated token its would-be dependent.
+                //   [A] !> [B]: A tokens with no dependent in B  (match = A, B slot empty)
+                //   [A] !< [B]: B tokens with no dependent in A  (match = B, A slot empty)
+                // One bitset over heads(dependent side), one pass over the governor side.
+                SeqMergeOperand left = seq_merge_operand(corpus_, q.tokens[0].conditions);
+                SeqMergeOperand right = seq_merge_operand(corpus_, q.tokens[1].conditions);
+                // A rare governor side is left to the generic path (seed from it,
+                // check its children), which beats a bitset over all dependent heads.
+                const bool neg_keep_token0 = (rt == RelationType::NOT_GOVERNS);
+                const size_t neg_g = neg_keep_token0 ? left.span.count : right.span.count;
+                const size_t neg_d = neg_keep_token0 ? right.span.count : left.span.count;
+                if (left.kind == SeqMergeTok::EqRev && right.kind == SeqMergeTok::EqRev
+                    && !left.span.empty() && !right.span.empty()
+                    && neg_g * kDepBitsetMaxSkew >= neg_d) {
+                    result.plan_path = "dep_not";
+                    result.cardinalities = {
+                        estimate_cardinality(q.tokens[0].conditions),
+                        estimate_cardinality(q.tokens[1].conditions)};
+
+                    std::string effective_within = q.within.empty()
+                        ? corpus_.default_within() : q.within;
+                    bool has_within = !effective_within.empty() &&
+                                      corpus_.has_structure(effective_within);
+                    const StructuralAttr* within_sa = has_within
+                        ? &corpus_.structure(effective_within) : nullptr;
+                    const bool within_span_semantics =
+                        has_within && (corpus_.is_nested(effective_within) ||
+                                       corpus_.is_overlapping(effective_within));
+
+                    RegionPosMask region_mask =
+                        build_region_eq_position_mask(corpus_, q.global_region_filters);
+                    if (region_mask.status == RegionMaskStatus::Unsatisfiable) {
+                        result.total_exact = true;
+                        return result;
+                    }
+                    const bool use_region_mask =
+                        region_mask.status == RegionMaskStatus::Ready;
+                    const bool cheap_total_ok =
+                        q.global_region_filters.empty() || use_region_mask;
+
+                    const auto& deps = corpus_.deps();
+                    const StructuralAttr& sents = corpus_.structure("s");
+                    const Region* sent_r = sents.region_data();
+                    const int16_t* hrel = deps.head_rel_data();
+                    const int16_t* hloc = deps.head_local_data();
+                    const CorpusPos corpus_end = corpus_.size();
+                    const uint64_t* mbits = use_region_mask ? region_mask.bits.data() : nullptr;
+                    auto bit = [](const uint64_t* b, CorpusPos p) -> bool {
+                        return (b[static_cast<size_t>(p) >> 6] >> (static_cast<size_t>(p) & 63)) & 1u;
+                    };
+                    // head(p) for p in ascending order (cursor over sentences).
+                    RegionCursor sent_cur(sents);
+                    auto head_of = [&](CorpusPos p, RegionCursor& cur) -> CorpusPos {
+                        if (hrel) {
+                            const int16_t d = hrel[p];
+                            return d ? p + d : NO_HEAD;
+                        }
+                        const int16_t l = hloc[p];
+                        if (l < 0) return NO_HEAD;
+                        const int64_t si = cur.find(p);
+                        if (si < 0) return NO_HEAD;
+                        const CorpusPos h = sent_r[si].start + l;
+                        return h < corpus_end ? h : NO_HEAD;
+                    };
+
+                    const bool keep_token0 = (rt == RelationType::NOT_GOVERNS);
+                    const RevSpan& G = keep_token0 ? left.span : right.span;    // governor side
+                    const RevSpan& Dd = keep_token0 ? right.span : left.span;   // dependent side
+                    result.seed_token = keep_token0 ? 0 : 1;
+
+                    // Forbidden governors: heads of the dependent side.
+                    std::vector<uint64_t> forbid(static_cast<size_t>((corpus_end + 63) / 64), 0);
+                    for (size_t i = 0; i < Dd.count; ++i) {
+                        const CorpusPos h = head_of(Dd.at(i), sent_cur);
+                        if (h != NO_HEAD)
+                            forbid[static_cast<size_t>(h) >> 6] |= uint64_t{1} << (static_cast<size_t>(h) & 63);
+                    }
+                    const uint64_t* fb = forbid.data();
+
+                    const StructuralAttr* wsa =
+                        (within_sa && !within_span_semantics && within_sa == &sents)
+                            ? nullptr : within_sa;
+                    int64_t within_hint = -1;
+                    const bool can_fast_count = count_total && cheap_total_ok && !wsa
+                        && max_matches > 0 && !agg_ptr && sample_size == 0;
+                    auto emit = [&](CorpusPos a) -> bool {
+                        if (wsa) {
+                            if (within_span_semantics) {
+                                if (!within_span_in_some_region(*wsa, a, a)) return true;
+                            } else {
+                                int64_t rgn = wsa->find_region_from(a, within_hint);
+                                if (rgn < 0) return true;
+                                within_hint = rgn;
+                            }
+                        }
+                        if (max_matches > 0 && result.matches.size() >= max_matches) {
+                            if (!count_total) return false;
+                            if (cheap_total_ok) {
+                                ++result.total_count;
+                                return !reached_total_cap();
+                            }
+                        }
+                        std::vector<CorpusPos> pm = keep_token0
+                            ? std::vector<CorpusPos>{a, NO_HEAD, a, NO_HEAD}
+                            : std::vector<CorpusPos>{NO_HEAD, a, NO_HEAD, a};
+                        add_match(std::move(pm));
+                        return !(reached_limit() || reached_total_cap());
+                    };
+                    size_t cnt = 0;
+                    size_t i = 0;
+                    for (; i < G.count; ++i) {
+                        if (can_fast_count && result.matches.size() >= max_matches) break;
+                        const CorpusPos g = G.at(i);
+                        if (mbits && !bit(mbits, g)) continue;
+                        if (!bit(fb, g) && !emit(g)) { i = G.count; break; }
+                    }
+                    for (; i < G.count; ++i) {
+                        const CorpusPos g = G.at(i);
+                        if (mbits && !bit(mbits, g)) continue;
+                        cnt += !bit(fb, g);
+                    }
+                    result.total_count += cnt;
+                    if (max_total_cap > 0 && result.total_count > max_total_cap)
+                        result.total_count = max_total_cap;
 
                     apply_anchor_filters(token_anchor_constraints, result);
                     apply_within_having(q, result);

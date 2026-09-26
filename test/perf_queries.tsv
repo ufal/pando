@@ -41,3 +41,7 @@ D8	[upos="VERB" & text_langcode="en"] > [upos="NOUN"]
 T1	[upos="VERB"] >> [upos="NOUN"]
 T2	[lemma="book"] >> [upos="ADJ"]
 T3	[upos="NOUN"] << [upos="VERB"]
+T4	[upos="VERB"] >> [upos="NOUN"] within text_langcode="en"
+N1	[upos="VERB"] !> [deprel="nsubj"]
+N2	[upos="DET"] !< [lemma="book"]
+N3	[upos="NOUN"] !< [upos="VERB"]

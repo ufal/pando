@@ -35,6 +35,9 @@ public:
     const int16_t* head_rel_data() const {
         return head_rel_file_.valid() ? head_rel_file_.as<int16_t>() : nullptr;
     }
+    /// Raw sentence-local Euler tour times (int16 per token).
+    const int16_t* euler_in_data() const { return euler_in_file_.as<int16_t>(); }
+    const int16_t* euler_out_data() const { return euler_out_file_.as<int16_t>(); }
     /// Raw sentence-local heads (int16 per token, -1 = root).
     const int16_t* head_local_data() const { return head_file_.as<int16_t>(); }
     size_t token_count() const { return head_file_.size() / sizeof(int16_t); }
