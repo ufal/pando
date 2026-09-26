@@ -15,6 +15,8 @@
 #include <string_view>
 
 #include "index/fold_map.h"
+#include "index/fold_index.h"
+#include "index/dep_pair_index.h"
 
 #ifdef PANDO_USE_RE2
 #include <re2/re2.h>
@@ -825,6 +827,15 @@ private:
     // Fold map cache: keyed by "attr:mode" where mode is "lc", "noacc", "lcnoacc"
     const FoldMap& get_fold_map(const std::string& attr, bool case_fold, bool accent_fold) const;
     mutable std::unordered_map<std::string, FoldMap> fold_map_cache_;
+    /// P1.6: opened `<attr>.fold_<mode>.perm` files (nullptr = not available).
+    mutable std::unordered_map<std::string, std::shared_ptr<FoldIndex>> fold_index_cache_;
+    // P5.2: edge postings per (head attr, child attr); nullptr = not built.
+    mutable std::unordered_map<std::string, std::shared_ptr<DepPairIndex>> dep_pair_cache_;
+    std::shared_ptr<DepPairIndex> dep_pair_index(const std::string& head_attr,
+                                                 const std::string& child_attr) const;
+    /// Folded-value lookup: index file when present, else the in-memory FoldMap.
+    std::vector<LexiconId> fold_lookup_ids(const std::string& attr, bool case_fold,
+                                           bool accent_fold, const std::string& value) const;
     mutable std::mutex fold_map_mutex_;
 
 #ifdef PANDO_USE_RE2

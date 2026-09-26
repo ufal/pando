@@ -90,6 +90,8 @@ add_library(pando_core STATIC
     src/core/count_hierarchy_json.cpp
     src/index/lexicon.cpp
     src/index/fold_map.cpp
+    src/index/fold_index.cpp
+    src/index/dep_pair_index.cpp
     src/index/positional_attr.cpp
     src/index/structural_attr.cpp
     src/index/dependency_index.cpp

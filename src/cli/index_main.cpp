@@ -2,6 +2,9 @@
 #include "core/types.h"
 #include "index/dependency_index.h"
 #include "index/structural_attr.h"
+#include "index/fold_index.h"
+#include "index/dep_pair_index.h"
+#include "corpus/corpus.h"
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -102,28 +105,104 @@ static void write_overlay_info(const std::string& overlay_dir,
 }
 
 // `pando-index --upgrade <corpus_dir>`: add derived files that newer versions
-// use when present, without re-indexing. Currently: dep.head_rel (P1.8).
-static int upgrade_index(const std::string& dir) {
-    if (!fs::exists(dir + "/dep.head") || !fs::exists(dir + "/s.rgn")) {
-        std::cerr << dir << ": no dependency index (dep.head + s.rgn); nothing to upgrade\n";
-        return 0;
-    }
-    pando::StructuralAttr sentences;
-    sentences.open(dir + "/s.rgn", false);
-    std::string err;
+// use when present, without re-indexing. Also run after every build.
+//   dep.head_rel                 (P1.8)  relative head offsets
+//   <attr>.fold_{lc,na,lcna}.perm (P1.6)  %c / %d / %cd lookups
+// P5.2 default: upos × upos edge postings (when the corpus has deps and upos).
+static const char* const kDefaultDepPairs = "upos:upos";
+
+static int upgrade_index(const std::string& dir, bool quiet = false,
+                         const std::string& dep_pairs = kDefaultDepPairs) {
     auto t0 = std::chrono::steady_clock::now();
-    if (!pando::DependencyIndex::write_head_rel_file(dir, sentences, &err)) {
-        std::cerr << "Error: " << err << "\n";
+    auto secs = [&] {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    };
+    if (fs::exists(dir + "/dep.head") && fs::exists(dir + "/s.rgn")) {
+        const bool have = fs::exists(dir + "/dep.head_rel")
+            && fs::file_size(dir + "/dep.head_rel") == fs::file_size(dir + "/dep.head");
+        if (!have) {
+            pando::StructuralAttr sentences;
+            sentences.open(dir + "/s.rgn", false);
+            std::string err;
+            if (!pando::DependencyIndex::write_head_rel_file(dir, sentences, &err)) {
+                std::cerr << "Error: " << err << "\n";
+                return 1;
+            }
+            if (!quiet) std::cerr << "Wrote " << dir << "/dep.head_rel (" << secs() << " s)\n";
+        }
+    }
+    try {
+        pando::Corpus corpus;
+        corpus.open(dir);
+        const pando::FoldMode modes[] = {pando::FoldMode::Lower, pando::FoldMode::NoAccents,
+                                         pando::FoldMode::LowerNoAccents};
+        for (const auto& name : corpus.attr_names()) {
+            if (corpus.is_multivalue(name)) continue;
+            const auto& pa = corpus.attr(name);
+            for (auto m : modes) {
+                pando::FoldIndex probe;
+                if (probe.open(pa.base_path(), m, pa.lexicon().size())) continue;
+                std::string err;
+                if (!pando::FoldIndex::build(pa.base_path(), pa.lexicon(), m, &err)) {
+                    std::cerr << "Error: " << err << "\n";
+                    return 1;
+                }
+            }
+        }
+        if (!quiet) std::cerr << "Fold indexes up to date (" << secs() << " s)\n";
+        if (corpus.has_deps() && corpus.deps().head_rel_data() && dep_pairs != "none") {
+            size_t from = 0;
+            while (from <= dep_pairs.size()) {
+                size_t to = dep_pairs.find(',', from);
+                if (to == std::string::npos) to = dep_pairs.size();
+                const std::string item = dep_pairs.substr(from, to - from);
+                from = to + 1;
+                if (item.empty()) continue;
+                const size_t colon = item.find(':');
+                const std::string h = item.substr(0, colon);
+                const std::string c = colon == std::string::npos ? h : item.substr(colon + 1);
+                const bool explicit_list = dep_pairs != kDefaultDepPairs;
+                if (!corpus.has_attr(h) || !corpus.has_attr(c)) {
+                    if (explicit_list) {
+                        std::cerr << "Error: --dep-pairs " << item << ": unknown attribute\n";
+                        return 1;
+                    }
+                    continue;
+                }
+                pando::DepPairIndex probe;
+                if (probe.open(corpus, h, c)) continue;
+                std::string err;
+                if (!pando::DepPairIndex::build(corpus, h, c, &err)) {
+                    std::cerr << (explicit_list ? "Error: " : "Note: ") << err << "\n";
+                    if (explicit_list) return 1;
+                    continue;
+                }
+                if (!quiet)
+                    std::cerr << "Wrote " << pando::DepPairIndex::base_path(dir, h, c)
+                              << ".rev (" << secs() << " s)\n";
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
         return 1;
     }
-    double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    std::cerr << "Wrote " << dir << "/dep.head_rel (" << sec << " s)\n";
     return 0;
 }
 
 int main(int argc, char* argv[]) {
-    if (argc == 3 && std::string(argv[1]) == "--upgrade")
-        return upgrade_index(argv[2]);
+    if (argc >= 3 && std::string(argv[1]) == "--upgrade") {
+        std::string pairs = kDefaultDepPairs;
+        for (int i = 3; i < argc; ++i) {
+            const std::string a = argv[i];
+            if (a == "--dep-pairs" && i + 1 < argc) pairs = argv[++i];
+            else if (a.rfind("--dep-pairs=", 0) == 0) pairs = a.substr(12);
+            else {
+                std::cerr << "Error: unknown --upgrade option '" << a << "'\n";
+                return 1;
+            }
+        }
+        return upgrade_index(argv[2], false, pairs);
+    }
     bool split_feats = false;
     bool format_vertical = false;
     bool format_jsonl = false;
@@ -169,7 +248,11 @@ int main(int argc, char* argv[]) {
                   << "                    --index-dir <main_corpus_dir> (must contain corpus.info).\n"
                   << "  --index-dir       Main indexed corpus directory (for overlay size / stamp)\n"
                   << "\n  pando-index --upgrade <corpus_dir>\n"
-                  << "                    Add derived files to an existing index (dep.head_rel)\n";
+                  << "                    Add derived files to an existing index\n"
+                  << "                    (dep.head_rel, <attr>.fold_*.perm for %c/%d,\n"
+                  << "                    dep.pair.<H>.<C>.rev edge postings for [H=..] > [C=..])\n"
+                  << "    --dep-pairs H:C[,H:C...]  edge postings to build (default upos:upos;\n"
+                  << "                    'none' to skip). Low-cardinality attributes only.\n";
         return 1;
     }
 
@@ -253,6 +336,7 @@ int main(int argc, char* argv[]) {
                   << static_cast<int>(total_tokens / total_secs / 1000) << " ktok/s avg)\n";
         std::cerr << "Finalizing...\n";
         builder.finalize();
+        if (upgrade_index(output_dir) != 0) return 1;
 
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";

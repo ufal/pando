@@ -11,6 +11,7 @@ namespace pando {
 
 void PositionalAttr::open(const std::string& base, CorpusPos corpus_size, bool preload) {
     corpus_size_ = corpus_size;
+    base_path_ = base;
     lexicon_.open(base, preload);
     corpus_  = MmapFile::open(base + ".dat", preload);
     rev_     = MmapFile::open(base + ".rev", preload);

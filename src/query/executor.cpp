@@ -1,4 +1,5 @@
 #include "query/executor.h"
+#include <tuple>
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -39,6 +40,119 @@ static bool regex_eval_sv(std::string_view val, const std::regex& re, bool full_
     return std::regex_search(s, re);
 }
 #endif
+
+// Upper bound on positions materialised for one complex operand (memory guard
+// on multi-billion-token corpora: 256M positions = 1-2 GB). PANDO_MATERIALIZE_MAX
+// overrides; above the bound the operand stays on the generic probing path.
+static size_t materialize_max() {
+    static const size_t v = [] {
+        const char* e = std::getenv("PANDO_MATERIALIZE_MAX");
+        if (e && *e) return static_cast<size_t>(std::strtoull(e, nullptr, 10));
+        return static_cast<size_t>(256) << 20;
+    }();
+    return v;
+}
+
+// Literal prefix every match of `pat` must start with (P1.5). Only for patterns
+// anchored at the start (full match, or a leading '^') without alternation; the
+// prefix stops at the first metacharacter, and a char followed by a quantifier
+// that allows zero repetitions is dropped. *exact is set when the whole pattern
+// is that literal (the regex is then an EQ). Lexicon ids are in byte order, so a
+// prefix is a contiguous id range: `[lemma="un.*"]` scans only the "un…" entries.
+static std::string regex_literal_prefix(const std::string& pat, bool full_match, bool* exact) {
+    *exact = false;
+    if (pat.find('|') != std::string::npos) return {};
+    size_t i = 0;
+    const bool caret = !pat.empty() && pat[0] == '^';
+    if (caret) i = 1;
+    if (!full_match && !caret) return {};
+    auto is_meta = [](char c) {
+        return c == '.' || c == '[' || c == ']' || c == '(' || c == ')' || c == '*'
+            || c == '+' || c == '?' || c == '{' || c == '}' || c == '\\' || c == '^'
+            || c == '$';
+    };
+    std::string lit;
+    for (; i < pat.size(); ++i) {
+        const char c = pat[i];
+        if (c == '$' && i + 1 == pat.size()) {
+            *exact = true;
+            return lit;
+        }
+        if (is_meta(c)) {
+            // '+' and '{n,…}' (n >= 1) keep the previous char; '*', '?', '{0…'
+            // make it optional: drop it (the whole UTF-8 sequence).
+            if (c == '*' || c == '?' || pat.compare(i, 2, "{0") == 0) {
+                while (!lit.empty() && (static_cast<unsigned char>(lit.back()) & 0xC0) == 0x80)
+                    lit.pop_back();
+                if (!lit.empty()) lit.pop_back();
+            }
+            return lit;
+        }
+        lit += c;
+    }
+    *exact = full_match;
+    return lit;
+}
+
+// Longest literal every match of `pat` must contain (prefilter for the lexicon
+// scan: memchr/memcmp-speed rejection before the regex engine). Only top-level
+// literal runs count (not inside groups or classes); a char made optional by
+// '*', '?' or '{0' ends its run without itself. No alternation, no inline flags.
+static std::string regex_required_literal(const std::string& pat) {
+    if (pat.find('|') != std::string::npos || pat.find("(?") != std::string::npos) return {};
+    std::string best, run;
+    auto flush = [&] { if (run.size() > best.size()) best = run; run.clear(); };
+    int depth = 0;
+    for (size_t i = 0; i < pat.size(); ++i) {
+        const char c = pat[i];
+        if (c == '\\') { flush(); ++i; continue; }
+        if (c == '[') {
+            flush();
+            size_t j = i + 1;
+            if (j < pat.size() && pat[j] == '^') ++j;
+            if (j < pat.size() && pat[j] == ']') ++j;
+            while (j < pat.size() && pat[j] != ']') { if (pat[j] == '\\') ++j; ++j; }
+            i = j;
+            continue;
+        }
+        if (c == '(') { flush(); ++depth; continue; }
+        if (c == ')') { flush(); if (depth > 0) --depth; continue; }
+        if (depth > 0) continue;
+        if (c == '*' || c == '?' || (c == '{' && pat.compare(i, 2, "{0") == 0)) {
+            while (!run.empty() && (static_cast<unsigned char>(run.back()) & 0xC0) == 0x80)
+                run.pop_back();
+            if (!run.empty()) run.pop_back();
+            flush();
+            continue;
+        }
+        if (c == '.' || c == '+' || c == '{' || c == '}' || c == '^' || c == '$' || c == ']') {
+            flush();
+            if (c == '{') { while (i < pat.size() && pat[i] != '}') ++i; }
+            continue;
+        }
+        run += c;
+    }
+    flush();
+    return best;
+}
+
+// Lexicon id range [lo, hi) of the entries starting with `prefix`.
+static std::pair<LexiconId, LexiconId> lexicon_prefix_range(const Lexicon& lex,
+                                                            std::string_view prefix) {
+    LexiconId lo = 0, hi = lex.size();
+    while (lo < hi) {   // first entry >= prefix
+        const LexiconId mid = lo + (hi - lo) / 2;
+        if (lex.get(mid) < prefix) lo = mid + 1;
+        else hi = mid;
+    }
+    LexiconId a = lo, b = lex.size();
+    while (a < b) {     // first entry whose leading |prefix| bytes are > prefix
+        const LexiconId mid = a + (b - a) / 2;
+        if (lex.get(mid).substr(0, prefix.size()) <= prefix) a = mid + 1;
+        else b = mid;
+    }
+    return {lo, a};
+}
 
 // `within S` when S is declared nested= or overlapping= (see expand_seed caller):
 // the full match span [min,max] must be contained in *some* region row of S.
@@ -137,7 +251,31 @@ enum class SeqMergeTok : uint8_t { Complex, Wildcard, EqRev };
 struct SeqMergeOperand {
     SeqMergeTok kind = SeqMergeTok::Complex;
     RevSpan span{};
+    /// P1.4/P1.5: storage for a materialised operand (AND / OR / %c / regex / !=):
+    /// `span` then points into this buffer instead of a `.rev` file.
+    std::shared_ptr<void> owned;
 };
+
+/// Wrap sorted unique positions as a posting span of the given width (same width
+/// as the corpus `.rev` files, so the typed kernels apply).
+static SeqMergeOperand owned_postings(const std::vector<CorpusPos>& pos, int width) {
+    SeqMergeOperand o;
+    o.kind = SeqMergeTok::EqRev;
+    o.span.width = width;
+    o.span.count = pos.size();
+    auto fill = [&](auto tag) {
+        using T = decltype(tag);
+        auto buf = std::make_shared<std::vector<T>>(pos.size());
+        for (size_t i = 0; i < pos.size(); ++i) (*buf)[i] = static_cast<T>(pos[i]);
+        o.span.data = buf->data();
+        o.owned = buf;
+    };
+    if (width == 2) fill(int16_t{});
+    else if (width == 4) fill(int32_t{});
+    else { o.span.width = 8; fill(int64_t{}); }
+    if (pos.empty()) o.span.data = nullptr;
+    return o;
+}
 
 static SeqMergeOperand seq_merge_operand(const Corpus& corpus, const ConditionPtr& cond) {
     SeqMergeOperand out;
@@ -1324,6 +1462,46 @@ const FoldMap& QueryExecutor::get_fold_map(const std::string& attr, bool case_fo
     return ins->second;
 }
 
+std::vector<LexiconId> QueryExecutor::fold_lookup_ids(const std::string& attr, bool case_fold,
+                                                      bool accent_fold,
+                                                      const std::string& value) const {
+    const FoldMode mode = fold_mode_for(case_fold, accent_fold);
+    const std::string folded = fold_string(mode, value);
+    const auto& pa = corpus_.attr(attr);
+    std::shared_ptr<FoldIndex> idx;
+    {
+        std::lock_guard<std::mutex> lock(fold_map_mutex_);
+        const std::string key = attr + ":" + fold_mode_suffix(mode);
+        auto it = fold_index_cache_.find(key);
+        if (it == fold_index_cache_.end()) {
+            auto fi = std::make_shared<FoldIndex>();
+            if (!pa.base_path().empty() && fi->open(pa.base_path(), mode, pa.lexicon().size()))
+                it = fold_index_cache_.emplace(key, fi).first;
+            else
+                it = fold_index_cache_.emplace(key, nullptr).first;
+        }
+        idx = it->second;
+    }
+    if (idx) return idx->lookup(pa.lexicon(), folded);
+    const auto& ids = get_fold_map(attr, case_fold, accent_fold).lookup(folded);
+    std::vector<LexiconId> out(ids.begin(), ids.end());
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::shared_ptr<DepPairIndex> QueryExecutor::dep_pair_index(const std::string& head_attr,
+                                                            const std::string& child_attr) const {
+    std::lock_guard<std::mutex> lock(fold_map_mutex_);
+    const std::string key = head_attr + "\t" + child_attr;
+    auto it = dep_pair_cache_.find(key);
+    if (it == dep_pair_cache_.end()) {
+        auto di = std::make_shared<DepPairIndex>();
+        if (!di->open(corpus_, head_attr, child_attr)) di.reset();
+        it = dep_pair_cache_.emplace(key, di).first;
+    }
+    return it->second;
+}
+
 // ── Attribute name normalization ────────────────────────────────────────
 
 std::string normalize_query_attr_name(const Corpus& corpus, const std::string& attr) {
@@ -1425,6 +1603,72 @@ void QueryExecutor::compile_conditions(const ConditionPtr& cond) const {
                 && corpus_.is_multivalue(name)) {
                 ac.resolved_mv_component_id =
                     corpus_.attr(name).mv_lookup(ac.value);
+            }
+        }
+        if (ac.op == CompOp::REGEX && !ac.id_set_resolved) {
+            std::string name = normalize_attr(ac.attr);
+            std::string feat_name;
+            if (!feats_is_subkey(name, feat_name) && corpus_.has_attr(name)
+                && !corpus_.is_multivalue(name)) {
+                // One lexicon scan per query; same matcher as check_leaf. A literal
+                // regex is a lookup, and a literal prefix narrows the scan to the
+                // matching id range (the lexicon is sorted).
+                const auto& lex = corpus_.attr(name).lexicon();
+                LexiconId lex_lo = 0, nlex = lex.size();
+                bool exact = false;
+                const std::string prefix = (ac.case_insensitive || ac.diacritics_insensitive)
+                    ? std::string() : regex_literal_prefix(ac.value, ac.regex_full_match, &exact);
+                if (exact) {
+                    const LexiconId id = lex.lookup(prefix);
+                    if (id != UNKNOWN_LEX) ac.id_set.push_back(id);
+                    ac.id_set_resolved = true;
+                    lex_lo = nlex = 0;
+                } else if (!prefix.empty()) {
+                    std::tie(lex_lo, nlex) = lexicon_prefix_range(lex, prefix);
+                }
+                const std::string req = (ac.case_insensitive || ac.diacritics_insensitive)
+                    ? std::string() : regex_required_literal(ac.value);
+#ifdef PANDO_USE_RE2
+                const re2::RE2* compiled;
+                {
+                    std::lock_guard<std::mutex> lock(regex_cache_mutex_);
+                    auto it = regex_cache_.find(ac.value);
+                    if (it == regex_cache_.end())
+                        it = regex_cache_.emplace(ac.value, std::make_unique<re2::RE2>(ac.value)).first;
+                    compiled = it->second.get();
+                }
+                for (LexiconId id = lex_lo; id < nlex; ++id) {
+                    const std::string_view v = lex.get(id);
+                    if (!req.empty() && v.find(req) == std::string_view::npos) continue;
+                    if (regex_eval_sv(v, *compiled, ac.regex_full_match))
+                        ac.id_set.push_back(id);
+                }
+#else
+                std::lock_guard<std::mutex> lock(regex_cache_mutex_);
+                auto it = regex_cache_.find(ac.value);
+                if (it == regex_cache_.end())
+                    it = regex_cache_.emplace(ac.value, std::regex(ac.value)).first;
+                for (LexiconId id = lex_lo; id < nlex; ++id) {
+                    const std::string_view v = lex.get(id);
+                    if (!req.empty() && v.find(req) == std::string_view::npos) continue;
+                    if (regex_eval_sv(v, it->second, ac.regex_full_match))
+                        ac.id_set.push_back(id);
+                }
+#endif
+                ac.id_set_resolved = true;
+            }
+        }
+        if ((ac.op == CompOp::EQ || ac.op == CompOp::NEQ)
+            && (ac.case_insensitive || ac.diacritics_insensitive) && !ac.id_set_resolved) {
+            std::string name = normalize_attr(ac.attr);
+            std::string feat_name;
+            if (!feats_is_subkey(name, feat_name) && corpus_.has_attr(name)
+                && !corpus_.is_multivalue(name)) {
+                auto ids = fold_lookup_ids(name, ac.case_insensitive,
+                                           ac.diacritics_insensitive, ac.value);
+                ac.id_set.assign(ids.begin(), ids.end());
+                std::sort(ac.id_set.begin(), ac.id_set.end());
+                ac.id_set_resolved = true;
             }
         }
         if (ac.op == CompOp::EQ && !ac.case_insensitive && !ac.diacritics_insensitive) {
@@ -1579,15 +1823,9 @@ size_t QueryExecutor::estimate_leaf(const AttrCondition& ac) const {
 
     // Fold-aware cardinality estimation
     if ((ac.case_insensitive || ac.diacritics_insensitive) && ac.op == CompOp::EQ) {
-        const auto& fm = get_fold_map(name, ac.case_insensitive, ac.diacritics_insensitive);
-        std::string folded_query;
-        if (ac.case_insensitive && ac.diacritics_insensitive)
-            folded_query = FoldMap::to_lower_no_accents(ac.value);
-        else if (ac.case_insensitive)
-            folded_query = FoldMap::to_lower(ac.value);
-        else
-            folded_query = FoldMap::strip_accents(ac.value);
-        const auto& ids = fm.lookup(folded_query);
+        const std::vector<LexiconId> ids = ac.id_set_resolved
+            ? std::vector<LexiconId>(ac.id_set.begin(), ac.id_set.end())
+            : fold_lookup_ids(name, ac.case_insensitive, ac.diacritics_insensitive, ac.value);
         size_t total = 0;
         for (LexiconId id : ids)
             total += pa.count_of_id(id);
@@ -1601,6 +1839,12 @@ size_t QueryExecutor::estimate_leaf(const AttrCondition& ac) const {
     if (corpus_.is_multivalue(name) && pa.has_mv() && ac.op == CompOp::NEQ) {
         size_t eq = pa.mv_count_of(ac.value);
         return static_cast<size_t>(corpus_.size()) - eq;
+    }
+
+    if (ac.op == CompOp::REGEX && ac.id_set_resolved) {
+        size_t total = 0;
+        for (int32_t id : ac.id_set) total += pa.count_of_id(static_cast<LexiconId>(id));
+        return total;
     }
 
     switch (ac.op) {
@@ -1907,6 +2151,13 @@ bool QueryExecutor::check_leaf(CorpusPos pos, const AttrCondition& ac) const {
     if (ac.resolved_id >= 0) {
         // resolved_id is only set for EQ without fold flags
         return pa.id_at(pos) == static_cast<LexiconId>(ac.resolved_id);
+    }
+
+    // P1.5 / P1.6: pre-resolved id set (fold / regex) → integer membership test.
+    if (ac.id_set_resolved) {
+        const bool in = std::binary_search(ac.id_set.begin(), ac.id_set.end(),
+                                           static_cast<int32_t>(pa.id_at(pos)));
+        return ac.op == CompOp::NEQ ? !in : in;
     }
 
     std::string_view val = pa.value_at(pos);
@@ -2289,17 +2540,11 @@ std::vector<CorpusPos> QueryExecutor::resolve_leaf(
     }
     const auto& pa = corpus_.attr(name);
 
-    // Fold-aware EQ resolution via fold map
+    // Fold-aware EQ resolution (fold index file, else in-memory fold map)
     if ((ac.case_insensitive || ac.diacritics_insensitive) && ac.op == CompOp::EQ) {
-        const auto& fm = get_fold_map(name, ac.case_insensitive, ac.diacritics_insensitive);
-        std::string folded_query;
-        if (ac.case_insensitive && ac.diacritics_insensitive)
-            folded_query = FoldMap::to_lower_no_accents(ac.value);
-        else if (ac.case_insensitive)
-            folded_query = FoldMap::to_lower(ac.value);
-        else
-            folded_query = FoldMap::strip_accents(ac.value);
-        const auto& ids = fm.lookup(folded_query);
+        const std::vector<LexiconId> ids = ac.id_set_resolved
+            ? std::vector<LexiconId>(ac.id_set.begin(), ac.id_set.end())
+            : fold_lookup_ids(name, ac.case_insensitive, ac.diacritics_insensitive, ac.value);
         if (ids.empty()) return {};
         if (ids.size() == 1) return pa.positions_of_id(ids[0]);
         // Union posting lists of all matching lex IDs
@@ -2318,6 +2563,15 @@ std::vector<CorpusPos> QueryExecutor::resolve_leaf(
         case CompOp::NEQ:
             return pa.positions_not(ac.value, corpus_.size());
         case CompOp::REGEX: {
+            if (ac.id_set_resolved) {
+                std::vector<CorpusPos> result;
+                for (int32_t id : ac.id_set) {
+                    RevSpan sp = pa.rev_span_of_id(static_cast<LexiconId>(id));
+                    for (size_t i = 0; i < sp.count; ++i) result.push_back(sp.at(i));
+                }
+                std::sort(result.begin(), result.end());
+                return result;
+            }
 #ifdef PANDO_USE_RE2
             // Compile RE2 under lock, then match outside lock (thread-safe).
             const re2::RE2* compiled;
@@ -3468,6 +3722,46 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
         return count_total && max_total_cap > 0 && result.total_count >= max_total_cap;
     };
 
+    // ── Merge operands (P1.4 / P1.5) ─────────────────────────────────────
+    // A plain EQ leaf is a zero-copy `.rev` span. Other boolean combinations of
+    // leaves (`&`, `|`, `%c`/`%d`, regex, `!=`, token-level region attrs) are
+    // materialised once via resolve_conditions() — sorted unique positions — so
+    // they stay on the merge / dep fast paths instead of falling back to probing.
+    // Skipped when the operand would cover more than half the corpus (dense `!=`).
+    const int corpus_rev_width = [&] {
+        for (const auto& a : corpus_.attr_names())
+            if (corpus_.has_attr(a) && !corpus_.is_multivalue(a))
+                return corpus_.attr(a).rev_span_of_id(0).width;
+        return 8;
+    }();
+    std::function<bool(const ConditionPtr&)> plain_condition = [&](const ConditionPtr& c) -> bool {
+        if (!c) return false;
+        if (c->is_leaf) {
+            const AttrCondition& ac = c->leaf;
+            if (ac.is_nvals) return false;
+            if (ac.op != CompOp::EQ && ac.op != CompOp::NEQ && ac.op != CompOp::REGEX)
+                return false;
+            std::string name = normalize_attr(ac.attr);
+            std::string feat_name;
+            if (feats_is_subkey(name, feat_name)) return false;
+            if (corpus_.has_attr(name)) return !corpus_.is_multivalue(name);
+            // token-level region attribute (`text_langcode="en"` inside [...])
+            RegionAttrParts parts;
+            return ac.op == CompOp::EQ && !ac.case_insensitive && !ac.diacritics_insensitive
+                && split_region_attr_name(name, parts) && corpus_.has_structure(parts.struct_name);
+        }
+        if (c->is_structural || c->is_count) return false;
+        return plain_condition(c->left) && plain_condition(c->right);
+    };
+    auto merge_operand = [&](const ConditionPtr& c) -> SeqMergeOperand {
+        SeqMergeOperand o = seq_merge_operand(corpus_, c);
+        if (o.kind != SeqMergeTok::Complex || fastpath_mode() != FastPathMode::On) return o;
+        if (!plain_condition(c)) return o;
+        const size_t est = estimate_cardinality(c);
+        if (est > static_cast<size_t>(corpus_.size()) / 2 || est > materialize_max()) return o;
+        return owned_postings(resolve_conditions(c), corpus_rev_width);
+    };
+
     // ── Single-token fast path ──────────────────────────────────────────
 
     if (n == 1) {
@@ -3505,7 +3799,78 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             && !q.within_having && !q.not_within && q.containing_clauses.empty()
             && q.position_orders.empty() && q.global_alignment_filters.empty()
             && q.global_function_filters.empty()) {
-            SeqMergeOperand op = seq_merge_operand(corpus_, tok_cond);
+            // ── Single leaf with a resolved id set (regex, %c/%d): no
+            // materialisation. First page = k-way merge of the ids' `.rev` spans;
+            // total = sum of per-id counts (sliced per interval under a region
+            // filter). `[word=".*ness"]` on a 5B-token corpus stays O(#ids + page).
+            if (tok_cond && tok_cond->is_leaf && tok_cond->leaf.id_set_resolved
+                && tok_cond->leaf.op != CompOp::NEQ) {
+                const AttrCondition& ac = tok_cond->leaf;
+                const std::string aname = normalize_attr(ac.attr);
+                if (corpus_.has_attr(aname) && !corpus_.is_multivalue(aname)) {
+                    RegionPosMask mask =
+                        build_region_eq_position_mask(corpus_, q.global_region_filters);
+                    const bool iv_mask = mask.ready() && !mask.use_bits;
+                    const auto& pa = corpus_.attr(aname);
+                    std::vector<RevSpan> spans;
+                    spans.reserve(ac.id_set.size());
+                    for (int32_t id : ac.id_set) {
+                        RevSpan sp = pa.rev_span_of_id(static_cast<LexiconId>(id));
+                        if (!sp.empty()) spans.push_back(sp);
+                    }
+                    const bool mask_ok = mask.status == RegionMaskStatus::None
+                        || mask.status == RegionMaskStatus::Unsatisfiable
+                        || (iv_mask && spans.size() * mask.iv.size() <= (size_t{1} << 22));
+                    if (mask_ok) {
+                        result.plan_path = "single_idset";
+                        if (mask.status == RegionMaskStatus::Unsatisfiable) {
+                            result.total_exact = true;
+                            return result;
+                        }
+                        // first page: ascending k-way merge
+                        using HeapItem = std::pair<CorpusPos, size_t>;   // (pos, span)
+                        std::priority_queue<HeapItem, std::vector<HeapItem>, std::greater<HeapItem>> heap;
+                        std::vector<size_t> cur(spans.size(), 0);
+                        for (size_t k = 0; k < spans.size(); ++k) heap.push({spans[k].at(0), k});
+                        MaskCursor mc(mask);
+                        size_t emitted = 0;
+                        bool capped = false;
+                        while (!heap.empty()) {
+                            if (max_matches > 0 && result.matches.size() >= max_matches) break;
+                            auto [p, k] = heap.top();
+                            heap.pop();
+                            if (++cur[k] < spans[k].count) heap.push({spans[k].at(cur[k]), k});
+                            if (iv_mask && !mc.contains(p)) continue;
+                            add_match(std::vector<CorpusPos>{p, p});
+                            ++emitted;
+                            if (reached_total_cap()) { capped = true; break; }
+                        }
+                        if (count_total && !capped && !heap.empty()) {
+                            size_t tot = 0;
+                            if (!iv_mask) {
+                                for (const auto& sp : spans) tot += sp.count;
+                            } else {
+                                for (const auto& sp : spans) {
+                                    size_t lo = 0;
+                                    for (const auto& I : mask.iv) {
+                                        lo = gallop_rev(sp, lo, I.s);
+                                        if (lo >= sp.count) break;
+                                        const size_t hi = gallop_rev(sp, lo, I.e + 1);
+                                        tot += hi - lo;
+                                        lo = hi;
+                                    }
+                                }
+                            }
+                            result.total_count += tot - emitted;
+                            if (max_total_cap > 0 && result.total_count > max_total_cap)
+                                result.total_count = max_total_cap;
+                        }
+                        result.total_exact = !reached_limit() && !reached_total_cap();
+                        return result;
+                    }
+                }
+            }
+            SeqMergeOperand op = merge_operand(tok_cond);
             if (op.kind == SeqMergeTok::EqRev) {
                 RegionPosMask mask =
                     build_region_eq_position_mask(corpus_, q.global_region_filters);
@@ -3738,7 +4103,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             std::vector<SeqMergeOperand> ops(n);
             bool mergeable = true;
             for (size_t i = 0; i < n; ++i) {
-                ops[i] = seq_merge_operand(corpus_, q.tokens[i].conditions);
+                ops[i] = merge_operand(q.tokens[i].conditions);
                 if (ops[i].kind == SeqMergeTok::Complex) { mergeable = false; break; }
                 if (ops[i].kind == SeqMergeTok::EqRev && ops[i].span.empty()) {
                     // Lex id present but no postings → zero hits
@@ -3971,17 +4336,16 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             && fastpath_mode() == FastPathMode::On) {
             RelationType rt = q.relations[0].type;
             if (rt == RelationType::GOVERNS || rt == RelationType::GOVERNED_BY) {
-                SeqMergeOperand left = seq_merge_operand(corpus_, q.tokens[0].conditions);
-                SeqMergeOperand right = seq_merge_operand(corpus_, q.tokens[1].conditions);
-                // The bitset join costs O(|A| + |B|) plus a corpus-sized bitset; when
-                // one side is much rarer, the generic planner (seed from the rare side,
-                // probe head()/children()) is an order of magnitude faster.
+                SeqMergeOperand left = merge_operand(q.tokens[0].conditions);
+                SeqMergeOperand right = merge_operand(q.tokens[1].conditions);
+                // The bitset join streams both lists, O(|A| + |B|); when one side is
+                // much rarer, probing from the rare side (dep_probe) is far cheaper.
                 const bool skewed = left.kind == SeqMergeTok::EqRev
                     && right.kind == SeqMergeTok::EqRev
                     && std::min(left.span.count, right.span.count) * kDepBitsetMaxSkew
                            < std::max(left.span.count, right.span.count);
                 if (left.kind == SeqMergeTok::EqRev && right.kind == SeqMergeTok::EqRev
-                    && !left.span.empty() && !right.span.empty() && !skewed) {
+                    && !left.span.empty() && !right.span.empty()) {
                     // GOVERNS: head(right)=left.  GOVERNED_BY: head(left)=right.
                     const RevSpan& parent_span =
                         (rt == RelationType::GOVERNS) ? left.span : right.span;
@@ -3990,7 +4354,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     const bool parent_is_token0 = (rt == RelationType::GOVERNS);
 
                     result.seed_token = parent_is_token0 ? 0 : 1;
-                    result.plan_path = "dep_bitset";
+                    result.plan_path = skewed ? "dep_probe" : "dep_bitset";
                     result.cardinalities = {
                         estimate_cardinality(q.tokens[0].conditions),
                         estimate_cardinality(q.tokens[1].conditions)};
@@ -4169,7 +4533,153 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                         if (max_total_cap > 0 && result.total_count > max_total_cap)
                             result.total_count = max_total_cap;
                     };
-                    if (child_span.width == parent_span.width) {
+                    // ── P5.2 edge postings (dep_pair): [H=h] > [C=c] is one key of
+                    // dep.pair.<H>.<C> — the child positions; total = key length
+                    // (sliced per region interval), page = direct read + head().
+                    RevSpan pair_span;
+                    bool use_pair = false;
+                    {
+                        auto leaf_eq = [&](const ConditionPtr& c, std::string& attr,
+                                           LexiconId& id) -> bool {
+                            if (!c || !c->is_leaf) return false;
+                            const AttrCondition& ac = c->leaf;
+                            if (ac.op != CompOp::EQ || ac.case_insensitive
+                                || ac.diacritics_insensitive || ac.is_nvals || ac.id_set_resolved)
+                                return false;
+                            attr = normalize_attr(ac.attr);
+                            std::string feat_name;
+                            if (feats_is_subkey(attr, feat_name) || !corpus_.has_attr(attr)
+                                || corpus_.is_multivalue(attr))
+                                return false;
+                            id = corpus_.attr(attr).lexicon().lookup(ac.value);
+                            return id != UNKNOWN_LEX;
+                        };
+                        std::string ha, ca;
+                        LexiconId hid = UNKNOWN_LEX, cid = UNKNOWN_LEX;
+                        const ConditionPtr& pc = q.tokens[parent_is_token0 ? 0 : 1].conditions;
+                        const ConditionPtr& cc = q.tokens[parent_is_token0 ? 1 : 0].conditions;
+                        if (fastpath_mode() == FastPathMode::On && !mask_bits
+                            && leaf_eq(pc, ha, hid) && leaf_eq(cc, ca, cid)) {
+                            if (auto dpi = dep_pair_index(ha, ca)) {
+                                pair_span = dpi->span(hid, cid);
+                                use_pair = true;
+                            }
+                        }
+                    }
+                    if (use_pair) {
+                        result.plan_path = "dep_pair";
+                        const RevSpan& S = pair_span;
+                        std::vector<PosInterval> whole;
+                        const std::vector<PosInterval>* ivs = &region_mask.iv;
+                        if (!mask_iv) {
+                            whole.push_back({0, corpus_end - 1});
+                            ivs = &whole;
+                        }
+                        FlatRegionCursor bcur(sents);
+                        bool counting = false, stop = false;
+                        size_t lo = 0;
+                        for (const auto& I : *ivs) {
+                            if (S.empty()) break;
+                            lo = gallop_rev(S, lo, I.s);
+                            if (lo >= S.count) break;
+                            const size_t hi = gallop_rev(S, lo, I.e + 1);
+                            // Heads of the children in I lie in I when I starts and
+                            // ends on sentence boundaries (heads share the sentence).
+                            bool aligned = true;
+                            if (mask_iv) {
+                                const int64_t a = bcur.find(I.s);
+                                const int64_t b = bcur.find(I.e);
+                                aligned = (a < 0 || sent_r[a].start >= I.s)
+                                       && (b < 0 || sent_r[b].end <= I.e);
+                            }
+                            for (size_t k = lo; k < hi; ++k) {
+                                if (counting && aligned) {
+                                    result.total_count += hi - k;
+                                    break;
+                                }
+                                const CorpusPos c = S.at(k);
+                                CorpusPos par;
+                                if (!head_of(c, par)) continue;
+                                if (mask_iv && !aligned && !region_mask.contains(par)) continue;
+                                if (!emit(par, c)) { stop = true; break; }
+                                if (can_fast_count && result.matches.size() >= max_matches)
+                                    counting = true;
+                            }
+                            if (stop) break;
+                            if (max_total_cap > 0 && result.total_count >= max_total_cap) {
+                                result.total_count = max_total_cap;
+                                break;
+                            }
+                            lo = hi;
+                        }
+                        if (max_total_cap > 0 && result.total_count > max_total_cap)
+                            result.total_count = max_total_cap;
+                    } else if (skewed) {
+                        // ── Skewed operands (dep_probe): drive from the rare side ──
+                        // Rare children: head(c), then gallop the parent postings (heads
+                        // lie within ±D of c, so a monotone lower cursor at c - D keeps
+                        // every search short). Rare parents: walk the child postings of
+                        // the parent's sentence and keep those whose head is the parent.
+                        // O(|rare| · log) — the big list is never streamed, and the
+                        // operands are the already-resolved postings (no re-evaluation
+                        // of materialised AND / regex / fold conditions).
+                        const bool rare_child = child_span.count <= parent_span.count;
+                        if (rare_child) {
+                            const RevSpan& C = child_span;
+                            const RevSpan& P = parent_span;
+                            size_t plo = 0;
+                            for (size_t i = 0; i < C.count; ++i) {
+                                const CorpusPos c = C.at(i);
+                                if (use_region_mask && !child_mask.contains(c)) {
+                                    if (mask_iv && child_mask.exhausted()) break;
+                                    continue;
+                                }
+                                CorpusPos h;
+                                if (!head_of(c, h)) continue;
+                                plo = gallop_rev(P, plo, c - kMaxHeadDistance);
+                                const size_t j = gallop_rev(P, plo, h);
+                                if (j >= P.count || P.at(j) != h) continue;
+                                if (use_region_mask && !region_mask.contains(h)) continue;
+                                if (!emit(h, c)) break;
+                            }
+                        } else {
+                            const RevSpan& C = child_span;
+                            const RevSpan& P = parent_span;
+                            size_t clo = 0;
+                            for (size_t i = 0; i < P.count && clo < C.count; ++i) {
+                                const CorpusPos p = P.at(i);
+                                if (use_region_mask && !parent_mask.contains(p)) {
+                                    if (mask_iv && parent_mask.exhausted()) break;
+                                    continue;
+                                }
+                                const int64_t si = sent_cur.find(p);
+                                if (si < 0) continue;
+                                const CorpusPos s0 = sent_r[si].start, s1 = sent_r[si].end;
+                                clo = gallop_rev(C, clo, s0);
+                                bool stop = false;
+                                for (size_t k = clo; k < C.count; ++k) {
+                                    const CorpusPos c = C.at(k);
+                                    if (c > s1) break;
+                                    CorpusPos h;
+                                    if (hrel) {
+                                        const int16_t d = hrel[c];
+                                        if (d == 0) continue;
+                                        h = c + d;
+                                    } else {
+                                        const int16_t l = hloc[c];
+                                        if (l < 0) continue;
+                                        h = s0 + l;
+                                    }
+                                    if (h != p) continue;
+                                    if (use_region_mask && !region_mask.contains(c)) continue;
+                                    if (!emit(p, c)) { stop = true; break; }
+                                }
+                                if (stop) break;
+                            }
+                        }
+                        if (max_total_cap > 0 && result.total_count > max_total_cap)
+                            result.total_count = max_total_cap;
+                    } else if (child_span.width == parent_span.width) {
                         switch (child_span.width) {
                             case 2: run(static_cast<const int16_t*>(child_span.data), child_span.count,
                                         static_cast<const int16_t*>(parent_span.data), parent_span.count); break;
@@ -4201,8 +4711,8 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 // sentence every candidate pair is tested with the Euler interval
                 // (in(a) < in(d) && out(a) > out(d)): O(|A| + |B| + pairs per sentence),
                 // no subtree()/ancestors() vectors per seed.
-                SeqMergeOperand left = seq_merge_operand(corpus_, q.tokens[0].conditions);
-                SeqMergeOperand right = seq_merge_operand(corpus_, q.tokens[1].conditions);
+                SeqMergeOperand left = merge_operand(q.tokens[0].conditions);
+                SeqMergeOperand right = merge_operand(q.tokens[1].conditions);
                 if (left.kind == SeqMergeTok::EqRev && right.kind == SeqMergeTok::EqRev
                     && !left.span.empty() && !right.span.empty()
                     && left.span.width == right.span.width) {
@@ -4391,8 +4901,8 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 //   [A] !> [B]: A tokens with no dependent in B  (match = A, B slot empty)
                 //   [A] !< [B]: B tokens with no dependent in A  (match = B, A slot empty)
                 // One bitset over heads(dependent side), one pass over the governor side.
-                SeqMergeOperand left = seq_merge_operand(corpus_, q.tokens[0].conditions);
-                SeqMergeOperand right = seq_merge_operand(corpus_, q.tokens[1].conditions);
+                SeqMergeOperand left = merge_operand(q.tokens[0].conditions);
+                SeqMergeOperand right = merge_operand(q.tokens[1].conditions);
                 // A rare governor side is left to the generic path (seed from it,
                 // check its children), which beats a bitset over all dependent heads.
                 const bool neg_keep_token0 = (rt == RelationType::NOT_GOVERNS);

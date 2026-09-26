@@ -60,6 +60,14 @@ struct AttrCondition {
     // forward set; when == UNKNOWN_LEX (-1), mv_lookup missed (unknown component).
     int32_t resolved_mv_component_id = -1;
 
+    // P1.5 / P1.6: `%c` / `%d` EQ/NEQ and REGEX on a positional attr, pre-resolved
+    // (compile_conditions) to the sorted lexicon ids that satisfy the value: folded
+    // value == folded query, or regex match. check_leaf then tests id membership
+    // (negated for NEQ) instead of folding / regex-matching the token string per
+    // position; estimates and resolution use the ids' `.rev` counts and postings.
+    std::vector<int32_t> id_set;
+    bool id_set_resolved = false;
+
     // nvals(attr) op N — cardinality of explicit pipe-separated MV values (and region overlap).
     // When true, `op` compares the computed count to `nvals_compare` (integer RHS).
     bool is_nvals = false;

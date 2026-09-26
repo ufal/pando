@@ -35,6 +35,9 @@ class PositionalAttr {
 public:
     void open(const std::string& base_path, CorpusPos corpus_size, bool preload = false);
 
+    /// Path prefix the attribute was opened from (`<dir>/<name>`), for sidecar files.
+    const std::string& base_path() const { return base_path_; }
+
     /// Sorted postings for `id` without allocating a vector (empty if unknown / OOB).
     RevSpan rev_span_of_id(LexiconId id) const;
 
@@ -141,6 +144,7 @@ public:
     }
 
 private:
+    std::string base_path_;
     Lexicon  lexicon_;
     MmapFile corpus_;      // .dat  — int8/int16/int32 per position
     MmapFile rev_;         // .rev  — int16/int32/int64 sorted positions per lex id

@@ -37,10 +37,36 @@
 [upos="PUNCT"] [upos="PUNCT"] [upos="PUNCT"]
 [upos="ADP"] [] [upos="DET"] [] [lemma="book"]
 
-# --- sequences that are not mergeable today (probe / generic) ---
+# --- complex operands, materialised onto the fast paths (P1.4-P1.6) ---
 [upos="ADJ" & lemma="good"] [upos="NOUN"]
 [upos="ADJ"] [upos="NOUN" & text_langcode="en"]
 [form="the" %c] [upos="NOUN"]
+[form="The" %c] [upos="NOUN"]
+[form="THE" %c] [] [upos="NOUN"]
+[form="een" %d] [upos="NOUN"]
+[upos="ADJ" | upos="DET"] [upos="NOUN"]
+[upos="NOUN" & lemma!="house"] [upos="VERB"]
+[upos="ADJ" & text_langcode="en"] [upos="NOUN"] within s
+[lemma=/^un.*/]
+[lemma=/^un.*/] [upos="NOUN"]
+[lemma=/^be$/]
+[lemma=/un/]
+[lemma=".*un.*"]
+[lemma=".*ness"]
+[lemma="[a-z]+ing"]
+[lemma=/^books?$/]
+[lemma=/^(be|have)$/]
+[lemma="a.?b.*"]
+[lemma=".*ness"] within text_langcode="en"
+[lemma=".*ness"] :: match.text_langcode="cs"
+[form="the" %c]
+[form="the" %c] within text_langcode="en"
+[lemma=".*ness"] [upos="VERB"]
+[lemma=/^be$/] > [upos="NOUN"]
+[upos="VERB" & text_langcode="en"] > [upos="NOUN"]
+[lemma="good" %c] >> [upos="NOUN"]
+[upos="VERB"] !> [deprel="nsubj" | deprel="obj"]
+[upos!="PUNCT"] [upos="PUNCT"]
 
 # --- dependencies, direct (dep_bitset) ---
 [upos="VERB"] > [upos="NOUN"]

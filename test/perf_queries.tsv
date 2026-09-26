@@ -45,3 +45,14 @@ T4	[upos="VERB"] >> [upos="NOUN"] within text_langcode="en"
 N1	[upos="VERB"] !> [deprel="nsubj"]
 N2	[upos="DET"] !< [lemma="book"]
 N3	[upos="NOUN"] !< [upos="VERB"]
+Q2k	[upos="ADJ" | upos="DET"] [upos="NOUN"]
+Q2l	[lemma=/^un.*/] [upos="NOUN"]
+Q2m	[form="The" %c] [upos="NOUN"]
+D9	[lemma="good" %c] >> [upos="NOUN"]
+N4	[upos="VERB"] !> [deprel="nsubj" | deprel="obj"]
+R1	[lemma=".*ness"]
+R2	[lemma=".*un.*"]
+R3	[lemma="un.*"]
+R4	[form="the" %c]
+D10	[upos="VERB"] > [upos="NOUN"] within text
+D11	[upos="VERB"] > [upos="NOUN"] :: match.text_langcode="cs"
