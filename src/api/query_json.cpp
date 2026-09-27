@@ -118,7 +118,8 @@ std::string to_query_result_json(const Corpus& corpus,
                                  const std::string& query_text,
                                  const MatchSet& ms,
                                  const QueryOptions& opts,
-                                 double elapsed_ms) {
+                                 double elapsed_ms,
+                                 std::string_view extra_result_fields) {
     std::ostringstream out;
     size_t stored = ms.matches.size();
     size_t start = std::min(opts.offset, stored);
@@ -190,6 +191,7 @@ std::string to_query_result_json(const Corpus& corpus,
         out << "      \"corpus_size\": " << corpus.size() << ",\n";
         out << "      \"has_deps\": " << (corpus.has_deps() ? "true" : "false") << ",\n";
         out << "      \"elapsed_ms\": " << elapsed_ms << ",\n";
+        out << "      \"plan_path\": " << jstr(ms.plan_path) << ",\n";
         out << "      \"seed_token\": " << ms.seed_token << ",\n";
         out << "      \"cardinalities\": [";
         for (size_t i = 0; i < ms.cardinalities.size(); ++i) {
@@ -198,6 +200,7 @@ std::string to_query_result_json(const Corpus& corpus,
         }
         out << "]\n    }";
     }
+    if (!extra_result_fields.empty()) out << ",\n    " << extra_result_fields;
     out << "\n  }\n}\n";
     return out.str();
 }

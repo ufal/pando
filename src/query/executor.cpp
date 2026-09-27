@@ -3750,9 +3750,11 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             }
             ++agg_ptr->total_hits;
             ++agg_ptr->counts[std::move(akey)];
+            progress_tick(m.first_pos(), agg_ptr->total_hits);
             return true;
         }
         ++result.total_count;
+        progress_tick(m.first_pos(), result.total_count);
         if (sample_size > 0) {
             if (reservoir.size() < sample_size) {
                 reservoir.push_back(std::move(m));
@@ -4054,6 +4056,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 bool stop = false, counting = false;
                 for (size_t c = 0; c < nchunks && !stop; ++c) {
                     const CorpusPos base = static_cast<CorpusPos>(c) << BitmapIndex::kChunkShift;
+                    progress_tick(base, result.total_count, true);
                     if (base > last_start) break;
                     const CorpusPos top = std::min<CorpusPos>(base + BitmapIndex::kChunk - 1, last_start);
                     const uint32_t hi = static_cast<uint32_t>(top - base);   // last start offset
@@ -4573,6 +4576,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     bool stop = false, counting = false;
                     for (size_t c = 0; c < nchunks && !stop; ++c) {
                         const CorpusPos base = static_cast<CorpusPos>(c) << BitmapIndex::kChunkShift;
+                        progress_tick(base, result.total_count, true);
                         const CorpusPos top = std::min<CorpusPos>(base + BitmapIndex::kChunk, N) - 1;
                         const size_t nw = static_cast<size_t>((top - base) >> 6) + 1;
                         if (use_mask && !bm_mask.use_bits) {
@@ -4840,6 +4844,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                         if (!count_total) return false;
                         if (cheap_total_ok) {
                             ++result.total_count;
+                            progress_tick(st, result.total_count);
                             return !reached_total_cap();
                         }
                     }
@@ -4855,6 +4860,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 // bulk count for a run of pairs that need no per-hit work
                 auto bulk = [&](size_t cnt) {
                     result.total_count += cnt;
+                    progress_tick(-1, result.total_count);
                     if (max_total_cap > 0 && result.total_count >= max_total_cap) {
                         result.total_count = max_total_cap;
                         stop = true;
@@ -5061,6 +5067,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     if (!count_total) return false;
                     if (cheap_total_ok) {
                         ++result.total_count;
+                        progress_tick(p0, result.total_count);
                         return !reached_total_cap();
                     }
                     // Fall through to add_match for filter-aware counting.
@@ -5340,6 +5347,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                             if (!count_total) return false;
                             if (cheap_total_ok) {
                                 ++result.total_count;
+                                progress_tick(-1, result.total_count);
                                 return !reached_total_cap();
                             }
                             // Filters not pre-applied — must go through add_match.
@@ -5407,7 +5415,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                             CorpusPos parent;
                             if (!head_of(child, parent)) continue;
                             if (parent < par.dead || parent >= fill_to || !par.test(parent)) continue;
-                            if (counting) { ++cnt; continue; }
+                            if (counting) { ++cnt; progress_tick(-1, result.total_count + cnt); continue; }
                             if (!emit(parent, child)) break;
                             if (can_fast_count && result.matches.size() >= max_matches) {
                                 counting = true;
@@ -5435,6 +5443,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                                             const int16_t d = hrel[c];
                                             cnt += static_cast<size_t>((d != 0) & par.test(c + d));
                                         }
+                                        progress_tick(chunk_end, result.total_count + cnt, true);
                                     }
                                     break;
                                 }
@@ -5693,6 +5702,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                             if (!count_total) return false;
                             if (cheap_total_ok) {
                                 ++result.total_count;
+                                progress_tick(-1, result.total_count);
                                 return !reached_total_cap();
                             }
                         }
@@ -5755,6 +5765,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                                             c += (ein[Op[y]] < din) & (eout[Op[y]] > dout);
                                     }
                                     cnt += c;
+                                    progress_tick(dp, result.total_count + cnt);
                                     continue;
                                 }
                                 for (size_t y = io; y < jo; ++y) {
@@ -5765,7 +5776,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                                         : (oin < din && oout > dout);
                                     if (!related) continue;
                                     if (!whole && !allowed(op)) continue;
-                                    if (counting) { ++cnt; continue; }
+                                    if (counting) { ++cnt; progress_tick(-1, result.total_count + cnt); continue; }
                                     const CorpusPos t0 = driver_is_token0 ? dp : op;
                                     const CorpusPos t1 = driver_is_token0 ? op : dp;
                                     if (!emit(t0, t1)) { stop = true; break; }
@@ -5891,6 +5902,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                             if (!count_total) return false;
                             if (cheap_total_ok) {
                                 ++result.total_count;
+                                progress_tick(-1, result.total_count);
                                 return !reached_total_cap();
                             }
                         }
@@ -5925,6 +5937,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                                 for (; i < gn && static_cast<CorpusPos>(Gp[i]) < chunk_end; ++i)
                                     c += !forbid.test(static_cast<CorpusPos>(Gp[i]));
                                 cnt += c;
+                                progress_tick(chunk_end, result.total_count + cnt, true);
                                 continue;
                             }
                             for (; i < gn; ++i) {
@@ -5933,7 +5946,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                                 if (mask_iv && !gmask.contains(g)) break;   // outer round skips ahead
                                 if (mask_bits && !bitset_test(region_mask.bits, g)) continue;
                                 if (forbid.test(g)) continue;
-                                if (counting) { ++cnt; continue; }
+                                if (counting) { ++cnt; progress_tick(-1, result.total_count + cnt); continue; }
                                 if (!emit(g)) { stop = true; break; }
                                 if (can_fast_count && result.matches.size() >= max_matches)
                                     counting = true;

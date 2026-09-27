@@ -79,3 +79,58 @@ Validates layout and internal consistency.
 ## `pando-server`
 
 HTTP JSON API over the same engine (when enabled in the build).
+
+```
+pando-server <corpus_dir> [port] [threads] [--preload] [options]
+```
+
+| Option | Role |
+| --- | --- |
+| `port`, `threads` | Listen port (default 8765) and request threads |
+| `--preload` | Read all index pages at startup (default: lazy mmap) |
+| `--total-workers N` | Concurrent background counts (default 2) |
+| `--result-cache N` | Cached query results / totals (default 512; unused finished ones evicted first) |
+| `--result-ttl SEC` | Drop a finished result nobody asked about for SEC (default 3600) |
+| `--abandon-after SEC` | Cancel a background count nobody polled for SEC (default 120; 0 = never) |
+| `--debug-total-delay MS` | Testing: reveal every total gradually over MS, so a client can be tested against a "slow" count on a small corpus |
+
+### Endpoints
+
+| Endpoint | Role |
+| --- | --- |
+| `POST /query` | One query: `query`, `limit`, `offset`, `total`, `max_total`, `context`, `sentence`, `attrs`, `debug`, `strict_quoted_strings` |
+| `GET /status?job=ID` | State of a background total (404 once it has expired: re-send the `/query`) |
+| `POST /cancel?job=ID` | Stop a queued / running count (send a body, even `{}`, or `Content-Length: 0`) |
+| `GET /jobs` | All cached results and running counts |
+| `POST /run` | A full CQL program (named queries, `count`, `coll`, …) |
+| `GET /info`, `/values/ATTR`, `/regions/TYPE`, `/context?pos=`, `/health` | Corpus description, values, regions, KWIC context |
+
+### Totals: `"total": false | true | "async"`
+
+* `false` — the page only; `page.total` is the number of hits found so far.
+* `true` — the page and the exact total. A total computed before for the same
+  query (same text, `max_total`, `strict_quoted_strings`) is reused: only the page
+  is computed.
+* `"async"` — the page at once; the exact total is counted in the background.
+  The result has `"job": {...}` and `page.total` is the count so far
+  (`total_exact: false`) until the job has finished. Poll `GET /status?job=ID`:
+
+```json
+{"ok": true, "job": {"id": "dd3abc781972108e", "state": "running", "finished": false,
+ "total": 534076, "total_exact": false, "counted": 534076, "progress": 0.2891,
+ "estimate": 1847062, "elapsed_ms": 238.0}}
+```
+
+`state` is `queued`, `running`, `finished`, `cancelled` or `failed` (`error`).
+`counted` grows while running; `progress` is the share of the corpus scanned
+and `estimate` the total extrapolated from it (both `null` when the query's
+execution path does not report progress). The job id is derived from the query,
+so every request for the same concordance finds the same job; when the page
+already holds every hit the job is finished at once. Polling `/status` keeps a
+job alive; one nobody asks about is cancelled after `--abandon-after`.
+
+For KonText (the way Manatee concordances work there): `query_submit` sends
+`"total": "async"` with `limit: 1` and reports `finished` = job finished; `view`
+sends the page request (same query → same job, `concsize` = `page.total`);
+`get_conc_cache_status` reads `/status` (`finished`, `concsize` = `total`) instead
+of re-running the query.

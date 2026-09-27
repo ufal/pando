@@ -133,9 +133,10 @@ add_executable(cwb-import src/cli/cwb_import_main.cpp)
 target_link_libraries(cwb-import PRIVATE pando_core)
 
 # API layer: query execution + JSON (used by CLI and server)
-add_library(pando_api STATIC src/api/query_json.cpp src/api/program_api.cpp)
+add_library(pando_api STATIC src/api/query_json.cpp src/api/program_api.cpp src/api/query_jobs.cpp)
 target_include_directories(pando_api PUBLIC src)
-target_link_libraries(pando_api PUBLIC pando_core)
+find_package(Threads REQUIRED)
+target_link_libraries(pando_api PUBLIC pando_core Threads::Threads)
 
 # Shared library: libpando.so / libpando.dylib (#43)
 # Packages pando_core + pando_api + C FFI wrapper for external consumers.
@@ -259,3 +260,15 @@ endif()
 add_executable(pando-server src/cli/server_main.cpp)
 target_include_directories(pando-server PRIVATE ${httplib_SOURCE_DIR})
 target_link_libraries(pando-server PRIVATE pando_api)
+
+if(BUILD_TESTING)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        # P6.2: background totals, result cache, cancel / abandon (/query "total": "async")
+        add_test(NAME server_jobs
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/server_jobs_test.py
+                --server $<TARGET_FILE:pando-server> --pando $<TARGET_FILE:pando>
+                --pando-index $<TARGET_FILE:pando-index>
+                --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu)
+    endif()
+endif()

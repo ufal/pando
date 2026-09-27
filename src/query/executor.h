@@ -24,6 +24,7 @@
 #else
 #include <regex>
 #include <mutex>
+#include <atomic>
 #endif
 
 namespace pando {
@@ -553,9 +554,25 @@ struct QueryPlan {
     std::vector<size_t> cardinalities;
 };
 
+/// Progress and cancellation of a long count (pando-server background totals).
+/// The executor publishes the hits counted so far and the corpus position its
+/// scan has reached (ascending on the merge, bitmap and dependency paths), and
+/// throws QueryCancelled at the next checkpoint once `cancel` is set.
+struct ExecProgress {
+    std::atomic<size_t> counted{0};
+    std::atomic<int64_t> scanned{-1};
+    std::atomic<bool> cancel{false};
+};
+
+struct QueryCancelled : std::runtime_error {
+    QueryCancelled() : std::runtime_error("query cancelled") {}
+};
+
 class QueryExecutor {
 public:
     explicit QueryExecutor(const Corpus& corpus);
+    /// Report progress to `p` (nullptr = off) during execute(); see ExecProgress.
+    void set_progress(ExecProgress* p) { progress_ = p; }
     /// Alignment filters (`:: a.attr = b.attr`): by default, missing values
     /// (empty string or `_`) do not match. Set true to restore legacy behavior.
     void set_include_empty_alignment_values(bool v) { include_empty_alignment_values_ = v; }
@@ -834,6 +851,18 @@ private:
     mutable std::unordered_map<std::string, std::shared_ptr<DepPairIndex>> dep_pair_cache_;
     std::shared_ptr<DepPairIndex> dep_pair_index(const std::string& head_attr,
                                                  const std::string& child_attr) const;
+    ExecProgress* progress_ = nullptr;
+    mutable uint32_t progress_ticks_ = 0;
+    /// Checkpoint in the counting loops: publishes (throttled; `force` per chunk)
+    /// and throws QueryCancelled when asked to stop.
+    void progress_tick(CorpusPos pos, size_t counted, bool force = false) const {
+        if (!progress_) return;
+        if (!force && ((++progress_ticks_) & 4095u) != 0) return;
+        progress_->counted.store(counted, std::memory_order_relaxed);
+        if (pos > progress_->scanned.load(std::memory_order_relaxed))
+            progress_->scanned.store(pos, std::memory_order_relaxed);
+        if (progress_->cancel.load(std::memory_order_relaxed)) throw QueryCancelled();
+    }
     // P3.1: chunked bitmaps per attribute; nullptr = not built.
     mutable std::unordered_map<std::string, std::shared_ptr<BitmapIndex>> bitmap_cache_;
     std::shared_ptr<BitmapIndex> bitmap_index(const std::string& attr) const;

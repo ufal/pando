@@ -32,11 +32,13 @@ std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
                                             const QueryOptions& opts);
 
 // Build JSON string for query result (same format as pando --json).
+// `extra_result_fields`: raw JSON members appended inside "result" (e.g. `"job": {...}`).
 std::string to_query_result_json(const Corpus& corpus,
                                  const std::string& query_text,
                                  const MatchSet& ms,
                                  const QueryOptions& opts,
-                                 double elapsed_ms);
+                                 double elapsed_ms,
+                                 std::string_view extra_result_fields = {});
 
 // Build JSON string for corpus info (CLI `show info`, /info, FFI). `operation` is the JSON
 // "operation" field ("info" vs "show_info" for CLI).
