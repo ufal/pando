@@ -1,6 +1,6 @@
 # CLI reference
 
-Exact options change over time; always run **`pando --help`**, **`pando-index --help`**, **`pando-check --help`**, **`pando-server --help`** for the installed build.
+Exact options change over time; always run **`pando --help`**, **`pando-index --help`**, **`pando-check --help`**, **`pando-server --help`** for the installed build (and `--version` to see which build that is).
 
 ## `pando`
 
@@ -102,8 +102,38 @@ pando-server <corpus_dir> [port] [threads] [--preload] [options]
 | `GET /status?job=ID` | State of a background total (404 once it has expired: re-send the `/query`) |
 | `POST /cancel?job=ID` | Stop a queued / running count (send a body, even `{}`, or `Content-Length: 0`) |
 | `GET /jobs` | All cached results and running counts |
+| `GET /version` | The pando build answering, its `features` and the served corpus (also in `/health`) |
 | `POST /run` | A full CQL program (named queries, `count`, `coll`, …) |
 | `GET /info`, `/values/ATTR`, `/regions/TYPE`, `/context?pos=`, `/health` | Corpus description, values, regions, KWIC context |
+
+### Versions
+
+Every binary reports the same build identity: `pando --version`,
+`pando-index --version`, `pando-server --version` print e.g.
+`0.1.20 (v0.1.20-23-g2a000ce, perf/phase1)` — the CMake project version plus
+`git describe --tags --always --dirty` and the branch, taken at build time (just
+`0.1.20` for a build of the tagged commit, or outside a git checkout).
+
+`pando-server` returns it in `GET /version`, `GET /health` and `/info`
+(`result.server`):
+
+```json
+{"ok": true, "version": "0.1.20", "build": "v0.1.20-23-g2a000ce", "commit": "2a000ce…",
+ "branch": "perf/phase1", "build_string": "0.1.20 (v0.1.20-23-g2a000ce, perf/phase1)",
+ "features": ["query", "run", "context", "values", "regions", "async_total", "result_cache",
+              "limit0_total", "bitmaps", "dep_pairs", "fold_index", "sentence_context", "version"],
+ "started": "2026-09-27T17:45:52Z", "uptime_s": 3600, "corpus": "/data/pando/ud_demo",
+ "threads": 8, "total_workers": 2}
+```
+
+Clients should test `features` rather than probe for errors. `/info` (and
+`pando --json` `show info`) also has `result.pando` (the build answering) and
+`result.index`: `indexed_with` / `upgraded_with` (the pando-index build that
+built the index / last ran `--upgrade`, from `corpus.info`; `null` for older
+indexes) and the status of the derived files — `bitmaps`, `structure_bitmaps`,
+`dep_pairs` (`ok`, `stale` = older than its source and ignored, `missing`),
+`dep_head_rel`, `fold_indexes`. A `stale` or `missing` entry means: run
+`pando-index --upgrade <corpus_dir>` with the current build.
 
 ### Totals: `"total": false | true | "async"`
 

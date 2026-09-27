@@ -32,6 +32,11 @@ struct CorpusInfo {
 
     // REQ-TOKEN-GROUPS: structural names routed to standoff (no .rgn index).
     std::vector<std::string> token_group_structs;
+
+    // Build identity of the pando-index that built the index / last ran --upgrade
+    // (build_string(); empty for indexes from before this was recorded).
+    std::string indexed_with;
+    std::string upgraded_with;
 };
 
 // Phase A: in-memory representation of one record from `groups/<struct>.jsonl`.
@@ -110,6 +115,7 @@ public:
     const DependencyIndex& deps() const { return deps_; }
 
     const std::string& dir() const { return dir_; }
+    const CorpusInfo& info() const { return info_; }
 
 private:
     std::string dir_;

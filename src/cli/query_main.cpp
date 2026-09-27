@@ -1,4 +1,5 @@
 #include "pando_version.h"
+#include "core/build_info.h"
 #include "corpus/corpus.h"
 #include "api/query_json.h"
 #include "core/json_utils.h"
@@ -3614,7 +3615,7 @@ static Options parse_args(int argc, char* argv[]) {
     }
 
     if (opts.print_version) {
-        std::cout << "pando " << PANDO_VERSION << "\n";
+        std::cout << "pando " << pando::build_string() << "\n";
         std::exit(0);
     }
 

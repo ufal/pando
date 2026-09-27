@@ -13,6 +13,8 @@ observable on a small corpus) and --abandon-after 1, and checks:
   * a synchronous total is recorded as a finished job;
   * /cancel stops a job; a job nobody polls is abandoned;
   * unknown job ids give 404;
+  * /version, /health, /info report the build (== `pando-server --version`),
+    the features and the index's bitmaps / builder;
   * the fields kontext-pando reads (result.job_id, /status result.*) and
     limit 0 (total only, no hits).
 
@@ -123,6 +125,26 @@ def main():
             except (urllib.error.URLError, ConnectionError):
                 pass
             time.sleep(0.05)
+
+        # 0. versioning: /version, /health and /info say which pando build answers
+        #    and what the index has (P3 bitmaps built by pando-index --upgrade)
+        ver = subprocess.run([opts.server, "--version"], capture_output=True, text=True).stdout.strip()
+        code, v = srv.get("/version")
+        check(code == 200 and v.get("build") and v.get("version") and "async_total" in v.get("features", []),
+              f"/version: {v}")
+        check(ver == "pando-server " + v.get("build_string", ""), f"--version {ver!r} vs /version {v.get('build_string')!r}")
+        code, h = srv.get("/health")
+        check(code == 200 and h.get("build") == v.get("build"), f"/health: {h}")
+        code, info = srv.get("/info")
+        r = info.get("result", {})
+        check(r.get("server", {}).get("build") == v.get("build") and r.get("pando", {}).get("build") == v.get("build"),
+              f"/info server / pando: {r.get('server')} {r.get('pando')}")
+        idx = r.get("index", {})
+        check(idx.get("indexed_with") and idx.get("upgraded_with"), f"/info index built / upgraded with: {idx}")
+        check(any(b["attr"] == "upos" and b["status"] == "ok" for b in idx.get("bitmaps", [])),
+              f"/info index bitmaps: {idx.get('bitmaps')}")
+        check(any(b["struct"] == "s" and b["status"] == "ok" for b in idx.get("structure_bitmaps", [])),
+              f"/info structure bitmaps: {idx.get('structure_bitmaps')}")
 
         # 1. async: page now, job in the background
         q = '[upos="NOUN"]'

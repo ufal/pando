@@ -42,7 +42,18 @@ std::string to_query_result_json(const Corpus& corpus,
 
 // Build JSON string for corpus info (CLI `show info`, /info, FFI). `operation` is the JSON
 // "operation" field ("info" vs "show_info" for CLI).
-std::string to_info_json(const Corpus& corpus, std::string_view operation = "info");
+// `extra_result_fields`: raw JSON members appended inside "result" (e.g. `"server": {...}`).
+// The result always has `"pando": {version, build, commit, branch}` (the binary answering)
+// and `"index": {...}` (index_status_json_fields).
+std::string to_info_json(const Corpus& corpus, std::string_view operation = "info",
+                         std::string_view extra_result_fields = {});
+
+// P3 / versioning: which derived index files the corpus has and whether they are
+// current — JSON members `"indexed_with": …, "upgraded_with": …, "bitmaps": […],
+// "structure_bitmaps": […], "dep_pairs": […], "dep_head_rel": …, "fold_indexes": {…}`
+// (no braces). Status per file: "ok", "stale" (present but older than its source or
+// inconsistent → ignored; run `pando-index --upgrade`) or "missing".
+std::string index_status_json_fields(const Corpus& corpus);
 
 // Build JSON string listing unique values + counts for a positional or region attribute.
 // Returns empty string if attribute not found.

@@ -67,6 +67,10 @@ static CorpusInfo read_info(const std::string& path) {
             std::string tok;
             while (std::getline(ss, tok, ','))
                 if (!tok.empty()) info.kv_pipe_attrs.push_back(tok);
+        } else if (key == "indexed_with") {
+            info.indexed_with = val;
+        } else if (key == "upgraded_with") {
+            info.upgraded_with = val;
         } else if (key == "token_groups") {
             std::istringstream ss(val);
             std::string tok;

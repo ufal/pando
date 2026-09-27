@@ -6,6 +6,7 @@
 #include "index/dep_pair_index.h"
 #include "index/bitmap_index.h"
 #include "corpus/corpus.h"
+#include "core/build_info.h"
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -195,6 +196,29 @@ static int upgrade_bitmaps(const pando::Corpus& corpus, const std::string& spec,
     return 0;
 }
 
+// Record `upgraded_with=<build> <UTC time>` in corpus.info (replacing an earlier one).
+static void record_upgrade(const std::string& dir) {
+    const std::string path = dir + "/corpus.info", tmp = path + ".tmp";
+    std::ifstream in(path);
+    if (!in) return;
+    std::vector<std::string> lines;
+    for (std::string line; std::getline(in, line);)
+        if (line.rfind("upgraded_with=", 0) != 0) lines.push_back(line);
+    in.close();
+    char ts[32];
+    const std::time_t now = std::time(nullptr);
+    std::strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&now));
+    lines.push_back("upgraded_with=" + pando::build_string() + " " + ts);
+    {
+        std::ofstream out(tmp);
+        if (!out) return;
+        for (const auto& l : lines) out << l << "\n";
+        if (!out) return;
+    }
+    std::error_code ec;
+    fs::rename(tmp, path, ec);
+}
+
 static int upgrade_index(const std::string& dir, bool quiet = false,
                          const std::string& dep_pairs = kDefaultDepPairs,
                          const std::string& bitmaps = kDefaultBitmaps) {
@@ -281,10 +305,15 @@ static int upgrade_index(const std::string& dir, bool quiet = false,
         std::cerr << "Error: " << e.what() << "\n";
         return 1;
     }
+    record_upgrade(dir);
     return 0;
 }
 
 int main(int argc, char* argv[]) {
+    if (argc == 2 && (std::string(argv[1]) == "--version" || std::string(argv[1]) == "-V")) {
+        std::cout << "pando-index " << pando::build_string() << "\n";
+        return 0;
+    }
     if (argc >= 3 && std::string(argv[1]) == "--upgrade") {
         std::string pairs = kDefaultDepPairs;
         std::string bitmaps = kDefaultBitmaps;

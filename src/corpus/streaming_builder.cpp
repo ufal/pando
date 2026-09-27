@@ -1,4 +1,5 @@
 #include "corpus/streaming_builder.h"
+#include "core/build_info.h"
 #include <future>
 #include <thread>
 #include <algorithm>
@@ -929,6 +930,7 @@ void StreamingBuilder::finalize() {
         std::ofstream info(output_dir_ + "/corpus.info");
         if (!info) throw std::runtime_error("Cannot create corpus.info");
         info << "size=" << corpus_size_ << "\n";
+        info << "indexed_with=" << build_string() << "\n";
         info << "positional=";
         for (size_t i = 0; i < sorted_attrs.size(); ++i) {
             if (i > 0) info << ",";

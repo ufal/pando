@@ -1,6 +1,11 @@
 #include "api/query_json.h"
 #include "core/json_utils.h"
+#include "core/build_info.h"
 #include "query/parser.h"
+#include "index/bitmap_index.h"
+#include "index/dep_pair_index.h"
+#include "index/fold_index.h"
+#include <filesystem>
 #include <sstream>
 #include <chrono>
 #include <algorithm>
@@ -205,7 +210,8 @@ std::string to_query_result_json(const Corpus& corpus,
     return out.str();
 }
 
-std::string to_info_json(const Corpus& corpus, std::string_view operation) {
+std::string to_info_json(const Corpus& corpus, std::string_view operation,
+                         std::string_view extra_result_fields) {
     std::ostringstream out;
     out << "{\n  \"ok\": true,\n  \"operation\": " << jstr(operation) << ",\n";
     out << "  \"result\": {\n";
@@ -281,7 +287,94 @@ std::string to_info_json(const Corpus& corpus, std::string_view operation) {
         if (i > 0) out << ", ";
         out << jstr(kvp[i]);
     }
-    out << "]\n  }\n}\n";
+    out << "],\n";
+    out << "    \"pando\": {" << build_json_fields() << "},\n";
+    out << "    \"index\": {" << index_status_json_fields(corpus) << "}";
+    if (!extra_result_fields.empty()) out << ",\n    " << extra_result_fields;
+    out << "\n  }\n}\n";
+    return out.str();
+}
+
+std::string index_status_json_fields(const Corpus& corpus) {
+    namespace fs = std::filesystem;
+    std::ostringstream out;
+    auto opt_str = [](const std::string& v) { return v.empty() ? std::string("null") : jstr(v); };
+    const CorpusInfo& ci = corpus.info();
+    out << "\"indexed_with\": " << opt_str(ci.indexed_with)
+        << ", \"upgraded_with\": " << opt_str(ci.upgraded_with);
+    std::error_code ec;
+    auto exists = [&](const std::string& p) { return fs::exists(p, ec); };
+
+    // attribute bitmaps: the --bitmaps auto candidates plus any attribute with a .bm file
+    out << ", \"bitmaps\": [";
+    bool first = true;
+    for (const auto& name : corpus.attr_names()) {
+        if (corpus.is_multivalue(name)) continue;
+        const auto& pa = corpus.attr(name);
+        const bool present = exists(BitmapIndex::idx_path(pa.base_path()));
+        if (!present && pa.lexicon().size() > BitmapIndex::kAutoMaxValues) continue;
+        BitmapIndex bi;
+        const char* st = !present ? "missing" : (bi.open(pa, corpus.size()) ? "ok" : "stale");
+        out << (first ? "" : ", ") << "{\"attr\": " << jstr(name) << ", \"values\": "
+            << pa.lexicon().size() << ", \"status\": \"" << st << "\"}";
+        first = false;
+    }
+    out << "]";
+
+    out << ", \"structure_bitmaps\": [";
+    first = true;
+    for (const auto& name : corpus.structure_names()) {
+        if (corpus.is_nested(name) || corpus.is_overlapping(name) || corpus.is_zerowidth(name)) continue;
+        const std::string base = BitmapIndex::structure_base(corpus.dir(), name);
+        const bool present = exists(BitmapIndex::idx_path(base));
+        BitmapIndex bi;
+        const char* st = !present ? "missing" : (bi.open_structure(base, corpus.size()) ? "ok" : "stale");
+        out << (first ? "" : ", ") << "{\"struct\": " << jstr(name) << ", \"status\": \"" << st << "\"}";
+        first = false;
+    }
+    out << "]";
+
+    // edge postings: every dep.pair.<H>.<C>.rev in the directory
+    out << ", \"dep_pairs\": [";
+    first = true;
+    if (corpus.has_deps()) {
+        std::vector<std::pair<std::string, std::string>> pairs;
+        for (const auto& e : fs::directory_iterator(corpus.dir(), ec)) {
+            const std::string fn = e.path().filename().string();
+            const std::string pre = "dep.pair.", suf = ".rev";
+            if (fn.rfind(pre, 0) != 0 || fn.size() <= pre.size() + suf.size()
+                || fn.compare(fn.size() - suf.size(), suf.size(), suf) != 0)
+                continue;
+            const std::string mid = fn.substr(pre.size(), fn.size() - pre.size() - suf.size());
+            const size_t dot = mid.find('.');
+            if (dot == std::string::npos) continue;
+            pairs.emplace_back(mid.substr(0, dot), mid.substr(dot + 1));
+        }
+        std::sort(pairs.begin(), pairs.end());
+        for (const auto& [h, c] : pairs) {
+            DepPairIndex di;
+            const bool ok = di.open(corpus, h, c);
+            out << (first ? "" : ", ") << "{\"head\": " << jstr(h) << ", \"child\": " << jstr(c)
+                << ", \"status\": \"" << (ok ? "ok" : "stale") << "\"}";
+            first = false;
+        }
+    }
+    out << "]";
+    out << ", \"dep_head_rel\": "
+        << (corpus.has_deps() ? (corpus.deps().head_rel_data() ? "true" : "false") : "null");
+
+    size_t fold_ok = 0, fold_missing = 0;
+    const FoldMode modes[] = {FoldMode::Lower, FoldMode::NoAccents, FoldMode::LowerNoAccents};
+    for (const auto& name : corpus.attr_names()) {
+        if (corpus.is_multivalue(name)) continue;
+        const auto& pa = corpus.attr(name);
+        for (auto m : modes) {
+            FoldIndex fi;
+            if (fi.open(pa.base_path(), m, pa.lexicon().size())) ++fold_ok;
+            else ++fold_missing;
+        }
+    }
+    out << ", \"fold_indexes\": {\"ok\": " << fold_ok << ", \"missing\": " << fold_missing << "}";
     return out.str();
 }
 

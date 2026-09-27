@@ -5,6 +5,7 @@
 
 #include "api/query_json.h"
 #include "api/query_jobs.h"
+#include "core/build_info.h"
 #include "core/json_utils.h"
 #include "corpus/corpus.h"
 #include <httplib.h>
@@ -16,6 +17,8 @@
 #include <algorithm>
 #include <chrono>
 #include <optional>
+#include <cstdio>
+#include <ctime>
 
 using namespace pando;
 
@@ -30,6 +33,10 @@ static unsigned default_thread_pool_size() {
 }
 
 int main(int argc, char* argv[]) {
+    if (argc == 2 && (std::string(argv[1]) == "--version" || std::string(argv[1]) == "-V")) {
+        std::cout << "pando-server " << build_string() << "\n";
+        return 0;
+    }
     if (argc < 2) {
         std::cerr << "Usage: pando-server <corpus_dir> [port] [threads] [--preload] [options]\n";
         std::cerr << "  Default port: 8765, threads: " << default_thread_pool_size() << "\n";
@@ -108,12 +115,52 @@ int main(int argc, char* argv[]) {
         return new httplib::ThreadPool(static_cast<size_t>(nthreads));
     };
 
-    svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
-        res.set_content("{\"ok\":true,\"status\":\"ok\"}\n", "application/json");
+    // What this binary can do; clients check this instead of probing for errors.
+    static const char* const kFeatures[] = {
+        "query", "run", "context", "values", "regions",
+        "async_total",      // /query "total": "async", /status, /cancel, /jobs (P6.2)
+        "result_cache",     // totals reused across requests for the same query
+        "limit0_total",     // "limit": 0 with a total = the total only
+        "bitmaps",          // <attr>.bm / <struct>.bnd.bm kernels when the index has them (P3)
+        "dep_pairs",        // dep.pair.* edge postings (P5.2)
+        "fold_index",       // %c / %d via <attr>.fold_*.perm (P1.6)
+        "sentence_context", // /query "sentence": true
+        "version",          // GET /version, version fields in /health and /info
+    };
+    std::string features_json = "[";
+    for (size_t i = 0; i < sizeof(kFeatures) / sizeof(kFeatures[0]); ++i)
+        features_json += std::string(i ? ", " : "") + "\"" + kFeatures[i] + "\"";
+    features_json += "]";
+    const auto started = std::chrono::system_clock::now();
+    const auto started_steady = std::chrono::steady_clock::now();
+    char started_iso[32];
+    {
+        const std::time_t t = std::chrono::system_clock::to_time_t(started);
+        std::strftime(started_iso, sizeof started_iso, "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&t));
+    }
+    auto server_fields = [&, features_json]() {
+        const double up = std::chrono::duration<double>(std::chrono::steady_clock::now() - started_steady).count();
+        char ups[32];
+        std::snprintf(ups, sizeof ups, "%.0f", up);
+        return build_json_fields() + ", \"build_string\": " + jstr(build_string())
+            + ", \"features\": " + features_json + ", \"started\": \"" + started_iso + "\""
+            + ", \"uptime_s\": " + ups + ", \"corpus\": " + jstr(corpus.dir())
+            + ", \"threads\": " + std::to_string(nthreads)
+            + ", \"total_workers\": " + std::to_string(job_cfg.workers);
+    };
+
+    svr.Get("/health", [&](const httplib::Request&, httplib::Response& res) {
+        res.set_content("{\"ok\":true,\"status\":\"ok\", " + server_fields() + "}\n", "application/json");
     });
 
-    svr.Get("/info", [&corpus](const httplib::Request&, httplib::Response& res) {
-        res.set_content(to_info_json(corpus), "application/json");
+    // GET /version — the pando build answering (and what it supports).
+    svr.Get("/version", [&](const httplib::Request&, httplib::Response& res) {
+        res.set_content("{\"ok\":true, " + server_fields() + "}\n", "application/json");
+    });
+
+    svr.Get("/info", [&](const httplib::Request&, httplib::Response& res) {
+        res.set_content(to_info_json(corpus, "info", "\"server\": {" + server_fields() + "}"),
+                        "application/json");
     });
 
     // GET /values/:attr — unique values + counts for a positional or region attribute
@@ -376,7 +423,7 @@ int main(int argc, char* argv[]) {
         res.set_content(out, "application/json");
     });
 
-    std::cerr << "Pando server: corpus " << corpus_dir << ", port " << port
+    std::cerr << "Pando server " << build_string() << ": corpus " << corpus_dir << ", port " << port
               << ", threads " << nthreads
               << (preload ? ", preload=on" : ", preload=off (lazy mmap)")
               << ", background totals: " << job_cfg.workers << " workers\n";

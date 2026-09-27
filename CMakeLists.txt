@@ -85,7 +85,20 @@ else()
 endif()
 target_include_directories(pando_pmltq_dialect PUBLIC src)
 
+# Build identity (git describe) for --version, /health, /info: regenerated on
+# every build, rewritten only when it changes.
+set(PANDO_BUILD_INFO_CPP "${CMAKE_CURRENT_BINARY_DIR}/pando_build_info.cpp")
+set(PANDO_BUILD_INFO_ARGS -DSRC=${CMAKE_CURRENT_SOURCE_DIR} -DOUT=${PANDO_BUILD_INFO_CPP}
+    -DVERSION=${PROJECT_VERSION} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/build_info.cmake)
+execute_process(COMMAND ${CMAKE_COMMAND} ${PANDO_BUILD_INFO_ARGS})
+add_custom_target(pando_build_info
+    COMMAND ${CMAKE_COMMAND} ${PANDO_BUILD_INFO_ARGS}
+    BYPRODUCTS ${PANDO_BUILD_INFO_CPP}
+    COMMENT "pando build identity")
+
 add_library(pando_core STATIC
+    ${PANDO_BUILD_INFO_CPP}
+    src/core/build_info.cpp
     src/core/mmap_file.cpp
     src/core/count_hierarchy_json.cpp
     src/index/lexicon.cpp
@@ -109,6 +122,7 @@ add_library(pando_core STATIC
     src/api/index_api.cpp
 )
 target_include_directories(pando_core PUBLIC src)
+add_dependencies(pando_core pando_build_info)
 target_link_libraries(pando_core PUBLIC pando_cwb_dialect pando_pmltq_dialect)
 
 if(PANDO_USE_RE2)
