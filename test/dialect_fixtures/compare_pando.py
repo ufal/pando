@@ -64,6 +64,9 @@ def main():
     ap.add_argument("--expected", help="reference .jsonl from run_cqp.py / run_manatee.py")
     ap.add_argument("--engine", choices=("cqp", "manatee"), help="query column when there is no --expected")
     ap.add_argument("--dialect", help="pando --cql front-end (default: cwb for cqp, manatee for manatee)")
+    ap.add_argument("--pando-column", choices=("cqp", "manatee"),
+                    help="run pando on this column's query text instead of the reference engine's "
+                         "(e.g. the CQP spelling `within s` with --dialect native against a Manatee reference)")
     ap.add_argument("--queries", default=os.path.join(here, "queries.tsv"))
     ap.add_argument("--out", help="also write pando's records here")
     ap.add_argument("--max-dump", type=int, default=5_000_000,
@@ -83,7 +86,11 @@ def main():
     recs, bad = [], 0
     print(f"# pando --cql {dialect} vs {engine}" + (f" ({opts.expected})" if opts.expected else ""))
     print(f"{'id':5} {'ref total':>10} {'pando':>10} {'pairs':6} {'path':14} query")
+    alt = {}
+    if opts.pando_column and opts.pando_column != engine:
+        alt = {i: x for i, x, _ in fixtures.load_queries(opts.queries, opts.pando_column)}
     for qid, q, _note in fixtures.load_queries(opts.queries, engine):
+        q = alt.get(qid, q)
         if opts.filter and not qid.startswith(opts.filter):
             continue
         try:

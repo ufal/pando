@@ -50,7 +50,7 @@ async function runFixtures(corpname, queries, opts = {}) {
         rec = { id, query: q, engine: "manatee", total: r.total, unique: null, sha256: null,
                 head: null, window: null, error: null };
       } else {
-        const key = p => p[0] * 4294967296 + p[1];
+        const key = p => p[0] + "," + p[1];   // string key: m * 2^32 + e overflows 2^53
         const uniq = Array.from(new Map(r.pairs.map(p => [key(p), p])).values())
                           .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
         rec = { id, query: q, engine: "manatee", total: r.total, unique: uniq.length,

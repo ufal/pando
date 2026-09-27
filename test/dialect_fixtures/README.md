@@ -95,3 +95,16 @@ KonText site (`runFixtures("ud_ewt_manatee", QUERIES)`). KonText cuts the KWIC
 of hits longer than 50 tokens (`kwic_cap` in the file's meta line), so the
 comparison caps pando's match ends the same way. `ud_ewt_manatee` has no `s`
 or `text` structures: those fixtures are recorded as Manatee errors.
+
+## Manatee on the full corpus (`expected/manatee-ud.jsonl`)
+
+KonText's `ud_manatee` is ud_demo compiled in Manatee (same 38 181 322
+positions as the pando index behind `ud_pando`). Hit sets are recorded for
+queries with at most 500 000 hits, totals for the rest; `first_ms` is the
+KonText request time. Compare with pando's native syntax for the structure
+queries (the CQP column spells `within s`, `:: match.text_langcode=…`):
+
+```sh
+test/dialect_fixtures/compare_pando.py --pando build/pando --corpus path/to/ud_demo \
+    --expected test/dialect_fixtures/expected/manatee-ud.jsonl --dialect native --pando-column cqp
+```
