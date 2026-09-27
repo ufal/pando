@@ -386,6 +386,7 @@ void GroupIndex::load(const std::string& path) {
 }
 
 const GroupIndex& Corpus::group_index(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(*group_mu_);
     auto it = group_indexes_.find(name);
     if (it != group_indexes_.end()) return *it->second;
     auto gi = std::make_unique<GroupIndex>();

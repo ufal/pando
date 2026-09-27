@@ -3,8 +3,7 @@
 // Uses a thread pool so multiple requests are handled in parallel; exact
 // totals can be computed in the background ("total": "async", P6.2).
 
-#include "api/query_json.h"
-#include "api/query_jobs.h"
+#include "api/server_api.h"
 #include "core/build_info.h"
 #include "core/json_utils.h"
 #include "corpus/corpus.h"
@@ -16,16 +15,12 @@
 #include <thread>
 #include <algorithm>
 #include <chrono>
+#include <map>
 #include <optional>
 #include <cstdio>
 #include <ctime>
 
 using namespace pando;
-
-// `"job_id": "<id>", "job": {...}` inside a /query result.
-static std::string job_fields(const QueryJobStatus& st) {
-    return "\"job_id\": " + jstr(st.id) + ",\n    \"job\": " + job_status_json(st);
-}
 
 static unsigned default_thread_pool_size() {
     unsigned n = std::thread::hardware_concurrency();
@@ -46,7 +41,8 @@ int main(int argc, char* argv[]) {
                   << "    --result-cache N        cached query results (default 512)\n"
                   << "    --result-ttl SEC        drop an unused finished result after SEC (default 3600)\n"
                   << "    --abandon-after SEC     cancel a count nobody polled for SEC (default 120; 0 = never)\n"
-                  << "    --debug-total-delay MS  testing: reveal every total gradually over MS\n";
+                  << "    --debug-total-delay MS  testing: reveal every total gradually over MS\n"
+                  << "  --query-timeout MS          default /query time limit (0 = none; per request \"timeout_ms\")\n";
         return 1;
     }
     std::string corpus_dir = argv[1];
@@ -55,6 +51,7 @@ int main(int argc, char* argv[]) {
     bool preload = false;
     int positional = 0;
     QueryJobConfig job_cfg;
+    size_t query_timeout_ms = 0;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
         auto num_arg = [&](long long& out) -> bool {
@@ -67,12 +64,13 @@ int main(int argc, char* argv[]) {
         };
         long long v = 0;
         if (a == "--total-workers" || a == "--result-cache" || a == "--result-ttl"
-            || a == "--abandon-after" || a == "--debug-total-delay") {
+            || a == "--abandon-after" || a == "--debug-total-delay" || a == "--query-timeout") {
             if (!num_arg(v) || v < 0) return 1;
             if (a == "--total-workers") job_cfg.workers = static_cast<unsigned>(std::max(1LL, v));
             else if (a == "--result-cache") job_cfg.max_entries = static_cast<size_t>(std::max(1LL, v));
             else if (a == "--result-ttl") job_cfg.ttl = std::chrono::seconds(v);
             else if (a == "--abandon-after") job_cfg.abandon = std::chrono::seconds(v);
+            else if (a == "--query-timeout") query_timeout_ms = static_cast<size_t>(v);
             else job_cfg.debug_delay = std::chrono::milliseconds(v);
             continue;
         }
@@ -108,325 +106,35 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    QueryJobManager jobs(corpus, job_cfg);
+    ServerConfig cfg;
+    cfg.jobs = job_cfg;
+    cfg.threads = nthreads;
+    cfg.preload = preload;
+    cfg.query_timeout_ms = query_timeout_ms;
+    ServerApi api(corpus, cfg);
 
     httplib::Server svr;
     svr.new_task_queue = [nthreads]() {
         return new httplib::ThreadPool(static_cast<size_t>(nthreads));
     };
-
-    // What this binary can do; clients check this instead of probing for errors.
-    static const char* const kFeatures[] = {
-        "query", "run", "context", "values", "regions",
-        "async_total",      // /query "total": "async", /status, /cancel, /jobs (P6.2)
-        "result_cache",     // totals reused across requests for the same query
-        "limit0_total",     // "limit": 0 with a total = the total only
-        "bitmaps",          // <attr>.bm / <struct>.bnd.bm kernels when the index has them (P3)
-        "dep_pairs",        // dep.pair.* edge postings (P5.2)
-        "fold_index",       // %c / %d via <attr>.fold_*.perm (P1.6)
-        "sentence_context", // /query "sentence": true
-        "version",          // GET /version, version fields in /health and /info
+    // Every route lives in ServerApi (src/api/server_api.cpp), shared with the C ABI
+    // (server_capi.h) used by embedders: this is only the HTTP transport.
+    auto handler = [&api](const httplib::Request& req, httplib::Response& res) {
+        std::map<std::string, std::string> params;
+        for (const auto& [k, v] : req.params) params.emplace(k, v);   // first value wins
+        ServerResponse r = api.handle(req.method, req.path, params, req.body);
+        res.status = r.status;
+        res.set_content(r.body, r.content_type);
     };
-    std::string features_json = "[";
-    for (size_t i = 0; i < sizeof(kFeatures) / sizeof(kFeatures[0]); ++i)
-        features_json += std::string(i ? ", " : "") + "\"" + kFeatures[i] + "\"";
-    features_json += "]";
-    const auto started = std::chrono::system_clock::now();
-    const auto started_steady = std::chrono::steady_clock::now();
-    char started_iso[32];
-    {
-        const std::time_t t = std::chrono::system_clock::to_time_t(started);
-        std::strftime(started_iso, sizeof started_iso, "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&t));
-    }
-    auto server_fields = [&, features_json]() {
-        const double up = std::chrono::duration<double>(std::chrono::steady_clock::now() - started_steady).count();
-        char ups[32];
-        std::snprintf(ups, sizeof ups, "%.0f", up);
-        return build_json_fields() + ", \"build_string\": " + jstr(build_string())
-            + ", \"features\": " + features_json + ", \"started\": \"" + started_iso + "\""
-            + ", \"uptime_s\": " + ups + ", \"corpus\": " + jstr(corpus.dir())
-            + ", \"threads\": " + std::to_string(nthreads)
-            + ", \"total_workers\": " + std::to_string(job_cfg.workers);
-    };
-
-    svr.Get("/health", [&](const httplib::Request&, httplib::Response& res) {
-        res.set_content("{\"ok\":true,\"status\":\"ok\", " + server_fields() + "}\n", "application/json");
-    });
-
-    // GET /version — the pando build answering (and what it supports).
-    svr.Get("/version", [&](const httplib::Request&, httplib::Response& res) {
-        res.set_content("{\"ok\":true, " + server_fields() + "}\n", "application/json");
-    });
-
-    svr.Get("/info", [&](const httplib::Request&, httplib::Response& res) {
-        res.set_content(to_info_json(corpus, "info", "\"server\": {" + server_fields() + "}"),
-                        "application/json");
-    });
-
-    // GET /values/:attr — unique values + counts for a positional or region attribute
-    svr.Get(R"(/values/(\w+))", [&corpus](const httplib::Request& req, httplib::Response& res) {
-        std::string attr_name = req.matches[1];
-        size_t limit = 0;
-        if (req.has_param("limit"))
-            limit = static_cast<size_t>(std::strtoull(req.get_param_value("limit").c_str(), nullptr, 10));
-        std::string json = to_values_json(corpus, attr_name, limit);
-        if (json.empty()) {
-            res.status = 404;
-            res.set_content("{\"ok\":false,\"error\":\"Unknown attribute: " + attr_name + "\"}\n",
-                            "application/json");
-        } else {
-            res.set_content(json, "application/json");
-        }
-    });
-
-    // GET /regions/:type — list all regions of a given type with their attributes
-    svr.Get(R"(/regions/(\w+))", [&corpus](const httplib::Request& req, httplib::Response& res) {
-        std::string type_name = req.matches[1];
-        size_t limit = 0;
-        if (req.has_param("limit"))
-            limit = static_cast<size_t>(std::strtoull(req.get_param_value("limit").c_str(), nullptr, 10));
-        std::string json = to_regions_json(corpus, type_name, limit);
-        if (json.empty()) {
-            res.status = 404;
-            res.set_content("{\"ok\":false,\"error\":\"Unknown structure type: " + type_name + "\"}\n",
-                            "application/json");
-        } else {
-            res.set_content(json, "application/json");
-        }
-    });
-
-    // GET /context?pos=&left=&right=&sentence= — KWIC window around one position
-    // (KonText widectx; Manatee CorpRegion cannot address Pando toknums).
-    svr.Get("/context", [&corpus](const httplib::Request& req, httplib::Response& res) {
-        if (!req.has_param("pos")) {
-            res.status = 400;
-            res.set_content("{\"ok\":false,\"error\":\"missing 'pos'\"}\n", "application/json");
-            return;
-        }
-        CorpusPos pos = static_cast<CorpusPos>(
-            std::strtoull(req.get_param_value("pos").c_str(), nullptr, 10));
-        if (pos >= corpus.size()) {
-            res.status = 400;
-            res.set_content("{\"ok\":false,\"error\":\"pos out of range\"}\n", "application/json");
-            return;
-        }
-        int left = 40;
-        int right = 40;
-        if (req.has_param("left"))
-            left = static_cast<int>(std::strtol(req.get_param_value("left").c_str(), nullptr, 10));
-        if (req.has_param("right"))
-            right = static_cast<int>(std::strtol(req.get_param_value("right").c_str(), nullptr, 10));
-        bool sentence = false;
-        if (req.has_param("sentence")) {
-            std::string s = req.get_param_value("sentence");
-            sentence = (s == "1" || s == "true" || s == "yes");
-        }
-        if (left < 0) left = 0;
-        if (right < 0) right = 0;
-        KwicContext ctx = build_context_at(corpus, pos, left, right, sentence);
-        std::string_view doc = lookup_doc_id(corpus, pos);
-        std::ostringstream out;
-        out << "{\"ok\":true,\"pos\":" << pos
-            << ",\"left\":" << jstr(ctx.left)
-            << ",\"match\":" << jstr(ctx.match)
-            << ",\"right\":" << jstr(ctx.right)
-            << ",\"doc_id\":" << jstr(doc)
-            << ",\"corpus_size\":" << corpus.size() << "}\n";
-        res.set_content(out.str(), "application/json");
-    });
-
-    // POST /run — run a full CQL program (queries + commands), session-aware
-    // Body: {"cql": "...", "limit": 20, "offset": 0, ...}
-    // Maintains per-server session for named queries.
-    ProgramSession program_session;
-    svr.Post("/run", [&corpus, &program_session](const httplib::Request& req, httplib::Response& res) {
-        const std::string& body = req.body;
-
-        std::string cql = json_extract_str(body, "cql");
-        if (cql.empty()) cql = json_extract_str(body, "query");
-        if (cql.empty()) {
-            res.status = 400;
-            res.set_content("{\"ok\":false,\"error\":\"missing 'cql' field\"}\n", "application/json");
-            return;
-        }
-
-        ProgramOptions opts;
-        opts.limit      = json_extract_num(body, "limit", 20);
-        opts.offset     = json_extract_num(body, "offset", 0);
-        opts.max_total  = json_extract_num(body, "max_total", 0);
-        opts.context    = static_cast<int>(json_extract_num(body, "context", 5));
-        opts.total      = json_extract_bool(body, "total", false);
-        opts.group_limit = json_extract_num(body, "group_limit", 1000);
-        opts.strict_quoted_strings = json_extract_bool(body, "strict_quoted_strings", false);
-
-        std::string json = run_program_json(corpus, program_session, cql, opts);
-        res.set_content(json, "application/json");
-    });
-
-    // POST /query — body: query, limit, offset, total, max_total, context, sentence,
-    // attrs, debug, strict_quoted_strings.
-    //   "total": false    page only (page.total = hits on the page, total_exact false)
-    //   "total": true     page + exact total (reuses a cached total for the same query)
-    //   "total": "async"  page now; the exact total is counted in the background:
-    //                     result.job = {id, state, finished, total, counted, progress,
-    //                     estimate, …}; poll GET /status?job=<id>.
-    svr.Post("/query", [&corpus, &jobs](const httplib::Request& req, httplib::Response& res) {
-        // Whitespace-tolerant (Python json.dumps emits spaces after ':' / ',').
-        const std::string& body = req.body;
-        QueryOptions opts;
-
-        std::string q = json_extract_str(body, "query");
-        std::string query_text = q.empty() ? "[]" : q;
-        opts.limit     = json_extract_num(body, "limit", 20);
-        opts.offset    = json_extract_num(body, "offset", 0);
-        opts.max_total = json_extract_num(body, "max_total", 0);
-        const bool total_async = json_extract_str(body, "total") == "async";
-        opts.total     = total_async || json_extract_bool(body, "total", false);
-        opts.context   = static_cast<int>(json_extract_num(body, "context", 5));
-        opts.debug     = json_extract_bool(body, "debug", false);
-        opts.sentence  = json_extract_bool(body, "sentence", false);
-        opts.strict_quoted_strings = json_extract_bool(body, "strict_quoted_strings", false);
-        std::string attrs_str = json_extract_str(body, "attrs");
-        opts.attrs.clear();
-        if (!attrs_str.empty()) {
-            for (size_t pos = 0; ; ) {
-                size_t comma = attrs_str.find(',', pos);
-                std::string part = attrs_str.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
-                while (!part.empty() && part.front() == ' ') part.erase(0, 1);
-                while (!part.empty() && part.back() == ' ') part.erase(part.size() - 1, 1);
-                if (!part.empty()) opts.attrs.push_back(part);
-                if (comma == std::string::npos) break;
-                pos = comma + 1;
-            }
-        }
-
-        try {
-            std::string extra;
-            if (!opts.total) {
-                auto [ms, elapsed] = run_single_query(corpus, query_text, opts);
-                res.set_content(to_query_result_json(corpus, query_text, ms, opts, elapsed),
-                                "application/json");
-                return;
-            }
-            // limit 0 with a total: the total only (no page; limit 0 would otherwise
-            // mean "all hits" and materialise every match).
-            if (opts.limit == 0) {
-                MatchSet ms;
-                QueryJobStatus st;
-                std::optional<QueryJobStatus> have = jobs.lookup(query_text, opts);
-                if (have && have->finished()) {
-                    st = *have;
-                } else if (total_async) {
-                    st = jobs.ensure(query_text, opts);
-                } else {
-                    QueryOptions count_opts = opts;
-                    count_opts.limit = 1;
-                    count_opts.offset = 0;
-                    auto [cms, cel] = run_single_query(corpus, query_text, count_opts);
-                    (void)cel;
-                    st = jobs.record_finished(query_text, opts, cms.total_count, cms.total_exact);
-                }
-                ms.total_count = st.finished() ? st.total : st.counted;
-                ms.total_exact = st.finished() && st.total_exact;
-                res.set_content(to_query_result_json(corpus, query_text, ms, opts, 0.0, job_fields(st)),
-                                "application/json");
-                return;
-            }
-            // A cached total (finished job) → only the page is computed.
-            std::optional<QueryJobStatus> known = jobs.lookup(query_text, opts);
-            if (known && !known->finished()) {
-                if (total_async) {
-                    known = jobs.ensure(query_text, opts);    // restarts a cancelled / failed one
-                } else {
-                    known.reset();                            // synchronous: count here
-                }
-            }
-            if (known && known->finished()) {
-                QueryOptions page_opts = opts;
-                page_opts.total = false;
-                auto [ms, elapsed] = run_single_query(corpus, query_text, page_opts);
-                ms.total_count = known->total;
-                ms.total_exact = known->total_exact;
-                extra = job_fields(*known);
-                res.set_content(to_query_result_json(corpus, query_text, ms, opts, elapsed, extra),
-                                "application/json");
-                return;
-            }
-            if (!total_async) {
-                auto [ms, elapsed] = run_single_query(corpus, query_text, opts);
-                QueryJobStatus st = jobs.record_finished(query_text, opts, ms.total_count, ms.total_exact);
-                extra = job_fields(st);
-                res.set_content(to_query_result_json(corpus, query_text, ms, opts, elapsed, extra),
-                                "application/json");
-                return;
-            }
-            // async: the page first; when it already held every hit the total is exact
-            QueryOptions page_opts = opts;
-            page_opts.total = false;
-            auto [ms, elapsed] = run_single_query(corpus, query_text, page_opts);
-            QueryJobStatus st;
-            if (ms.total_exact) {
-                st = jobs.record_finished(query_text, opts, ms.total_count, true);
-            } else {
-                st = known ? *known : jobs.ensure(query_text, opts);
-                if (st.finished()) {
-                    ms.total_count = st.total;
-                    ms.total_exact = st.total_exact;
-                } else {
-                    ms.total_count = std::max(ms.total_count, st.counted);
-                    ms.total_exact = false;
-                }
-            }
-            extra = job_fields(st);
-            res.set_content(to_query_result_json(corpus, query_text, ms, opts, elapsed, extra),
-                            "application/json");
-        } catch (const std::exception& e) {
-            res.status = 400;
-            res.set_content("{\"ok\":false,\"error\":\"" + json_escape(e.what()) + "\"}\n",
-                            "application/json");
-        }
-    });
-
-    // GET /status?job=<id> — background total: state, count so far, progress, estimate.
-    svr.Get("/status", [&jobs](const httplib::Request& req, httplib::Response& res) {
-        const std::string id = req.has_param("job") ? req.get_param_value("job") : std::string();
-        auto st = jobs.status(id);
-        if (!st) {
-            res.status = 404;
-            res.set_content("{\"ok\":false,\"error\":\"unknown job (expired or never started): "
-                            + json_escape(id) + "\"}\n", "application/json");
-            return;
-        }
-        // `result` (same envelope as /query) and `job` carry the same object
-        const std::string js = job_status_json(*st);
-        res.set_content("{\"ok\":true,\"result\":" + js + ",\"job\":" + js + "}\n", "application/json");
-    });
-
-    // POST /cancel?job=<id> (or body {"job": "<id>"}) — stop a queued / running count.
-    svr.Post("/cancel", [&jobs](const httplib::Request& req, httplib::Response& res) {
-        std::string id = req.has_param("job") ? req.get_param_value("job") : json_extract_str(req.body, "job");
-        const bool ok = jobs.cancel(id);
-        res.set_content(std::string("{\"ok\":true,\"job\":") + jstr(id) + ",\"cancelled\":"
-                        + (ok ? "true" : "false") + "}\n", "application/json");
-    });
-
-    // GET /jobs — all cached results and running counts (debugging / monitoring).
-    svr.Get("/jobs", [&jobs](const httplib::Request&, httplib::Response& res) {
-        std::string out = "{\"ok\":true,\"jobs\":[";
-        bool first = true;
-        for (const auto& st : jobs.list()) {
-            if (!first) out += ",";
-            first = false;
-            out += "\n  {\"query\": " + jstr(st.query) + ", \"job\": " + job_status_json(st) + "}";
-        }
-        out += "\n]}\n";
-        res.set_content(out, "application/json");
-    });
+    svr.Get(".*", handler);
+    svr.Post(".*", handler);
 
     std::cerr << "Pando server " << build_string() << ": corpus " << corpus_dir << ", port " << port
               << ", threads " << nthreads
               << (preload ? ", preload=on" : ", preload=off (lazy mmap)")
-              << ", background totals: " << job_cfg.workers << " workers\n";
+              << ", background totals: " << job_cfg.workers << " workers"
+              << (query_timeout_ms ? ", query timeout " + std::to_string(query_timeout_ms) + " ms" : std::string())
+              << "\n";
     if (!svr.listen("0.0.0.0", static_cast<int>(port))) {
         std::cerr << "Failed to listen on port " << port << "\n";
         return 1;

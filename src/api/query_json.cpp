@@ -101,6 +101,13 @@ size_t region_attr_vocab(const Corpus& corpus,
 std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
                                             const std::string& query_text,
                                             const QueryOptions& opts) {
+    return run_single_query(corpus, query_text, opts, nullptr);
+}
+
+std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
+                                            const std::string& query_text,
+                                            const QueryOptions& opts,
+                                            ExecProgress* progress) {
     Parser parser(query_text, ParserOptions{opts.strict_quoted_strings});
     Program prog = parser.parse();
     if (prog.empty() || !prog[0].has_query)
@@ -108,6 +115,7 @@ std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
 
     QueryExecutor executor(corpus);
     executor.set_include_empty_alignment_values(opts.allow_empty_alignment);
+    if (progress) executor.set_progress(progress);
     size_t max_m = opts.offset + opts.limit;
     bool count_t = opts.total;
     size_t max_total_cap = (opts.total && opts.max_total > 0) ? opts.max_total : 0;

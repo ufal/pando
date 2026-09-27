@@ -43,6 +43,7 @@ Use `pando --help` for the current option list. Important query options include 
 - [CLI reference](CLI-Reference.md)
 - [Contributing](Contributing.md)
 - [TEITOK integration](TEITOK-Integration.md) — project layout, `tuid`, flexicorp pipeline
+- [Embedding the server](Embedding-the-Server.md) — the pando-server API in-process (C ABI for FQS, FFI hosts)
 
 ## Releases and scope
 

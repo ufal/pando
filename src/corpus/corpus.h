@@ -1,5 +1,7 @@
 #pragma once
 
+#include <mutex>
+
 #include "core/types.h"
 #include "index/positional_attr.h"
 #include "index/structural_attr.h"
@@ -124,7 +126,10 @@ private:
     std::unordered_map<std::string, std::unique_ptr<StructuralAttr>> structs_;
     DependencyIndex deps_;
     bool has_deps_ = false;
+    // loaded on first use; queries run concurrently on one Corpus (pando-server,
+    // ServerApi), so the map is guarded (entries are never removed: references stay valid)
     mutable std::unordered_map<std::string, std::unique_ptr<GroupIndex>> group_indexes_;
+    mutable std::unique_ptr<std::mutex> group_mu_ = std::make_unique<std::mutex>();
     /// Merged overlay token-group name → path to `groups/<orig>.jsonl` in overlay dir.
     std::unordered_map<std::string, std::string> group_index_path_override_;
 };

@@ -1,4 +1,6 @@
 #include "index/dependency_index.h"
+
+#include <atomic>
 #include <stdexcept>
 #include <algorithm>
 #include <cstdio>
@@ -25,7 +27,7 @@ void DependencyIndex::open(const std::string& dir,
                 head_rel_file_ = std::move(rel);   // size mismatch → ignore stale file
         }
     }
-    cached_sentence_id_ = -1;  // invalidate cache on (re)open
+    cache_gen_ = next_cache_gen();  // invalidates every thread's cache entry for this index
 }
 
 CorpusPos DependencyIndex::head(CorpusPos pos) const {
@@ -97,78 +99,105 @@ bool DependencyIndex::write_head_rel_file(const std::string& dir, const Structur
 // consecutive calls land in the same sentence, so a single cached sentence
 // captures most of the reuse.  Cache miss cost = one O(sentence_length) scan,
 // same as the old per-call scan.
-Region DependencyIndex::ensure_children_cache(CorpusPos pos) const {
+namespace {
+uint64_t next_cache_gen_impl() {
+    static std::atomic<uint64_t> g{0};
+    return ++g;
+}
+}  // namespace
+
+uint64_t DependencyIndex::next_cache_gen() { return next_cache_gen_impl(); }
+
+void DependencyIndex::clear_children_cache() const {
+    tl_children_cache().sentence_id = -1;
+}
+
+DependencyIndex::ChildrenCache& DependencyIndex::tl_children_cache() {
+    thread_local ChildrenCache c;
+    return c;
+}
+
+const DependencyIndex::ChildrenCache& DependencyIndex::ensure_children_cache(CorpusPos pos) const {
+    ChildrenCache& c = tl_children_cache();
+    if (c.gen != cache_gen_) {
+        c.gen = cache_gen_;
+        c.sentence_id = -1;
+    }
     int64_t ri = sentences_->find_region(pos);
     if (ri < 0) {
-        // pos outside any sentence — return an invalid region, caller checks
-        cached_sentence_id_ = -1;
-        return {0, -1};
+        // pos outside any sentence — an invalid region, caller checks
+        c.sentence_id = -1;
+        c.sentence = {0, -1};
+        c.children.clear();
+        return c;
     }
-    if (ri == cached_sentence_id_)
-        return cached_sentence_;
+    if (ri == c.sentence_id) return c;
 
     Region sent = sentences_->get(static_cast<size_t>(ri));
     size_t sent_len = static_cast<size_t>(sent.end - sent.start + 1);
 
-    cached_children_map_.assign(sent_len, {});
+    c.children.assign(sent_len, {});
     const int16_t* heads = head_file_.as<int16_t>();
     for (size_t i = 0; i < sent_len; ++i) {
         int16_t h = heads[sent.start + static_cast<CorpusPos>(i)];
         if (h >= 0 && static_cast<size_t>(h) < sent_len)
-            cached_children_map_[static_cast<size_t>(h)].push_back(static_cast<int16_t>(i));
+            c.children[static_cast<size_t>(h)].push_back(static_cast<int16_t>(i));
     }
 
-    cached_sentence_id_ = ri;
-    cached_sentence_ = sent;
-    return sent;
+    c.sentence_id = ri;
+    c.sentence = sent;
+    return c;
 }
 
 std::vector<CorpusPos> DependencyIndex::children(CorpusPos pos) const {
-    Region sent = ensure_children_cache(pos);
+    const ChildrenCache& c = ensure_children_cache(pos);
+    const Region sent = c.sentence;
     if (sent.end < sent.start) return {};  // invalid sentence
 
     int16_t my_local = static_cast<int16_t>(pos - sent.start);
-    if (my_local < 0 || static_cast<size_t>(my_local) >= cached_children_map_.size())
+    if (my_local < 0 || static_cast<size_t>(my_local) >= c.children.size())
         return {};
 
-    const auto& ch = cached_children_map_[static_cast<size_t>(my_local)];
+    const auto& ch = c.children[static_cast<size_t>(my_local)];
     std::vector<CorpusPos> result;
     result.reserve(ch.size());
-    for (int16_t c : ch)
-        result.push_back(sent.start + static_cast<CorpusPos>(c));
+    for (int16_t k : ch)
+        result.push_back(sent.start + static_cast<CorpusPos>(k));
     return result;
 }
 
 size_t DependencyIndex::children_count(CorpusPos pos) const {
-    Region sent = ensure_children_cache(pos);
+    const ChildrenCache& c = ensure_children_cache(pos);
+    const Region sent = c.sentence;
     if (sent.end < sent.start) return 0;
 
     int16_t my_local = static_cast<int16_t>(pos - sent.start);
-    if (my_local < 0 || static_cast<size_t>(my_local) >= cached_children_map_.size())
+    if (my_local < 0 || static_cast<size_t>(my_local) >= c.children.size())
         return 0;
 
-    return cached_children_map_[static_cast<size_t>(my_local)].size();
+    return c.children[static_cast<size_t>(my_local)].size();
 }
 
 std::vector<CorpusPos> DependencyIndex::subtree(CorpusPos pos) const {
-    Region sent = ensure_children_cache(pos);
+    const ChildrenCache& c = ensure_children_cache(pos);
+    const Region sent = c.sentence;
     if (sent.end < sent.start) return {};
 
     int16_t my_local = static_cast<int16_t>(pos - sent.start);
-    if (my_local < 0 || static_cast<size_t>(my_local) >= cached_children_map_.size())
+    if (my_local < 0 || static_cast<size_t>(my_local) >= c.children.size())
         return {};
 
-    // DFS from my_local using cached children map
+    // DFS from my_local using the cached children map
     std::vector<CorpusPos> result;
-    const auto& root_ch = cached_children_map_[static_cast<size_t>(my_local)];
+    const auto& root_ch = c.children[static_cast<size_t>(my_local)];
     std::vector<int16_t> stack(root_ch.begin(), root_ch.end());
     while (!stack.empty()) {
         int16_t cur = stack.back();
         stack.pop_back();
         result.push_back(sent.start + static_cast<CorpusPos>(cur));
-        if (static_cast<size_t>(cur) < cached_children_map_.size()) {
-            for (int16_t c : cached_children_map_[static_cast<size_t>(cur)])
-                stack.push_back(c);
+        if (static_cast<size_t>(cur) < c.children.size()) {
+            for (int16_t k : c.children[static_cast<size_t>(cur)])
+                stack.push_back(k);
         }
     }
     return result;

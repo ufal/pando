@@ -30,6 +30,12 @@ struct QueryOptions {
 std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
                                             const std::string& query_text,
                                             const QueryOptions& opts);
+/// Same, with a progress / cancel block: the executor publishes its progress there
+/// and stops with QueryCancelled once `progress->cancel` is set (nullptr = none).
+std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
+                                            const std::string& query_text,
+                                            const QueryOptions& opts,
+                                            ExecProgress* progress);
 
 // Build JSON string for query result (same format as pando --json).
 // `extra_result_fields`: raw JSON members appended inside "result" (e.g. `"job": {...}`).

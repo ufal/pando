@@ -1,0 +1,122 @@
+#pragma once
+
+// The pando-server HTTP API without the HTTP: one corpus, its background-total
+// jobs and its /run session behind `ServerApi::handle(method, path, params, body)`.
+//
+// pando-server is a thin httplib shell around this; embedders (the flexicorp
+// adapter / FQS, other language bindings through the C ABI in server_capi.h)
+// call the same code, so every transport answers with the same JSON.
+//
+// Thread safety: handle() may be called from any number of threads at once.
+// Queries run concurrently on the shared Corpus; /run is serialised (the
+// named-query session is shared state).
+//
+// Lifetime: the Corpus must outlive the ServerApi. Destroying a ServerApi
+// cancels its background counts and joins their workers; it must not race with
+// a handle() still running (see busy()).
+
+#include "api/query_jobs.h"
+#include "api/query_json.h"
+#include "corpus/corpus.h"
+
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <string_view>
+#include <thread>
+
+namespace pando {
+
+struct ServerConfig {
+    QueryJobConfig jobs;              // background totals (P6.2)
+    unsigned threads = 0;             // reported in /health (the transport's request threads)
+    bool preload = false;             // reported: the corpus was opened with preload
+    /// Default per-request time limit for /query in ms (0 = none); a request can
+    /// set its own with "timeout_ms". An expired query answers 408.
+    size_t query_timeout_ms = 0;
+    /// Raw JSON members added to /health, /version and /info "server" (no braces,
+    /// no leading comma), e.g. `"embedded_in": "fqs 0.4"`.
+    std::string extra_server_fields;
+};
+
+struct ServerResponse {
+    int status = 200;
+    std::string body;                 // JSON, newline-terminated
+    std::string content_type = "application/json";
+};
+
+/// URL query string ("a=1&b=x%20y") → first value per key, percent-decoded, '+' = space.
+std::map<std::string, std::string> parse_query_string(std::string_view qs);
+
+class ServerApi {
+public:
+    ServerApi(Corpus& corpus, ServerConfig cfg = {});
+    ~ServerApi();
+    ServerApi(const ServerApi&) = delete;
+    ServerApi& operator=(const ServerApi&) = delete;
+
+    /// Dispatch one request. `method` "GET" / "POST"; `path` without the query
+    /// string; `params` the decoded query parameters; `body` the request body
+    /// (JSON for POST routes). Never throws: engine errors become 4xx / 5xx JSON.
+    ServerResponse handle(std::string_view method, std::string_view path,
+                          const std::map<std::string, std::string>& params, const std::string& body);
+
+    /// The routes and methods handle() knows, for transports that register routes.
+    struct Route { const char* method; const char* path; };   // path "/values/*": one \w+ segment
+    static const std::vector<Route>& routes();
+    /// What this build can do (the /version "features" list).
+    static const std::vector<std::string>& features();
+
+    /// Requests in flight + background counts queued or running. An embedder that
+    /// evicts idle corpora keeps a ServerApi while this is non-zero (or accepts
+    /// that destroying it cancels those counts).
+    size_t busy();
+    /// Seconds since the last handle() call started (for idle eviction).
+    double idle_seconds() const;
+
+    QueryJobManager& jobs() { return jobs_; }
+    const Corpus& corpus() const { return corpus_; }
+
+private:
+    ServerResponse health();
+    ServerResponse version();
+    ServerResponse info();
+    ServerResponse values(const std::string& attr, const std::map<std::string, std::string>& params);
+    ServerResponse regions(const std::string& type, const std::map<std::string, std::string>& params);
+    ServerResponse context(const std::map<std::string, std::string>& params);
+    ServerResponse run(const std::string& body);
+    ServerResponse query(const std::string& body);
+    ServerResponse status(const std::map<std::string, std::string>& params);
+    ServerResponse cancel(const std::map<std::string, std::string>& params, const std::string& body);
+    ServerResponse list_jobs();
+    std::string server_fields() const;
+
+    // per-request deadlines (query_timeout_ms / "timeout_ms"): one watchdog thread
+    struct Deadline;
+    void watchdog_loop();
+    void arm(Deadline& d);
+    void disarm(Deadline& d);
+
+    Corpus& corpus_;
+    ServerConfig cfg_;
+    QueryJobManager jobs_;
+    std::mutex program_mu_;
+    ProgramSession program_session_;
+    std::atomic<size_t> in_flight_{0};
+    std::atomic<int64_t> last_request_ns_;
+    std::chrono::system_clock::time_point started_;
+    std::chrono::steady_clock::time_point started_steady_;
+    std::string started_iso_;
+
+    std::mutex wd_mu_;
+    std::condition_variable wd_cv_;
+    std::multimap<std::chrono::steady_clock::time_point, Deadline*> deadlines_;
+    bool wd_stop_ = false;
+    std::thread watchdog_;
+};
+
+} // namespace pando

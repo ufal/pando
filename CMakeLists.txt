@@ -96,6 +96,17 @@ add_custom_target(pando_build_info
     BYPRODUCTS ${PANDO_BUILD_INFO_CPP}
     COMMENT "pando build identity")
 
+# Shared library: libpando.so / libpando.dylib (#43)
+# Packages pando_core + pando_api + C FFI wrappers (pando_ffi.h, server_capi.h) for
+# external consumers. Enable with: cmake -DPANDO_BUILD_SHARED=ON ..
+# The static libraries it bundles must then be position independent (thread-local
+# storage in them cannot be linked into a shared object otherwise); embedders that
+# add this tree with add_subdirectory (flexicorp_pando) set the same themselves.
+option(PANDO_BUILD_SHARED "Build libpando shared library" OFF)
+if(PANDO_BUILD_SHARED)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
+
 add_library(pando_core STATIC
     ${PANDO_BUILD_INFO_CPP}
     src/core/build_info.cpp
@@ -147,15 +158,12 @@ add_executable(cwb-import src/cli/cwb_import_main.cpp)
 target_link_libraries(cwb-import PRIVATE pando_core)
 
 # API layer: query execution + JSON (used by CLI and server)
-add_library(pando_api STATIC src/api/query_json.cpp src/api/program_api.cpp src/api/query_jobs.cpp src/api/group_counts.cpp)
+add_library(pando_api STATIC src/api/query_json.cpp src/api/program_api.cpp src/api/query_jobs.cpp src/api/group_counts.cpp
+    src/api/server_api.cpp src/api/server_capi.cpp)
 target_include_directories(pando_api PUBLIC src)
 find_package(Threads REQUIRED)
 target_link_libraries(pando_api PUBLIC pando_core Threads::Threads)
 
-# Shared library: libpando.so / libpando.dylib (#43)
-# Packages pando_core + pando_api + C FFI wrapper for external consumers.
-# Enable with: cmake -DPANDO_BUILD_SHARED=ON ..
-option(PANDO_BUILD_SHARED "Build libpando shared library" OFF)
 
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/pando_version.h.in"
@@ -229,6 +237,10 @@ if(BUILD_TESTING)
     add_executable(group_counts_test src/api/group_counts_test.cpp)
     target_link_libraries(group_counts_test PRIVATE pando_api)
     add_test(NAME group_counts COMMAND group_counts_test)
+    add_executable(server_api_test src/api/server_api_test.cpp)
+    target_link_libraries(server_api_test PRIVATE pando_api)
+    add_test(NAME server_api COMMAND server_api_test $<TARGET_FILE:pando-index>
+             ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu)
 
     # Differential test: fast paths (S1 merge, dep bitset, seq probe) must return exactly
     # the same matches and totals as the generic executor (PANDO_FASTPATH=on|nomerge|off).
@@ -258,7 +270,7 @@ install(TARGETS pando_pmltq_dialect
     COMPONENT pmltq_dialect)
 
 if(PANDO_BUILD_SHARED)
-    add_library(libpando SHARED src/api/pando_ffi.cpp)
+    add_library(libpando SHARED src/api/pando_ffi.cpp src/api/server_capi.cpp)
     set_target_properties(libpando PROPERTIES
         OUTPUT_NAME "pando"           # produces libpando.so / libpando.dylib
         VERSION ${PROJECT_VERSION}
@@ -271,7 +283,7 @@ if(PANDO_BUILD_SHARED)
     target_link_libraries(libpando PRIVATE pando_api)
     target_compile_definitions(libpando PRIVATE PANDO_BUILDING_SHARED)
     install(TARGETS libpando LIBRARY DESTINATION lib)
-    install(FILES src/api/pando_ffi.h DESTINATION include)
+    install(FILES src/api/pando_ffi.h src/api/server_capi.h DESTINATION include)
 endif()
 
 # HTTP API server (optional: requires FetchContent to get cpp-httplib)

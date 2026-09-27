@@ -75,8 +75,9 @@ public:
     // O(1) ancestor check: same-sentence guard + int16 Euler range test.
     bool is_ancestor(CorpusPos ancestor, CorpusPos descendant) const;
 
-    // Invalidate the children cache (e.g. between query executions).
-    void clear_children_cache() const { cached_sentence_id_ = -1; }
+    // Invalidate the children cache (e.g. between query executions). The cache
+    // is per thread; this clears the calling thread's entry.
+    void clear_children_cache() const;
 
 private:
     const StructuralAttr* sentences_ = nullptr;
@@ -85,18 +86,25 @@ private:
     MmapFile euler_in_file_;   // int16[corpus_size]
     MmapFile euler_out_file_;  // int16[corpus_size]
 
-    // EX-2p: Sentence-local children cache.
-    // Mutable because children() is logically const but populates the cache.
-    // Single-entry cache: stores the children map for the most recently
-    // queried sentence.  In typical usage (iterating seeds within a sentence),
-    // this turns N × O(sent_len) scans into 1 × O(sent_len) + N × O(children).
-    mutable int64_t cached_sentence_id_ = -1;
-    mutable Region  cached_sentence_;
-    mutable std::vector<std::vector<int16_t>> cached_children_map_;  // [local_idx] → children local indices
+    // EX-2p: Sentence-local children cache. Single entry (the most recently
+    // queried sentence): iterating seeds within a sentence turns N × O(sent_len)
+    // scans into 1 × O(sent_len) + N × O(children). The index is shared by every
+    // query on the corpus (pando-server / ServerApi run queries concurrently), so
+    // the entry lives in thread-local storage, keyed by this index's generation
+    // (unique per open(), so a reopened or reused object never sees stale data).
+    struct ChildrenCache {
+        uint64_t gen = 0;
+        int64_t sentence_id = -1;
+        Region sentence{0, -1};
+        std::vector<std::vector<int16_t>> children;   // [local_idx] → children local indices
+    };
+    static uint64_t next_cache_gen();
+    static ChildrenCache& tl_children_cache();
+    uint64_t cache_gen_ = next_cache_gen();
 
-    // Build (or reuse) the children map for the sentence containing pos.
-    // Returns the sentence region and sets cached_children_map_.
-    Region ensure_children_cache(CorpusPos pos) const;
+    // Build (or reuse) the calling thread's children map for the sentence
+    // containing pos; `sent` = the sentence ({0, -1} when pos is in none).
+    const ChildrenCache& ensure_children_cache(CorpusPos pos) const;
 };
 
 } // namespace pando
