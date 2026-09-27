@@ -21,8 +21,6 @@ import hashlib
 import json
 import os
 
-import numpy as np
-
 WINDOW = 100_000
 HEAD = 50
 MAX_PAIRS = 30_000_000
@@ -49,22 +47,22 @@ def load_queries(path, engine):
 
 def record(qid, query, engine, starts, ends, total=None, window=WINDOW, seconds=None, extra=None):
     """Build a result record from match / matchend arrays (inclusive)."""
-    m = np.asarray(starts, dtype=np.int64)
-    e = np.asarray(ends, dtype=np.int64)
+    # plain Python (no numpy needed): run_cqp.py / compare_pando.py run anywhere
+    m = [int(x) for x in starts]
+    e = [int(x) for x in ends]
     rec = {"id": qid, "query": query, "engine": engine,
            "total": int(total if total is not None else len(m)), "error": None}
     if len(m) > MAX_PAIRS:
         rec.update(unique=None, sha256=None, head=None, window=None)
     else:
-        pairs = np.unique(np.stack([m, e], axis=1), axis=0) if len(m) else np.zeros((0, 2), np.int64)
+        pairs = sorted(set(zip(m, e)))
         h = hashlib.sha256()
         for c in range(0, len(pairs), 1 << 20):
-            blk = pairs[c:c + (1 << 20)]
-            h.update("".join(f"{a} {b}\n" for a, b in blk.tolist()).encode())
-        rec["unique"] = int(len(pairs))
+            h.update("".join(f"{a} {b}\n" for a, b in pairs[c:c + (1 << 20)]).encode())
+        rec["unique"] = len(pairs)
         rec["sha256"] = h.hexdigest()
-        rec["head"] = pairs[:HEAD].tolist()
-        rec["window"] = pairs[pairs[:, 0] < window].tolist()
+        rec["head"] = [list(p) for p in pairs[:HEAD]]
+        rec["window"] = [list(p) for p in pairs if p[0] < window]
     if seconds is not None:
         rec["seconds"] = round(seconds, 3)
     if extra:

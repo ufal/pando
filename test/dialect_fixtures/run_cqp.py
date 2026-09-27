@@ -23,7 +23,6 @@ import sys
 import tempfile
 import time
 
-import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fixtures  # noqa: E402
@@ -94,12 +93,18 @@ def main():
                 else:
                     # 2. the hits themselves
                     cqp_run(opts, f'{prefix}A = {q};\ntabulate A match, matchend > "{tmp}";\n', opts.timeout)
-                    arr = (np.fromfile(tmp, dtype=np.int64, sep=" ").reshape(-1, 2)
-                           if os.path.exists(tmp) else np.zeros((0, 2), np.int64))
-                    if len(arr) != total:
+                    starts, ends = [], []
+                    if os.path.exists(tmp):
+                        with open(tmp) as tf:
+                            for ln in tf:
+                                f = ln.split()
+                                if len(f) >= 2:
+                                    starts.append(int(f[0]))
+                                    ends.append(int(f[1]))
+                    if len(starts) != total:
                         extra["warnings"] = ((err + "; ") if err else "") + \
-                            f"tabulate returned {len(arr)} rows for size {total}"
-                    records.append(fixtures.record(qid, q, "cqp", arr[:, 0], arr[:, 1], total=total,
+                            f"tabulate returned {len(starts)} rows for size {total}"
+                    records.append(fixtures.record(qid, q, "cqp", starts, ends, total=total,
                                                    seconds=time.monotonic() - t0, extra=extra))
         except subprocess.TimeoutExpired:
             records.append(fixtures.error_record(qid, q, "cqp", f"timeout after {opts.timeout}s",
