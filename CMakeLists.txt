@@ -92,6 +92,7 @@ add_library(pando_core STATIC
     src/index/fold_map.cpp
     src/index/fold_index.cpp
     src/index/dep_pair_index.cpp
+    src/index/bitmap_index.cpp
     src/index/positional_attr.cpp
     src/index/structural_attr.cpp
     src/index/dependency_index.cpp
@@ -205,6 +206,10 @@ if(BUILD_TESTING)
     add_executable(mv_stage1_executor_test src/index/mv_stage1_executor_test.cpp)
     target_link_libraries(mv_stage1_executor_test PRIVATE pando_core)
     add_test(NAME mv_stage1_executor COMMAND mv_stage1_executor_test)
+
+    add_executable(bitmap_index_test src/index/bitmap_index_test.cpp)
+    target_link_libraries(bitmap_index_test PRIVATE pando_core)
+    add_test(NAME bitmap_index COMMAND bitmap_index_test)
 
     # Differential test: fast paths (S1 merge, dep bitset, seq probe) must return exactly
     # the same matches and totals as the generic executor (PANDO_FASTPATH=on|nomerge|off).

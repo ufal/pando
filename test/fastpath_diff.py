@@ -2,7 +2,8 @@
 """Differential test: fast paths vs generic executor.
 
 Runs every query under PANDO_FASTPATH=on / nomerge / off (and "onbits": on with
-region filters forced to bitsets, PANDO_MASK_BITS=1) and requires
+region filters forced to bitsets, PANDO_MASK_BITS=1; "nobm" / "bmforce": on with
+the bitmap kernels off / forced, PANDO_BITMAPS) and requires
 
   * identical exact totals (``--count-only``) in every mode,
   * identical totals from the concordance path (``--limit K --total``),
@@ -35,16 +36,26 @@ import sys
 import tempfile
 import time
 
-MODES = ("on", "onbits", "nomerge", "off")
-# onbits = fast paths with region filters forced to the bitset representation
-# (PANDO_MASK_BITS=1) instead of position intervals.
+MODES = ("on", "onbits", "nobm", "bmforce", "nomerge", "off")
+# onbits  = fast paths with region filters forced to the bitset representation
+#           (PANDO_MASK_BITS=1) instead of position intervals;
+# nobm    = fast paths without the bitmap kernels (PANDO_BITMAPS=off): the merge paths;
+# bmforce = bitmap kernels wherever the query compiles to them (PANDO_BITMAPS=force),
+#           also for rare operands the planner would give to a merge.
+# The bitmap modes only differ from "on" on an index with <attr>.bm files.
 
 
 def run(pando, corpus, query, args, mode, timeout):
-    env = dict(os.environ, PANDO_FASTPATH="on" if mode == "onbits" else mode)
-    env.pop("PANDO_MASK_BITS", None)
+    env = dict(os.environ, PANDO_FASTPATH="off" if mode == "off" else
+               "nomerge" if mode == "nomerge" else "on")
+    for k in ("PANDO_MASK_BITS", "PANDO_BITMAPS"):
+        env.pop(k, None)
     if mode == "onbits":
         env["PANDO_MASK_BITS"] = "1"
+    elif mode == "nobm":
+        env["PANDO_BITMAPS"] = "off"
+    elif mode == "bmforce":
+        env["PANDO_BITMAPS"] = "force"
     t0 = time.monotonic()
     p = subprocess.run([pando, corpus, query, "--timing", *args],
                        capture_output=True, text=True, env=env, timeout=timeout)
@@ -234,7 +245,7 @@ def main():
             queries.append((line, mf))
 
     failures = 0
-    print(f"{'total':>10}  {'full':4}  {'on-path':15} {'on s':>7} {'nomerge s':>9} {'off s':>7}  query")
+    print(f"{'total':>10}  {'full':4}  {'on-path':15} {'on s':>7} {'nobm s':>9} {'off s':>7}  query")
     try:
         for q, mf in queries:
             try:
@@ -245,7 +256,7 @@ def main():
                 continue
             status = "" if not problems else "  <-- MISMATCH"
             print(f"{totals['off']:>10}  {info['full'] if isinstance(info['full'], str) else ('yes' if info['full'] else 'no'):4}  {info['on'][0]:15} "
-                  f"{info['on'][1]:7.3f} {info['nomerge'][1]:9.3f} {info['off'][1]:7.3f}  {q}{status}")
+                  f"{info['on'][1]:7.3f} {info['nobm'][1]:9.3f} {info['off'][1]:7.3f}  {q}{status}")
             for p in problems:
                 print("    " + p)
             if problems:

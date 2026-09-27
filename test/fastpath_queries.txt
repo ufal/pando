@@ -172,3 +172,29 @@ a:[upos="VERB"] > b:[upos="NOUN"]; count by a.lemma, b.lemma
 [upos="VERB" & text_langcode="en"] > [upos="NOUN"]; count by lemma
 <s> [upos="DET"]; count by lemma
 [upos="ADJ"] [upos="NOUN"]; group by lemma
+
+# ── Bitmap kernel (P3.2, seq_bitmap): on an index with <attr>.bm (pando-index --upgrade).
+# Modes nobm / bmforce compare it with the merge paths and force it for rare operands.
+[upos="ADJ"] [upos="NOUN"]
+[upos="DET"] [upos="ADJ"] [upos="NOUN"]
+[upos="ADJ"] [upos="NOUN"] within s
+[upos="ADJ"] [upos="NOUN"] :: match.text_langcode="cs"
+[upos="DET"] [upos="NOUN"] within text_langcode="en"
+[upos!="PUNCT"] [upos="NOUN"]
+[upos="DET"] [] [upos="NOUN"]
+[] [upos="NOUN"] [upos="PUNCT"]
+[lemma="book"] [upos="NOUN"]
+[upos="ADJ" & lemma="good"] [upos="NOUN"]
+[upos="NOUN|PROPN"] [deprel="punct"]
+[upos="PUNCT"] [upos="PUNCT"] [upos="PUNCT"] [upos="PUNCT"]
+[deprel="nsubj"] [upos="VERB"] [deprel="obj"] within s
+[form="the" %c] [upos="NOUN"]
+[upos=".*N.*"] [upos="VERB"]
+[upos="NOUN"] [lemma!="be"] [upos="NOUN"]
+[upos="X"] [upos="X"]
+[upos!="PUNCT"]
+[upos="NOUN" & deprel="nsubj"]
+[upos="NOUN" & deprel!="nsubj"]
+[upos!="PUNCT"] within s
+[upos="NOUN" & deprel="nsubj"] :: match.text_langcode="cs"
+[upos="ADJ" | deprel="amod"]

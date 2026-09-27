@@ -17,6 +17,7 @@
 #include "index/fold_map.h"
 #include "index/fold_index.h"
 #include "index/dep_pair_index.h"
+#include "index/bitmap_index.h"
 
 #ifdef PANDO_USE_RE2
 #include <re2/re2.h>
@@ -833,6 +834,9 @@ private:
     mutable std::unordered_map<std::string, std::shared_ptr<DepPairIndex>> dep_pair_cache_;
     std::shared_ptr<DepPairIndex> dep_pair_index(const std::string& head_attr,
                                                  const std::string& child_attr) const;
+    // P3.1: chunked bitmaps per attribute; nullptr = not built.
+    mutable std::unordered_map<std::string, std::shared_ptr<BitmapIndex>> bitmap_cache_;
+    std::shared_ptr<BitmapIndex> bitmap_index(const std::string& attr) const;
     /// Folded-value lookup: index file when present, else the in-memory FoldMap.
     std::vector<LexiconId> fold_lookup_ids(const std::string& attr, bool case_fold,
                                            bool accent_fold, const std::string& value) const;

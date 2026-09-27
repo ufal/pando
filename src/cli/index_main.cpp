@@ -4,12 +4,14 @@
 #include "index/structural_attr.h"
 #include "index/fold_index.h"
 #include "index/dep_pair_index.h"
+#include "index/bitmap_index.h"
 #include "corpus/corpus.h"
 #include <chrono>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -108,11 +110,65 @@ static void write_overlay_info(const std::string& overlay_dir,
 // use when present, without re-indexing. Also run after every build.
 //   dep.head_rel                 (P1.8)  relative head offsets
 //   <attr>.fold_{lc,na,lcna}.perm (P1.6)  %c / %d / %cd lookups
+//   <attr>.bm{,.idx}             (P3.1)  chunked bitmaps, low-cardinality attrs
 // P5.2 default: upos × upos edge postings (when the corpus has deps and upos).
 static const char* const kDefaultDepPairs = "upos:upos";
+// P3.1 default: bitmaps for every single-valued attribute with at most
+// BitmapIndex::kAutoMaxValues values (upos, deprel, …).
+static const char* const kDefaultBitmaps = "auto";
+
+static std::vector<std::string> split_list(const std::string& s) {
+    std::vector<std::string> out;
+    size_t from = 0;
+    while (from <= s.size()) {
+        size_t to = s.find(',', from);
+        if (to == std::string::npos) to = s.size();
+        if (to > from) out.push_back(s.substr(from, to - from));
+        from = to + 1;
+    }
+    return out;
+}
+
+static int upgrade_bitmaps(const pando::Corpus& corpus, const std::string& spec, bool quiet,
+                           const std::function<double()>& secs) {
+    if (spec == "none") return 0;
+    const bool is_auto = spec == "auto";
+    std::vector<std::string> names = is_auto ? corpus.attr_names() : split_list(spec);
+    for (const auto& name : names) {
+        if (!corpus.has_attr(name) || corpus.is_multivalue(name)) {
+            if (!is_auto) {
+                std::cerr << "Error: --bitmaps " << name
+                          << ": no single-valued positional attribute of that name\n";
+                return 1;
+            }
+            continue;
+        }
+        const auto& pa = corpus.attr(name);
+        if (is_auto && pa.lexicon().size() > pando::BitmapIndex::kAutoMaxValues) continue;
+        pando::BitmapIndex probe;
+        if (probe.open(pa, corpus.size())) {
+            if (!quiet) std::cerr << "Bitmaps " << pando::BitmapIndex::path(pa.base_path())
+                                  << " up to date\n";
+            continue;
+        }
+        std::string err;
+        pando::BitmapIndex::BuildStats st;
+        if (!pando::BitmapIndex::build(pa, corpus.size(), &err, &st)) {
+            std::cerr << "Error: " << err << "\n";
+            return 1;
+        }
+        if (!quiet)
+            std::cerr << "Wrote " << pando::BitmapIndex::path(pa.base_path()) << " ("
+                      << pa.lexicon().size() << " values, " << st.entries << " containers: "
+                      << st.bitmaps << " bitmap, " << st.arrays << " array, " << st.fulls
+                      << " full; " << (st.payload_bytes >> 20) << " MB; " << secs() << " s)\n";
+    }
+    return 0;
+}
 
 static int upgrade_index(const std::string& dir, bool quiet = false,
-                         const std::string& dep_pairs = kDefaultDepPairs) {
+                         const std::string& dep_pairs = kDefaultDepPairs,
+                         const std::string& bitmaps = kDefaultBitmaps) {
     auto t0 = std::chrono::steady_clock::now();
     auto secs = [&] {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -152,6 +208,7 @@ static int upgrade_index(const std::string& dir, bool quiet = false,
             }
         }
         if (!quiet) std::cerr << "Fold indexes up to date (" << secs() << " s)\n";
+        if (upgrade_bitmaps(corpus, bitmaps, quiet, secs) != 0) return 1;
         if (!quiet && !corpus.has_deps())
             std::cerr << "No dependency index: no dep.head_rel / edge postings\n";
         if (corpus.has_deps() && corpus.deps().head_rel_data() && dep_pairs != "none") {
@@ -201,16 +258,19 @@ static int upgrade_index(const std::string& dir, bool quiet = false,
 int main(int argc, char* argv[]) {
     if (argc >= 3 && std::string(argv[1]) == "--upgrade") {
         std::string pairs = kDefaultDepPairs;
+        std::string bitmaps = kDefaultBitmaps;
         for (int i = 3; i < argc; ++i) {
             const std::string a = argv[i];
             if (a == "--dep-pairs" && i + 1 < argc) pairs = argv[++i];
             else if (a.rfind("--dep-pairs=", 0) == 0) pairs = a.substr(12);
+            else if (a == "--bitmaps" && i + 1 < argc) bitmaps = argv[++i];
+            else if (a.rfind("--bitmaps=", 0) == 0) bitmaps = a.substr(10);
             else {
                 std::cerr << "Error: unknown --upgrade option '" << a << "'\n";
                 return 1;
             }
         }
-        return upgrade_index(argv[2], false, pairs);
+        return upgrade_index(argv[2], false, pairs, bitmaps);
     }
     bool split_feats = false;
     bool format_vertical = false;
@@ -259,9 +319,13 @@ int main(int argc, char* argv[]) {
                   << "\n  pando-index --upgrade <corpus_dir>\n"
                   << "                    Add derived files to an existing index\n"
                   << "                    (dep.head_rel, <attr>.fold_*.perm for %c/%d,\n"
-                  << "                    dep.pair.<H>.<C>.rev edge postings for [H=..] > [C=..])\n"
+                  << "                    dep.pair.<H>.<C>.rev edge postings for [H=..] > [C=..],\n"
+                  << "                    <attr>.bm bitmaps)\n"
                   << "    --dep-pairs H:C[,H:C...]  edge postings to build (default upos:upos;\n"
-                  << "                    'none' to skip). Low-cardinality attributes only.\n";
+                  << "                    'none' to skip). Low-cardinality attributes only.\n"
+                  << "    --bitmaps auto|none|A[,B...]  chunked bitmaps (<attr>.bm) for fast dense\n"
+                  << "                    token patterns (default auto: attributes with <= "
+                  << pando::BitmapIndex::kAutoMaxValues << " values)\n";
         return 1;
     }
 

@@ -60,3 +60,13 @@ G4	[upos="DET"] []+ [upos="NOUN"]
 G5	[upos="DET"] []{1,10} [upos="NOUN"] within s
 G6	[upos="DET"]? [upos="NOUN"]
 G7	[lemma="be"] []* [upos="VERB"] within s
+# ── P3.2 bitmap kernel (seq_bitmap) on an index with <attr>.bm
+B1	[upos!="PUNCT"]
+B2	[upos="NOUN" & deprel="nsubj"]
+B3	[upos="NOUN" & deprel!="nsubj"]
+B4	[upos!="PUNCT"] [upos="NOUN"]
+B5	[upos="NOUN|PROPN"] [deprel="punct"]
+B6	[upos="PUNCT"] [upos="PUNCT"] [upos="PUNCT"] [upos="PUNCT"]
+B7	[deprel="nsubj"] [upos="VERB"] [deprel="obj"] within s
+B8	[] [upos="NOUN"] [upos="PUNCT"]
+B9	[upos=".*N.*"] [upos="VERB"]

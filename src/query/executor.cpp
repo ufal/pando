@@ -1,4 +1,5 @@
 #include "query/executor.h"
+#include "query/bitmap_expr.h"
 #include <tuple>
 #include <algorithm>
 #include <cctype>
@@ -239,6 +240,23 @@ static FastPathMode fastpath_mode() {
         if (s == "off" || s == "0") return FastPathMode::Off;
         if (s == "nomerge") return FastPathMode::NoMerge;
         return FastPathMode::On;
+    }();
+    return mode;
+}
+
+// P3.2: PANDO_BITMAPS=on (default) | off | force
+//   off:   never use the bitmap kernels (testing: compare with the merge paths);
+//   force: use them whenever the query compiles to bitmap expressions, also
+//          where the planner would pick a merge (rare operands).
+enum class BitmapMode : uint8_t { On, Off, Force };
+static BitmapMode bitmap_mode() {
+    static const BitmapMode mode = [] {
+        const char* v = std::getenv("PANDO_BITMAPS");
+        if (!v) return BitmapMode::On;
+        const std::string s(v);
+        if (s == "off" || s == "0") return BitmapMode::Off;
+        if (s == "force") return BitmapMode::Force;
+        return BitmapMode::On;
     }();
     return mode;
 }
@@ -1487,6 +1505,20 @@ std::vector<LexiconId> QueryExecutor::fold_lookup_ids(const std::string& attr, b
     std::vector<LexiconId> out(ids.begin(), ids.end());
     std::sort(out.begin(), out.end());
     return out;
+}
+
+std::shared_ptr<BitmapIndex> QueryExecutor::bitmap_index(const std::string& attr) const {
+    std::lock_guard<std::mutex> lock(fold_map_mutex_);
+    auto it = bitmap_cache_.find(attr);
+    if (it == bitmap_cache_.end()) {
+        std::shared_ptr<BitmapIndex> bi;
+        if (corpus_.has_attr(attr) && !corpus_.is_multivalue(attr)) {
+            bi = std::make_shared<BitmapIndex>();
+            if (!bi->open(corpus_.attr(attr), corpus_.size())) bi.reset();
+        }
+        it = bitmap_cache_.emplace(attr, bi).first;
+    }
+    return it->second;
 }
 
 std::shared_ptr<DepPairIndex> QueryExecutor::dep_pair_index(const std::string& head_attr,
@@ -3806,6 +3838,253 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
         return owned_postings(resolve_conditions(c), corpus_rev_width);
     };
 
+    // ── Bitmap expressions (P3.2) ────────────────────────────────────────
+    // A token condition → per-chunk bitmap expression: values of attributes with
+    // `<attr>.bm` (EQ, id sets from regex / %c, `!=`), `.rev` postings for other
+    // attributes (or a materialised merge operand), AND / OR / NOT of those.
+    // nullptr = not expressible (feats sub-keys, MV, structural, count, …).
+    // *dense is set when a real bitmap or a complement is involved (the cases
+    // where the kernel beats the merge paths).
+    std::function<std::unique_ptr<BmExpr>(const ConditionPtr&, bool*)> compile_bm =
+        [&](const ConditionPtr& c, bool* dense) -> std::unique_ptr<BmExpr> {
+        auto from_merge_operand = [&]() -> std::unique_ptr<BmExpr> {
+            SeqMergeOperand o = merge_operand(c);
+            if (o.kind != SeqMergeTok::EqRev) return nullptr;
+            return std::make_unique<BmPostings>(o.span, o.owned);
+        };
+        if (!c) return nullptr;
+        if (!c->is_leaf) {
+            if (c->is_structural || c->is_count) return nullptr;
+            auto a = compile_bm(c->left, dense);
+            auto b = a ? compile_bm(c->right, dense) : nullptr;
+            if (!a || !b) return from_merge_operand();
+            if (c->bool_op == BoolOp::AND) return std::make_unique<BmAnd>(std::move(a), std::move(b));
+            return std::make_unique<BmOr>(std::move(a), std::move(b));
+        }
+        const AttrCondition& ac = c->leaf;
+        if (ac.is_nvals) return nullptr;
+        const std::string name = normalize_attr(ac.attr);
+        if (!corpus_.has_attr(name) || corpus_.is_multivalue(name)) return from_merge_operand();
+        const PositionalAttr& pa = corpus_.attr(name);
+        std::shared_ptr<BitmapIndex> bi = bitmap_index(name);
+        auto id_count = [&](int64_t id) { return pa.rev_span_of_id(static_cast<LexiconId>(id)).count; };
+        auto set_expr = [&](const std::vector<int64_t>& ids) -> std::unique_ptr<BmExpr> {
+            size_t cnt = 0;
+            for (int64_t id : ids) cnt += id_count(id);
+            if (bi) {
+                *dense = true;
+                if (ids.size() == 1) return std::make_unique<BmValue>(*bi, ids[0], cnt);
+                return std::make_unique<BmValueSet>(*bi, ids, cnt);
+            }
+            if (ids.empty()) return std::make_unique<BmPostings>(RevSpan{});
+            if (ids.size() > 64) return nullptr;
+            std::unique_ptr<BmExpr> e;
+            for (int64_t id : ids) {
+                auto p = std::make_unique<BmPostings>(pa.rev_span_of_id(static_cast<LexiconId>(id)));
+                if (e) e = std::make_unique<BmOr>(std::move(e), std::move(p));
+                else e = std::move(p);
+            }
+            return e;
+        };
+        auto negate = [&](std::unique_ptr<BmExpr> e) -> std::unique_ptr<BmExpr> {
+            if (!e) return nullptr;
+            *dense = true;
+            return std::make_unique<BmNot>(std::move(e), static_cast<size_t>(corpus_.size()));
+        };
+        if (ac.id_set_resolved
+            && (ac.op == CompOp::EQ || ac.op == CompOp::NEQ || ac.op == CompOp::REGEX)) {
+            std::vector<int64_t> ids(ac.id_set.begin(), ac.id_set.end());
+            auto e = set_expr(ids);
+            if (!e) return from_merge_operand();
+            return ac.op == CompOp::NEQ ? negate(std::move(e)) : std::move(e);
+        }
+        if (ac.op == CompOp::EQ && ac.resolved_id >= 0) {
+            if (bi) {
+                *dense = true;
+                return std::make_unique<BmValue>(*bi, ac.resolved_id, id_count(ac.resolved_id));
+            }
+            return std::make_unique<BmPostings>(pa.rev_span_of_id(static_cast<LexiconId>(ac.resolved_id)));
+        }
+        // Unresolved EQ / NEQ on a small (bitmap) lexicon: the ids whose value
+        // matches like check_leaf does (multivalue_eq: whole value or a `|` part).
+        if ((ac.op == CompOp::EQ || ac.op == CompOp::NEQ) && bi
+            && !ac.case_insensitive && !ac.diacritics_insensitive) {
+            std::vector<int64_t> ids;
+            const Lexicon& lex = pa.lexicon();
+            for (LexiconId id = 0; id < lex.size(); ++id)
+                if (multivalue_eq(lex.get(id), ac.value)) ids.push_back(id);
+            auto e = set_expr(ids);
+            return ac.op == CompOp::NEQ ? negate(std::move(e)) : std::move(e);
+        }
+        return from_merge_operand();
+    };
+
+    // ── P3.2: bit-parallel kernel on chunked bitmaps ────────────────────
+    // Start s matches iff every constrained token t has bit s + t set:
+    // per 2^16-position chunk, acc = AND_t (B_t >> t), then the start
+    // masks (corpus end, `:: match.…` region filter, `within` — the whole
+    // span inside one region). The total past the first page is a popcount.
+    // Tokens are ANDed rarest first, so empty chunks of a rare token skip
+    // the rest. Used when a token involves a real bitmap (or `!=`) and every
+    // token averages at least one hit per chunk; rarer operands stay on the
+    // merge paths (PANDO_BITMAPS=force overrides, =off disables).
+    // Returns true when it ran (result filled: the caller returns finish_query()).
+    auto try_seq_bitmap = [&](const StructuralAttr* within_sa, bool within_span_semantics,
+                              const RegionPosMask& region_mask, bool use_region_mask,
+                              bool cheap_total_ok) -> bool {
+        if (fastpath_mode() == FastPathMode::On && bitmap_mode() != BitmapMode::Off
+            && n <= 64 && !within_span_semantics && sample_size == 0) {
+            struct BmTok { std::unique_ptr<BmExpr> e; int k; };
+            std::vector<BmTok> bt;
+            bool compiled = true, dense = false;
+            size_t min_est = SIZE_MAX;
+            for (size_t i = 0; i < n && compiled; ++i) {
+                if (!q.tokens[i].conditions) continue;   // [] : no constraint
+                auto e = compile_bm(q.tokens[i].conditions, &dense);
+                if (!e) { compiled = false; break; }
+                min_est = std::min(min_est, e->estimate);
+                bt.push_back({std::move(e), static_cast<int>(i)});
+            }
+            const CorpusPos N = corpus_.size();
+            const size_t nchunks = static_cast<size_t>((N + BitmapIndex::kChunk - 1)
+                                                       >> BitmapIndex::kChunkShift);
+            // Merge / gallop wins while the rarest token has only a few hits per
+            // chunk (a chunk costs ~1024 word ANDs per token).
+            const bool use_bm = compiled && !bt.empty()
+                && (bitmap_mode() == BitmapMode::Force || (dense && min_est >= 8 * nchunks));
+            if (use_bm) {
+                result.plan_path = "seq_bitmap";
+                std::stable_sort(bt.begin(), bt.end(), [](const BmTok& a, const BmTok& b) {
+                    return a.e->estimate < b.e->estimate;
+                });
+                constexpr size_t W = BitmapIndex::kWords;
+                std::vector<uint64_t> acc(W), msk(W);
+                const CorpusPos L = static_cast<CorpusPos>(n);
+                const CorpusPos last_start = N - L;               // starts in [0, last_start]
+                size_t ivc = 0;                                   // region-mask interval cursor
+                size_t wr = 0;                                    // within region cursor
+                const Region* wreg = within_sa ? within_sa->region_data() : nullptr;
+                const size_t wn = within_sa ? within_sa->region_count() : 0;
+                auto set_range = [&](uint64_t* m, uint32_t a, uint32_t b) {   // inclusive
+                    const uint32_t wa = a >> 6, wb = b >> 6;
+                    const uint64_t ma = ~uint64_t{0} << (a & 63);
+                    const uint64_t mb = ~uint64_t{0} >> (63 - (b & 63));
+                    if (wa == wb) { m[wa] |= ma & mb; return; }
+                    m[wa] |= ma;
+                    for (uint32_t w = wa + 1; w < wb; ++w) m[w] = ~uint64_t{0};
+                    m[wb] |= mb;
+                };
+                bool stop = false, counting = false;
+                for (size_t c = 0; c < nchunks && !stop; ++c) {
+                    const CorpusPos base = static_cast<CorpusPos>(c) << BitmapIndex::kChunkShift;
+                    if (base > last_start) break;
+                    const CorpusPos top = std::min<CorpusPos>(base + BitmapIndex::kChunk - 1, last_start);
+                    const uint32_t hi = static_cast<uint32_t>(top - base);   // last start offset
+                    const size_t nw = (hi >> 6) + 1;
+                    // `:: match.…` interval filter: skip chunks without an allowed start
+                    // before touching any token (tokens' cursors are monotone).
+                    if (use_region_mask && !region_mask.use_bits) {
+                        const auto& iv = region_mask.iv;
+                        while (ivc < iv.size() && iv[ivc].e < base) ++ivc;
+                        if (ivc >= iv.size()) break;
+                        if (iv[ivc].s > top) continue;
+                    }
+                    // AND of the shifted token bitmaps
+                    bool any = false;
+                    for (size_t t = 0; t < bt.size(); ++t) {
+                        const BmChunk v = bt[t].e->load(c);
+                        if (v.zero) { any = false; break; }
+                        const int k = bt[t].k;
+                        uint64_t orr = 0;
+                        if (t == 0) {
+                            if (k == 0) {
+                                for (size_t w = 0; w < nw; ++w) orr |= (acc[w] = v.w[w]);
+                            } else {
+                                for (size_t w = 0; w < nw; ++w) {
+                                    const uint64_t nx = w + 1 < W ? v.w[w + 1] : v.next;
+                                    orr |= (acc[w] = (v.w[w] >> k) | (nx << (64 - k)));
+                                }
+                            }
+                        } else if (k == 0) {
+                            for (size_t w = 0; w < nw; ++w) orr |= (acc[w] &= v.w[w]);
+                        } else {
+                            for (size_t w = 0; w < nw; ++w) {
+                                const uint64_t nx = w + 1 < W ? v.w[w + 1] : v.next;
+                                orr |= (acc[w] &= (v.w[w] >> k) | (nx << (64 - k)));
+                            }
+                        }
+                        any = orr != 0;
+                        if (!any) break;
+                    }
+                    if (!any) continue;
+                    // start masks
+                    if ((hi & 63) != 63) acc[nw - 1] &= ~uint64_t{0} >> (63 - (hi & 63));
+                    if (use_region_mask) {
+                        if (region_mask.use_bits) {
+                            const size_t b0 = static_cast<size_t>(base >> 6);
+                            for (size_t w = 0; w < nw; ++w)
+                                acc[w] &= b0 + w < region_mask.bits.size() ? region_mask.bits[b0 + w] : 0;
+                        } else {
+                            const auto& iv = region_mask.iv;
+                            while (ivc < iv.size() && iv[ivc].e < base) ++ivc;
+                            std::fill(msk.begin(), msk.begin() + nw, 0);
+                            for (size_t j = ivc; j < iv.size() && iv[j].s <= top; ++j) {
+                                const CorpusPos a = std::max(iv[j].s, base);
+                                const CorpusPos b = std::min(iv[j].e, top);
+                                if (b >= a) set_range(msk.data(), static_cast<uint32_t>(a - base),
+                                                      static_cast<uint32_t>(b - base));
+                            }
+                            for (size_t w = 0; w < nw; ++w) acc[w] &= msk[w];
+                        }
+                    }
+                    if (wreg) {
+                        // allowed starts: [r.start, r.end - (L-1)] for every region r
+                        while (wr < wn && wreg[wr].end < base) ++wr;
+                        std::fill(msk.begin(), msk.begin() + nw, 0);
+                        for (size_t j = wr; j < wn && wreg[j].start <= top; ++j) {
+                            const CorpusPos a = std::max<CorpusPos>(wreg[j].start, base);
+                            const CorpusPos b = std::min<CorpusPos>(wreg[j].end - (L - 1), top);
+                            if (b >= a) set_range(msk.data(), static_cast<uint32_t>(a - base),
+                                                  static_cast<uint32_t>(b - base));
+                        }
+                        for (size_t w = 0; w < nw; ++w) acc[w] &= msk[w];
+                    }
+                    // emit the page, then count
+                    for (size_t w = 0; w < nw && !stop; ++w) {
+                        uint64_t x = acc[w];
+                        if (counting) {
+                            result.total_count += static_cast<size_t>(__builtin_popcountll(x));
+                            continue;
+                        }
+                        while (x) {
+                            if (max_matches > 0 && result.matches.size() >= max_matches) {
+                                if (!count_total) { stop = true; break; }
+                                if (cheap_total_ok) {
+                                    counting = true;
+                                    result.total_count += static_cast<size_t>(__builtin_popcountll(x));
+                                    break;
+                                }
+                            }
+                            const CorpusPos p0 = base + static_cast<CorpusPos>(w * 64)
+                                               + __builtin_ctzll(x);
+                            x &= x - 1;
+                            std::vector<CorpusPos> pm(2 * n);
+                            for (size_t i = 0; i < n; ++i) pm[i] = pm[n + i] = p0 + static_cast<CorpusPos>(i);
+                            add_match(std::move(pm));
+                            if (reached_limit() || reached_total_cap()) { stop = true; break; }
+                        }
+                    }
+                    if (counting && max_total_cap > 0 && result.total_count >= max_total_cap) {
+                        result.total_count = max_total_cap;
+                        stop = true;
+                    }
+                }
+                return true;
+            }
+        }
+        return false;
+    };
+
     // ── Single-token fast path ──────────────────────────────────────────
 
     if (n == 1) {
@@ -3835,6 +4114,27 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
         int min_rep = q.tokens[0].min_repeat;
         int max_rep = q.tokens[0].max_repeat;
         const ConditionPtr& tok_cond = q.tokens[0].conditions;
+
+        // ── P3.2: `&` / `|` / `!=` over bitmap attributes (`[upos!="PUNCT"]`,
+        // `[upos="NOUN" & deprel="nsubj"]`): per-chunk AND / OR / NOT + popcount
+        // instead of materialising or probing every position. Plain EQ / id-set
+        // leaves keep their O(1) / k-way paths below.
+        if (tok_cond && min_rep == 1 && max_rep == 1 && !q.tokens[0].is_dep_subtree
+            && (!tok_cond->is_leaf || tok_cond->leaf.op == CompOp::NEQ)
+            && fastpath_mode() == FastPathMode::On && bitmap_mode() != BitmapMode::Off) {
+            const std::string eff_within = q.within.empty() ? corpus_.default_within() : q.within;
+            const StructuralAttr* wsa = (!eff_within.empty() && corpus_.has_structure(eff_within))
+                ? &corpus_.structure(eff_within) : nullptr;
+            const bool wspan = wsa && (corpus_.is_nested(eff_within) || corpus_.is_overlapping(eff_within));
+            RegionPosMask rm = build_region_eq_position_mask(corpus_, q.global_region_filters);
+            if (rm.status == RegionMaskStatus::Unsatisfiable) {
+                result.total_exact = true;
+                return result;
+            }
+            const bool urm = rm.ready();
+            const bool cheap = (q.global_region_filters.empty() || urm) && token_anchor_constraints.empty();
+            if (try_seq_bitmap(wsa, wspan, rm, urm, cheap)) return finish_query();
+        }
 
         // ── Single EQ token: first page straight from `.rev`, the rest only counted
         // (optionally through the EQ region mask). Avoids one Match per hit.
@@ -4394,6 +4694,10 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             const bool cheap_total_ok =
                 (q.global_region_filters.empty() || use_region_mask)
                 && token_anchor_constraints.empty();   // anchors are applied in add_match
+
+            if (try_seq_bitmap(within_sa, within_span_semantics, region_mask, use_region_mask,
+                               cheap_total_ok))
+                return finish_query();
 
             // ── S1: Manatee-style .rev shift-merge when every token is EQ or [] ──
             std::vector<SeqMergeOperand> ops(n);
