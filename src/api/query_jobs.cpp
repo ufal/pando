@@ -275,7 +275,10 @@ void QueryJobManager::run_job(Job& j) {
         if (prog.empty() || !prog[0].has_query) throw std::runtime_error("not a query");
         QueryExecutor ex(corpus_);
         ex.set_include_empty_alignment_values(j.opts.allow_empty_alignment);
-        ex.set_progress(&j.prog);
+        // with --debug-total-delay only the gradual reveal below publishes (a real
+        // count reaching 100 % first and then restarting would confuse the client)
+        ExecProgress hidden;
+        ex.set_progress(cfg_.debug_delay.count() > 0 ? &hidden : &j.prog);
         // count only: one match materialised, the rest counted (cheap paths / popcounts)
         MatchSet ms = ex.execute(prog[0].query, 1, true, j.opts.max_total);
         total = ms.total_count;

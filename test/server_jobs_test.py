@@ -12,7 +12,9 @@ observable on a small corpus) and --abandon-after 1, and checks:
   * a page that holds every hit finishes the job immediately;
   * a synchronous total is recorded as a finished job;
   * /cancel stops a job; a job nobody polls is abandoned;
-  * unknown job ids give 404.
+  * unknown job ids give 404;
+  * the fields kontext-pando reads (result.job_id, /status result.*) and
+    limit 0 (total only, no hits).
 
   test/server_jobs_test.py --server build/pando-server --pando build/pando \\
       --pando-index build/pando-index --conllu test/data/sample.conllu
@@ -176,7 +178,21 @@ def main():
         time.sleep(2.2)
         code, st = srv.get(f"/status?job={jid}")
         check(code == 200 and st["job"]["state"] == "cancelled", f"abandoned job: {st}")
-        # 8. unknown id; different max_total = different result set
+        # 8. the contract kontext-pando's pando_backend.py reads:
+        #    result.job_id (string); /status → result.{finished,total,progress};
+        #    limit 0 + "async" → no hits, just the job (must not materialise every hit)
+        res, dt = srv.query('[upos="PUNCT"]', total="async", limit=0)
+        r = res["result"]
+        check(isinstance(r.get("job_id"), str) and r["job_id"] == r["job"]["id"], f"job_id: {r.get('job_id')}")
+        check(r["page"]["returned"] == 0 and not r["hits"] and dt < 1.0, f"limit 0: {r['page']} {dt:.2f}s")
+        code, st = srv.get(f"/status?job={r['job_id']}")
+        check(code == 200 and {"finished", "total", "progress"} <= set(st.get("result", {})),
+              f"/status result fields: {st}")
+        res, dt = srv.query('[upos="PRON"]', total=True, limit=0)
+        check(res["result"]["page"]["total"] == count_only(opts.pando, corpus, '[upos="PRON"]')
+              and res["result"]["page"]["total_exact"] and not res["result"]["hits"],
+              f"limit 0 sync: {res['result']['page']}")
+        # 9. unknown id; different max_total = different result set
         code, _ = srv.get("/status?job=0000000000000000")
         check(code == 404, f"unknown job gave {code}")
         res, _ = srv.query(q, total="async", max_total=3)

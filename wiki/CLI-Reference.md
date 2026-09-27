@@ -112,14 +112,18 @@ pando-server <corpus_dir> [port] [threads] [--preload] [options]
   query (same text, `max_total`, `strict_quoted_strings`) is reused: only the page
   is computed.
 * `"async"` — the page at once; the exact total is counted in the background.
-  The result has `"job": {...}` and `page.total` is the count so far
-  (`total_exact: false`) until the job has finished. Poll `GET /status?job=ID`:
+  The result has `"job_id": "ID"` and `"job": {...}`, and `page.total` is the
+  count so far (`total_exact: false`) until the job has finished. Poll
+  `GET /status?job=ID` (`result` and `job` hold the same object):
 
 ```json
-{"ok": true, "job": {"id": "dd3abc781972108e", "state": "running", "finished": false,
+{"ok": true, "result": {"id": "dd3abc781972108e", "state": "running", "finished": false,
  "total": 534076, "total_exact": false, "counted": 534076, "progress": 0.2891,
- "estimate": 1847062, "elapsed_ms": 238.0}}
+ "estimate": 1847062, "elapsed_ms": 238.0}, "job": {...}}
 ```
+
+With `"total": true` or `"async"`, `"limit": 0` returns no hits, only the total
+/ the job (without a total, `limit: 0` still means all hits).
 
 `state` is `queued`, `running`, `finished`, `cancelled` or `failed` (`error`).
 `counted` grows while running; `progress` is the share of the corpus scanned

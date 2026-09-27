@@ -19,6 +19,11 @@
 
 using namespace pando;
 
+// `"job_id": "<id>", "job": {...}` inside a /query result.
+static std::string job_fields(const QueryJobStatus& st) {
+    return "\"job_id\": " + jstr(st.id) + ",\n    \"job\": " + job_status_json(st);
+}
+
 static unsigned default_thread_pool_size() {
     unsigned n = std::thread::hardware_concurrency();
     return (n > 0) ? std::max(2u, n) : 4u;
@@ -256,6 +261,30 @@ int main(int argc, char* argv[]) {
                                 "application/json");
                 return;
             }
+            // limit 0 with a total: the total only (no page; limit 0 would otherwise
+            // mean "all hits" and materialise every match).
+            if (opts.limit == 0) {
+                MatchSet ms;
+                QueryJobStatus st;
+                std::optional<QueryJobStatus> have = jobs.lookup(query_text, opts);
+                if (have && have->finished()) {
+                    st = *have;
+                } else if (total_async) {
+                    st = jobs.ensure(query_text, opts);
+                } else {
+                    QueryOptions count_opts = opts;
+                    count_opts.limit = 1;
+                    count_opts.offset = 0;
+                    auto [cms, cel] = run_single_query(corpus, query_text, count_opts);
+                    (void)cel;
+                    st = jobs.record_finished(query_text, opts, cms.total_count, cms.total_exact);
+                }
+                ms.total_count = st.finished() ? st.total : st.counted;
+                ms.total_exact = st.finished() && st.total_exact;
+                res.set_content(to_query_result_json(corpus, query_text, ms, opts, 0.0, job_fields(st)),
+                                "application/json");
+                return;
+            }
             // A cached total (finished job) → only the page is computed.
             std::optional<QueryJobStatus> known = jobs.lookup(query_text, opts);
             if (known && !known->finished()) {
@@ -271,7 +300,7 @@ int main(int argc, char* argv[]) {
                 auto [ms, elapsed] = run_single_query(corpus, query_text, page_opts);
                 ms.total_count = known->total;
                 ms.total_exact = known->total_exact;
-                extra = "\"job\": " + job_status_json(*known);
+                extra = job_fields(*known);
                 res.set_content(to_query_result_json(corpus, query_text, ms, opts, elapsed, extra),
                                 "application/json");
                 return;
@@ -279,7 +308,7 @@ int main(int argc, char* argv[]) {
             if (!total_async) {
                 auto [ms, elapsed] = run_single_query(corpus, query_text, opts);
                 QueryJobStatus st = jobs.record_finished(query_text, opts, ms.total_count, ms.total_exact);
-                extra = "\"job\": " + job_status_json(st);
+                extra = job_fields(st);
                 res.set_content(to_query_result_json(corpus, query_text, ms, opts, elapsed, extra),
                                 "application/json");
                 return;
@@ -301,7 +330,7 @@ int main(int argc, char* argv[]) {
                     ms.total_exact = false;
                 }
             }
-            extra = "\"job\": " + job_status_json(st);
+            extra = job_fields(st);
             res.set_content(to_query_result_json(corpus, query_text, ms, opts, elapsed, extra),
                             "application/json");
         } catch (const std::exception& e) {
@@ -321,7 +350,9 @@ int main(int argc, char* argv[]) {
                             + json_escape(id) + "\"}\n", "application/json");
             return;
         }
-        res.set_content("{\"ok\":true,\"job\":" + job_status_json(*st) + "}\n", "application/json");
+        // `result` (same envelope as /query) and `job` carry the same object
+        const std::string js = job_status_json(*st);
+        res.set_content("{\"ok\":true,\"result\":" + js + ",\"job\":" + js + "}\n", "application/json");
     });
 
     // POST /cancel?job=<id> (or body {"job": "<id>"}) — stop a queued / running count.
