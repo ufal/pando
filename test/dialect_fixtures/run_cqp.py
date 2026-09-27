@@ -7,9 +7,8 @@
 Each query runs in its own `cqp -c` process:
 
   [set MatchingStrategy …; set HardBoundary …;]
-  A = <query>;
-  size A;
-  tabulate A match, matchend > "<tmp>";
+  A = <query>; size A;                              (timed: size_seconds)
+  A = <query>; tabulate A match, matchend > "<tmp>";   (only if size <= --max-hits)
 
 CQP's own defaults are used unless --strategy / --hard-boundary are given; the
 effective values (`set MatchingStrategy; set HardBoundary;`) and `cqp -v` are
@@ -47,6 +46,8 @@ def main():
     ap.add_argument("--hard-boundary", type=int, help="HardBoundary; default: CQP's")
     ap.add_argument("--filter", help="only query ids starting with this")
     ap.add_argument("--timeout", type=float, default=900)
+    ap.add_argument("--max-hits", type=int, default=5_000_000,
+                    help="tabulate hits only up to this total; above it record the total only (default 5M)")
     opts = ap.parse_args()
 
     prefix = ""
@@ -71,21 +72,35 @@ def main():
             continue
         with tempfile.NamedTemporaryFile("w", suffix=".tsv", delete=False) as tf:
             tmp = tf.name
-        script = f'{prefix}A = {q};\nsize A;\ntabulate A match, matchend > "{tmp}";\n'
         t0 = time.monotonic()
         try:
-            p = cqp_run(opts, script, opts.timeout)
-            dt = time.monotonic() - t0
+            # 1. total (timed: this is CQP's query time)
+            p = cqp_run(opts, f"{prefix}A = {q};\nsize A;\n", opts.timeout)
+            size_s = time.monotonic() - t0
             nums = [ln.strip() for ln in p.stdout.splitlines() if re.fullmatch(r"\s*\d+\s*", ln)]
             err = "\n".join(ln for ln in (p.stdout + p.stderr).splitlines()
                             if "error" in ln.lower() or "syntax" in ln.lower())
-            if not nums or not os.path.exists(tmp):
-                records.append(fixtures.error_record(qid, q, "cqp", err or p.stderr or p.stdout, dt))
+            if not nums:
+                records.append(fixtures.error_record(qid, q, "cqp", err or p.stderr or p.stdout, size_s))
             else:
                 total = int(nums[-1])
-                arr = np.fromfile(tmp, dtype=np.int64, sep=" ").reshape(-1, 2)
-                records.append(fixtures.record(qid, q, "cqp", arr[:, 0], arr[:, 1], total=total,
-                                               seconds=dt, extra={"warnings": err or None}))
+                extra = {"warnings": err or None, "size_seconds": round(size_s, 3)}
+                if total > opts.max_hits:
+                    rec = {"id": qid, "query": q, "engine": "cqp", "total": total, "unique": None,
+                           "sha256": None, "head": None, "window": None, "error": None}
+                    rec.update(extra)
+                    rec["seconds"] = round(size_s, 3)
+                    records.append(rec)
+                else:
+                    # 2. the hits themselves
+                    cqp_run(opts, f'{prefix}A = {q};\ntabulate A match, matchend > "{tmp}";\n', opts.timeout)
+                    arr = (np.fromfile(tmp, dtype=np.int64, sep=" ").reshape(-1, 2)
+                           if os.path.exists(tmp) else np.zeros((0, 2), np.int64))
+                    if len(arr) != total:
+                        extra["warnings"] = ((err + "; ") if err else "") + \
+                            f"tabulate returned {len(arr)} rows for size {total}"
+                    records.append(fixtures.record(qid, q, "cqp", arr[:, 0], arr[:, 1], total=total,
+                                                   seconds=time.monotonic() - t0, extra=extra))
         except subprocess.TimeoutExpired:
             records.append(fixtures.error_record(qid, q, "cqp", f"timeout after {opts.timeout}s",
                                                  time.monotonic() - t0))

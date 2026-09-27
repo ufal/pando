@@ -108,3 +108,18 @@ queries (the CQP column spells `within s`, `:: match.text_langcode=…`):
 test/dialect_fixtures/compare_pando.py --pando build/pando --corpus path/to/ud_demo \
     --expected test/dialect_fixtures/expected/manatee-ud.jsonl --dialect native --pando-column cqp
 ```
+
+## CQP on the full corpus (`expected/cqp-ud.jsonl`)
+
+`ud_cwb` is the same corpus encoded for CWB (word lemma upos xpos deprel feats,
+`s`, `text` {id, langcode, treebank}). On a machine with `cqp`:
+
+```sh
+test/dialect_fixtures/run_cqp.py --registry /Volumes/Data2/Corpora/kontext-pando/cwb/registry \
+    --corpus UD_CWB --out test/dialect_fixtures/expected/cqp-ud.jsonl
+test/dialect_fixtures/compare_pando.py --pando build/pando --corpus path/to/ud_demo \
+    --expected test/dialect_fixtures/expected/cqp-ud.jsonl --dialect native
+```
+
+Hit lists are tabulated for totals up to `--max-hits` (default 5M); `size_seconds`
+is CQP's time for the query and its total.
