@@ -148,3 +148,27 @@ fullmax=0	[upos="DET"] []* [upos="NOUN"]
 [upos="DET"] [upos="ADJ" | upos="NUM"]* [upos="NOUN"] within s
 [lemma="un.*"] []{0,3} [upos="NOUN"]
 [upos="PUNCT"] [upos="PUNCT"]* [upos="PUNCT"]
+
+# ── Aggregation (`; count by` / `group by`): the buckets must not depend on the path.
+# Fast paths used to return the hit list without the buckets ("0 matches, 0 groups").
+[upos="NOUN"]; count by lemma
+[lemma="book"]; count by form
+[upos="NOUN"] within text_langcode="en"; count by lemma
+[upos="ADJ"] [upos="NOUN"]; count by lemma
+[upos="ADJ"] [upos="NOUN"] within s; count by form
+[upos="ADJ"] [upos="NOUN"] :: match.text_langcode="cs"; count by lemma
+[upos="DET"] [upos="ADJ"] [upos="NOUN"]; count by lemma
+[upos="ADJ" & lemma="good"] [upos="NOUN"]; count by lemma
+[lemma=".*ness"]; count by lemma
+[form="the" %c] [upos="NOUN"]; count by lemma
+[upos="DET"] []{0,3} [upos="NOUN"]; count by lemma
+[upos="ADJ"]+ [upos="NOUN"]; count by lemma
+[upos="DET"]? [upos="NOUN"]; count by upos
+[upos="VERB"] > [upos="NOUN"]; count by lemma
+a:[upos="VERB"] > b:[upos="NOUN"]; count by a.lemma, b.lemma
+[upos="VERB"] >> [upos="NOUN"]; count by lemma
+[upos="VERB"] !> [deprel="nsubj"]; count by lemma
+[lemma="book"] > [upos="ADJ"]; count by lemma
+[upos="VERB" & text_langcode="en"] > [upos="NOUN"]; count by lemma
+<s> [upos="DET"]; count by lemma
+[upos="ADJ"] [upos="NOUN"]; group by lemma

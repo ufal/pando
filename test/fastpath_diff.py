@@ -12,6 +12,9 @@ region filters forced to bitsets, PANDO_MASK_BITS=1) and requires
   * the first page (``--dump-page --limit K``, the normal concordance path
     without total) to be K distinct members of the full set.
 
+A query with an aggregation (``…; count by …`` / ``group by``) is instead run
+once per mode and the printed buckets and totals must be identical.
+
 Exit status 0 = all equal, 1 = a mismatch, 2 = usage / run error.
 
 Usage:
@@ -65,7 +68,35 @@ def parse_dump(stdout):
     return int(head["total"]), head.get("exact") == "1", lines[1:]
 
 
+AGG_RE = re.compile(r";\s*(count|group)\s+by\b", re.I)
+
+
+def check_agg_query(opts, query):
+    """Aggregation: the whole output (buckets + total) must not depend on the path."""
+    problems, info, outs = [], {}, {}
+    for mode in MODES:
+        out, path, dt, _ = run(opts.pando, opts.corpus, query, [], mode, opts.timeout)
+        outs[mode] = out
+        info[mode] = (path, dt)
+    m = re.search(r"Total:\s*(\d+)", outs["off"])
+    if not m:
+        problems.append(f"no 'Total:' line in the generic output: {outs['off'].strip()[-200:]!r}")
+    ref = int(m.group(1)) if m else -1
+    for mode in MODES:
+        if outs[mode] != outs["off"]:
+            a, b = outs[mode].splitlines(), outs["off"].splitlines()
+            diff = next((i for i in range(max(len(a), len(b)))
+                         if i >= len(a) or i >= len(b) or a[i] != b[i]), None)
+            problems.append(f"[{mode}] aggregation output differs from generic at line {diff}: "
+                            f"{a[diff] if diff is not None and diff < len(a) else '<eof>'!r} vs "
+                            f"{b[diff] if diff is not None and diff < len(b) else '<eof>'!r}")
+    info["full"] = "agg"
+    return {mode: ref for mode in MODES}, info, problems
+
+
 def check_query(opts, query, max_full):
+    if AGG_RE.search(query):
+        return check_agg_query(opts, query)
     problems = []
     info = {}
     totals = {}
@@ -213,7 +244,7 @@ def main():
                 print(f"{'ERROR':>10}  {'':4}  {'':15} {'':>7} {'':>9} {'':>7}  {q}\n    {e}")
                 continue
             status = "" if not problems else "  <-- MISMATCH"
-            print(f"{totals['off']:>10}  {'yes' if info['full'] else 'no':4}  {info['on'][0]:15} "
+            print(f"{totals['off']:>10}  {info['full'] if isinstance(info['full'], str) else ('yes' if info['full'] else 'no'):4}  {info['on'][0]:15} "
                   f"{info['on'][1]:7.3f} {info['nomerge'][1]:9.3f} {info['off'][1]:7.3f}  {q}{status}")
             for p in problems:
                 print("    " + p)

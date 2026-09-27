@@ -3744,6 +3744,27 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
         if (agg_ptr) return agg_capped;
         return count_total && max_total_cap > 0 && result.total_count >= max_total_cap;
     };
+    // Common exit for every path that fed hits through add_match(): with an
+    // aggregation (`…; count by …`) hand back the buckets, otherwise run the
+    // post-filters on the materialised hits. Fast paths used to return `result`
+    // directly, which dropped the buckets (`[ADJ] [NOUN]; count by lemma` → 0).
+    auto finish_query = [&]() -> MatchSet {
+        if (agg_ptr) {
+            result.matches.clear();
+            result.total_count = agg_ptr->total_hits;
+            result.total_exact = !agg_capped;
+            result.aggregate_buckets = std::move(agg_storage);
+            return std::move(result);
+        }
+        apply_anchor_filters(token_anchor_constraints, result);
+        apply_within_having(q, result);
+        apply_not_within(q, result);
+        apply_containing(q, result);
+        apply_position_orders(q, name_map, result);
+        apply_global_filters(q, name_map, result);
+        result.total_exact = !reached_limit() && !reached_total_cap();
+        return std::move(result);
+    };
 
     // ── Merge operands (P1.4 / P1.5) ─────────────────────────────────────
     // A plain EQ leaf is a zero-copy `.rev` span. Other boolean combinations of
@@ -4048,14 +4069,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             result.aggregate_buckets = std::move(agg_storage);
             return result;
         }
-        apply_anchor_filters(token_anchor_constraints, result);
-        apply_within_having(q, result);
-        apply_not_within(q, result);
-        apply_containing(q, result);
-        apply_position_orders(q, name_map, result);
-        apply_global_filters(q, name_map, result);
-        result.total_exact = !reached_limit() && !reached_total_cap();
-        return result;
+        return finish_query();
     }
 
     // ── Gap / optional / repetition fast path (P2.1–P2.3) ───────────────
@@ -4311,14 +4325,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 }
                 if (max_total_cap > 0 && result.total_count > max_total_cap)
                     result.total_count = max_total_cap;
-                apply_anchor_filters(token_anchor_constraints, result);
-                apply_within_having(q, result);
-                apply_not_within(q, result);
-                apply_containing(q, result);
-                apply_position_orders(q, name_map, result);
-                apply_global_filters(q, name_map, result);
-                result.total_exact = !reached_limit() && !reached_total_cap();
-                return result;
+                return finish_query();
             }
         }
     }
@@ -4540,14 +4547,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 }
 
                 if (first_eq != n) {
-                    apply_anchor_filters(token_anchor_constraints, result);
-                    apply_within_having(q, result);
-                    apply_not_within(q, result);
-                    apply_containing(q, result);
-                    apply_position_orders(q, name_map, result);
-                    apply_global_filters(q, name_map, result);
-                    result.total_exact = !reached_limit() && !reached_total_cap();
-                    return result;
+                    return finish_query();
                 }
                 (void)ok;
             }
@@ -4597,14 +4597,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 return !reached_limit() && !reached_total_cap();
             });
 
-            apply_anchor_filters(token_anchor_constraints, result);
-            apply_within_having(q, result);
-            apply_not_within(q, result);
-            apply_containing(q, result);
-            apply_position_orders(q, name_map, result);
-            apply_global_filters(q, name_map, result);
-            result.total_exact = !reached_limit() && !reached_total_cap();
-            return result;
+            return finish_query();
         }
     }
 
@@ -4985,14 +4978,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                         run(c64.data(), c64.size(), p64.data(), p64.size());
                     }
 
-                    apply_anchor_filters(token_anchor_constraints, result);
-                    apply_within_having(q, result);
-                    apply_not_within(q, result);
-                    apply_containing(q, result);
-                    apply_position_orders(q, name_map, result);
-                    apply_global_filters(q, name_map, result);
-                    result.total_exact = !reached_limit() && !reached_total_cap();
-                    return result;
+                    return finish_query();
                 }
             } else if (rt == RelationType::TRANS_GOVERNS || rt == RelationType::TRANS_GOV_BY) {
                 // ── Transitive deps (P1.9): sentence-windowed Euler join ──
@@ -5175,14 +5161,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     if (max_total_cap > 0 && result.total_count > max_total_cap)
                         result.total_count = max_total_cap;
 
-                    apply_anchor_filters(token_anchor_constraints, result);
-                    apply_within_having(q, result);
-                    apply_not_within(q, result);
-                    apply_containing(q, result);
-                    apply_position_orders(q, name_map, result);
-                    apply_global_filters(q, name_map, result);
-                    result.total_exact = !reached_limit() && !reached_total_cap();
-                    return result;
+                    return finish_query();
                 }
             } else if (rt == RelationType::NOT_GOVERNS || rt == RelationType::NOT_GOV_BY) {
                 // ── Negated direct deps (P1.10) ──
@@ -5352,14 +5331,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     if (max_total_cap > 0 && result.total_count > max_total_cap)
                         result.total_count = max_total_cap;
 
-                    apply_anchor_filters(token_anchor_constraints, result);
-                    apply_within_having(q, result);
-                    apply_not_within(q, result);
-                    apply_containing(q, result);
-                    apply_position_orders(q, name_map, result);
-                    apply_global_filters(q, name_map, result);
-                    result.total_exact = !reached_limit() && !reached_total_cap();
-                    return result;
+                    return finish_query();
                 }
             }
         }
@@ -5465,14 +5437,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
         result.aggregate_buckets = std::move(agg_storage);
         return result;
     }
-    apply_anchor_filters(token_anchor_constraints, result);
-    apply_within_having(q, result);
-    apply_not_within(q, result);
-    apply_containing(q, result);
-    apply_position_orders(q, name_map, result);
-    apply_global_filters(q, name_map, result);
-    result.total_exact = !reached_limit() && !reached_total_cap();
-    return result;
+    return finish_query();
 }
 
 // ── Shared seed expansion (single source of truth for match logic) ───────
