@@ -129,6 +129,8 @@ static int upgrade_index(const std::string& dir, bool quiet = false,
                 return 1;
             }
             if (!quiet) std::cerr << "Wrote " << dir << "/dep.head_rel (" << secs() << " s)\n";
+        } else if (!quiet) {
+            std::cerr << dir << "/dep.head_rel up to date\n";
         }
     }
     try {
@@ -150,6 +152,8 @@ static int upgrade_index(const std::string& dir, bool quiet = false,
             }
         }
         if (!quiet) std::cerr << "Fold indexes up to date (" << secs() << " s)\n";
+        if (!quiet && !corpus.has_deps())
+            std::cerr << "No dependency index: no dep.head_rel / edge postings\n";
         if (corpus.has_deps() && corpus.deps().head_rel_data() && dep_pairs != "none") {
             size_t from = 0;
             while (from <= dep_pairs.size()) {
@@ -170,7 +174,12 @@ static int upgrade_index(const std::string& dir, bool quiet = false,
                     continue;
                 }
                 pando::DepPairIndex probe;
-                if (probe.open(corpus, h, c)) continue;
+                if (probe.open(corpus, h, c)) {
+                    if (!quiet)
+                        std::cerr << "Edge postings " << pando::DepPairIndex::base_path(dir, h, c)
+                                  << ".rev up to date\n";
+                    continue;
+                }
                 std::string err;
                 if (!pando::DepPairIndex::build(corpus, h, c, &err)) {
                     std::cerr << (explicit_list ? "Error: " : "Note: ") << err << "\n";
