@@ -1,0 +1,54 @@
+# Dialect fixtures: the same queries run on CQP (CWB), Manatee and pando
+# (--cql cwb / --cql manatee) over the same corpus (see README.md).
+#
+# Columns: id <TAB> CQP query <TAB> Manatee query <TAB> note
+#   Manatee "=" : same text as the CQP query;  "-" : not run on Manatee.
+#   CQP "-"     : not run on CQP.
+# Attributes follow the exported ud_demo: word (= pando form), lemma, upos,
+# deprel; structures text (langcode, treebank), doc, s.
+
+# --- sanity: single tokens and plain sequences (all engines must agree) ---
+B01	[upos="NOUN"]	=	single EQ
+B02	[upos="ADJ"] [upos="NOUN"]	=	sequence
+B03	[word="the"] [upos="NOUN"]	=	word attribute
+B04	"the" [upos="NOUN"]	=	bare string = default attribute (word)
+B05	[lemma="un.*"]	=	regex, anchored to the whole value
+B06	[lemma=".*ness"]	=	regex, leading wildcard
+B07	[word="the"%c] [upos="NOUN"]	-	CQP case-insensitive flag
+B08	-	[word="(?i)the"] [upos="NOUN"]	Manatee case-insensitive regex
+B09	[upos="NOUN" & lemma!="house"]	=	AND with !=
+B10	[upos="DET" | upos="PRON"] [upos="NOUN"]	=	OR inside a token
+B11	[upos="DET"] [] [upos="NOUN"]	=	fixed gap
+
+# --- structures ---
+S01	[upos="ADJ"] [upos="NOUN"] within s	[upos="ADJ"] [upos="NOUN"] within <s/>	within s
+S02	<s> [upos="DET"]	<s> [upos="DET"]	sentence start
+S03	[upos="NOUN"] </s>	[upos="NOUN"] </s>	sentence end
+S04	[upos="NOUN"] :: match.text_langcode="en"	[upos="NOUN"] within <text langcode="en"/>	text attribute filter
+S05	[upos="ADJ"] [upos="NOUN"] :: match.text_langcode="cs"	[upos="ADJ"] [upos="NOUN"] within <text langcode="cs"/>	sequence + text filter
+
+# --- repetition and optional tokens (Phase 2): the semantics to pin down ---
+R01	[upos="DET"] []{0,3} [upos="NOUN"]	=	bounded gap
+R02	[upos="DET"] [upos="ADJ"]? [upos="NOUN"]	=	optional token
+R03	[upos="DET"] []+ [upos="NOUN"]	=	unbounded gap (what is the cap?)
+R04	[upos="DET"] []* [upos="NOUN"]	=	unbounded, possibly empty
+R05	[upos="DET"] []+ [upos="NOUN"] within s	[upos="DET"] []+ [upos="NOUN"] within <s/>	unbounded gap within s
+R06	[upos="DET"] []{1,10} [upos="NOUN"] within s	[upos="DET"] []{1,10} [upos="NOUN"] within <s/>	bounded gap within s
+R07	[upos="ADJ"]+ [upos="NOUN"]	=	leading repetition (match start / strategy)
+R08	[upos="ADJ"]* [upos="NOUN"]	=	leading optional repetition
+R09	[upos="NOUN"] [upos="ADJ"]+	=	trailing repetition (match end / strategy)
+R10	[upos="NOUN"] [upos="ADJ"]*	=	trailing optional repetition
+R11	[upos="DET"]? [upos="NOUN"]	=	leading optional token
+R12	[upos="NOUN"] [upos="PUNCT"]?	=	trailing optional token
+R13	[upos="DET"] [upos="ADJ"]{2,3} [upos="NOUN"]	=	bounded repetition of a token
+R14	[upos="DET"] []{2} [upos="NOUN"]	=	exact repetition
+R15	[upos="ADP"] [upos="DET"]? [upos="ADJ"]* [upos="NOUN"]	=	optional + star in one pattern
+R16	[upos="VERB"] []{0,5} [upos="VERB"] within s	[upos="VERB"] []{0,5} [upos="VERB"] within <s/>	same class both ends
+R17	[lemma="be"] []* [upos="VERB"] within s	[lemma="be"] []* [upos="VERB"] within <s/>	rare seed, star gap
+R18	[upos="NOUN"] []{0,2} [upos="NOUN"]	=	overlapping candidates (NOUN NOUN NOUN)
+
+# --- groups and alternation ---
+G01	([upos="ADJ"] [upos="CCONJ"])+ [upos="NOUN"]	=	repeated group
+G02	([upos="DET"] | [upos="PRON"]) [upos="NOUN"]	=	alternation inside a group
+G03	[upos="DET"] [upos="NOUN"] | [upos="PRON"]	=	top-level alternation of sequences
+G04	([upos="ADJ"] [upos="ADJ"]?)? [upos="NOUN"]	=	nested optional group
