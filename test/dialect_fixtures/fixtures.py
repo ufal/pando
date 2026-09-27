@@ -3,17 +3,18 @@
 A result record (one JSON object per line in a results .jsonl file):
 
   {"id": "R01", "query": "...", "engine": "cqp", "total": 2498881,
-   "unique": 2498881, "md5": "…", "window": [[m, e], ...], "error": null,
+   "unique": 2498881, "sha256": "…", "head": [[m, e], ...], "window": [[m, e], ...], "error": null,
    "seconds": 1.2}
 
   total   number of hits the engine reports (CQP `size`, Manatee conc.size(),
           pando total)
   unique  distinct (match, matchend) pairs; both positions inclusive corpus
           positions of the first and the last matched token
-  md5     md5 of the sorted distinct pairs, one "match matchend\\n" per pair
+  sha256  sha256 of the sorted distinct pairs, one "match matchend\\n" per pair
           (null when the hit list was too large to collect)
+  head    the first HEAD (50) sorted distinct pairs
   window  all distinct pairs with match < WINDOW (default 100000), sorted —
-          enough to see *how* two engines differ when the md5s disagree
+          enough to see *how* two engines differ when the hashes disagree
 """
 
 import hashlib
@@ -23,6 +24,7 @@ import os
 import numpy as np
 
 WINDOW = 100_000
+HEAD = 50
 MAX_PAIRS = 30_000_000
 
 
@@ -52,15 +54,16 @@ def record(qid, query, engine, starts, ends, total=None, window=WINDOW, seconds=
     rec = {"id": qid, "query": query, "engine": engine,
            "total": int(total if total is not None else len(m)), "error": None}
     if len(m) > MAX_PAIRS:
-        rec.update(unique=None, md5=None, window=None)
+        rec.update(unique=None, sha256=None, head=None, window=None)
     else:
         pairs = np.unique(np.stack([m, e], axis=1), axis=0) if len(m) else np.zeros((0, 2), np.int64)
-        h = hashlib.md5()
+        h = hashlib.sha256()
         for c in range(0, len(pairs), 1 << 20):
             blk = pairs[c:c + (1 << 20)]
             h.update("".join(f"{a} {b}\n" for a, b in blk.tolist()).encode())
         rec["unique"] = int(len(pairs))
-        rec["md5"] = h.hexdigest()
+        rec["sha256"] = h.hexdigest()
+        rec["head"] = pairs[:HEAD].tolist()
         rec["window"] = pairs[pairs[:, 0] < window].tolist()
     if seconds is not None:
         rec["seconds"] = round(seconds, 3)
@@ -71,7 +74,7 @@ def record(qid, query, engine, starts, ends, total=None, window=WINDOW, seconds=
 
 def error_record(qid, query, engine, msg, seconds=None):
     rec = {"id": qid, "query": query, "engine": engine, "total": None, "unique": None,
-           "md5": None, "window": None, "error": msg.strip()[:2000]}
+           "sha256": None, "head": None, "window": None, "error": msg.strip()[:2000]}
     if seconds is not None:
         rec["seconds"] = round(seconds, 3)
     return rec

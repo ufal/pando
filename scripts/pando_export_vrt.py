@@ -50,8 +50,17 @@ def read_strings(data_path, idx_path):
     return out
 
 
+ESCAPE = "xml"
+
+
 def esc(s):
-    s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    """Token / attribute value for a VRT line. "xml": & < > as entities (decode
+    with `cwb-encode -x`); "minimal": only a leading "<" (so the line cannot be
+    read as a tag) — for readers that do not decode entities (pando-index)."""
+    if ESCAPE == "xml":
+        s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    elif s.startswith("<"):
+        s = "&lt;" + s[1:]
     return s.replace("\t", " ").replace("\n", " ").replace("\r", " ")
 
 
@@ -79,12 +88,27 @@ def main():
     ap.add_argument("--name", default="ud_demo", help="corpus name for the configs (default ud_demo)")
     ap.add_argument("--write-configs", action="store_true",
                     help="write <output>.cwb-encode.sh and <output>.manatee next to the output")
+    ap.add_argument("--range", help="export only corpus positions START:END (END exclusive); "
+                    "positions in the output start at 0, structures are clipped")
+    ap.add_argument("--escape", choices=("xml", "minimal"), default="xml",
+                    help="xml (default; cwb-encode -x) or minimal (only a leading '<'; pando-index)")
+    ap.add_argument("--header", action="store_true",
+                    help="write a `<!-- #vrt positional-attributes: … -->` line (pando-index, Korp)")
     ap.add_argument("--chunk", type=int, default=1 << 20)
     opts = ap.parse_args()
+    global ESCAPE
+    ESCAPE = opts.escape
 
     corpus = opts.corpus
     info = read_info(corpus)
-    n = int(info["size"])
+    n_all = int(info["size"])
+    lo, hi = 0, n_all
+    if opts.range:
+        a, _, b = opts.range.partition(":")
+        lo, hi = int(a), int(b)
+        if not (0 <= lo < hi <= n_all):
+            raise SystemExit(f"bad --range {opts.range} for {n_all} tokens")
+    n = hi - lo
     positional = [a for a in info.get("positional", "").split(",") if a]
     structural = [s for s in info.get("structural", "").split(",") if s]
     region_attrs = [r for r in info.get("region_attrs", "").split(",") if r]
@@ -116,7 +140,7 @@ def main():
     for a in attrs:
         lex = read_strings(os.path.join(corpus, a + ".lex"), os.path.join(corpus, a + ".lex.idx"))
         lex = np.array([esc(s) for s in lex], dtype=object)
-        cols.append((lex, load_dat(os.path.join(corpus, a + ".dat"), n)))
+        cols.append((lex, load_dat(os.path.join(corpus, a + ".dat"), n_all)[lo:hi]))
 
     # structure events: opens before a token, closes after a token
     opens, closes = [], []   # (pos, order, text)
@@ -132,7 +156,7 @@ def main():
                 raise SystemExit(f"{base}.val: {len(v)} values for {len(rg)} regions")
             vals.append((a, v))
         for i in range(len(rg)):
-            s, e = int(rg[i, 0]), int(rg[i, 1])
+            s, e = max(int(rg[i, 0]), lo) - lo, min(int(rg[i, 1]), hi - 1) - lo
             if e < s:
                 continue
             at = "".join(f' {a}="{esc_attr(v[i])}"' for a, v in vals)
@@ -145,6 +169,8 @@ def main():
         gzip.open(opts.output, "wt", encoding="utf-8", compresslevel=3) if opts.output.endswith(".gz")
         else open(opts.output, "w", encoding="utf-8"))
     oi = ci = 0
+    if opts.header:
+        out.write("<!-- #vrt positional-attributes: " + " ".join(["word"] + attrs[1:]) + " -->\n")
     for c0 in range(0, n, opts.chunk):
         c1 = min(n, c0 + opts.chunk)
         fields = [lex[np.asarray(dat[c0:c1], dtype=np.int64)] for lex, dat in cols]

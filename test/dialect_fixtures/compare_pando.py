@@ -9,7 +9,7 @@ manatee → --cql manatee); --dialect overrides it (e.g. native, to see how far
 native pando is from the reference). Without --expected, --engine selects the
 query column and the pando results are only written (--out).
 
-Per query: total, distinct (match, matchend) pairs, md5 of the pair set; on a
+Per query: total, distinct (match, matchend) pairs, sha256 of the pair set; on a
 mismatch, examples of extra / missing pairs from the stored window.
 Exit status 0 = everything matches, 1 = a mismatch or error.
 """
@@ -30,7 +30,7 @@ def run_pando(opts, dialect, q, args):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=opts.timeout)
 
 
-def pando_record(opts, dialect, qid, q, engine):
+def pando_record(opts, dialect, qid, q, engine, kwic_cap=None):
     t0 = time.monotonic()
     p = run_pando(opts, dialect, q, ["--count-only"])
     if p.returncode != 0:
@@ -39,7 +39,7 @@ def pando_record(opts, dialect, qid, q, engine):
     path = (re.search(r"path=(\S+)", p.stderr) or [None, "?"])[1]
     if total > opts.max_dump:
         rec = {"id": qid, "query": q, "engine": "pando", "total": total, "unique": None,
-               "md5": None, "window": None, "error": None, "path": path}
+               "sha256": None, "head": None, "window": None, "error": None, "path": path}
         rec["seconds"] = round(time.monotonic() - t0, 3)
         return rec
     p = run_pando(opts, dialect, q, ["--dump-matches"])
@@ -51,7 +51,7 @@ def pando_record(opts, dialect, qid, q, engine):
         ss = [int(x) for x in s.split() if int(x) >= 0]
         ee = [int(x) for x in e.split() if int(x) >= 0]
         starts.append(min(ss))
-        ends.append(max(ee))
+        ends.append(max(ee) if not kwic_cap else min(max(ee), min(ss) + kwic_cap - 1))
     return fixtures.record(qid, q, "pando", starts, ends, total=total,
                            seconds=time.monotonic() - t0, extra={"path": path})
 
@@ -87,7 +87,7 @@ def main():
         if opts.filter and not qid.startswith(opts.filter):
             continue
         try:
-            r = pando_record(opts, dialect, qid, q, engine)
+            r = pando_record(opts, dialect, qid, q, engine, ref_meta.get("kwic_cap"))
         except subprocess.TimeoutExpired:
             r = fixtures.error_record(qid, q, "pando", f"timeout after {opts.timeout}s")
         recs.append(r)
@@ -103,11 +103,16 @@ def main():
             elif not r["error"]:
                 same_total = e["total"] == r["total"]
                 same_set = None
-                if e.get("md5") and r.get("md5"):
-                    same_set = e["md5"] == r["md5"]
+                if e.get("sha256") and r.get("sha256"):
+                    same_set = e["sha256"] == r["sha256"]
                 pairs = "same" if same_set else ("DIFF" if same_set is False else "n/a")
                 if not same_total or same_set is False:
                     status = "MISMATCH"
+                    if e.get("window") is None and e.get("head") is not None and r.get("head") is not None:
+                        a, b = [tuple(x) for x in e["head"]], [tuple(x) for x in r["head"]]
+                        b = b[:len(a)]
+                        if a != b:
+                            detail.append(f"first hits: {engine} {a[:6]}; pando {b[:6]}")
                     if e.get("window") is not None and r.get("window") is not None:
                         a = {tuple(x) for x in e["window"]}
                         b = {tuple(x) for x in r["window"]}

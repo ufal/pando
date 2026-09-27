@@ -12,6 +12,7 @@ their own matching strategies and repetition limits.
 | `queries.tsv` | the fixture queries, with a CQP and a Manatee column |
 | `run_cqp.py` | runs them on CQP, writes `expected/cqp-<corpus>.jsonl` |
 | `run_manatee.py` | runs them on Manatee (python `manatee` module), writes `expected/manatee-<corpus>.jsonl` |
+| `kontext_runner.js` | runs them on Manatee through a KonText site's `/view?…&format=json` (browser console) |
 | `compare_pando.py` | runs them on pando and compares with a reference file |
 | `fixtures.py` | shared helpers; describes the record format |
 | `expected/` | committed reference results |
@@ -70,6 +71,27 @@ test/dialect_fixtures/compare_pando.py --pando build/pando --corpus path/to/ud_d
 ```
 
 For each query: reference total, pando total, whether the (match, matchend)
-sets are identical (md5), and on a mismatch examples of extra / missing hits
+sets are identical (sha256), and on a mismatch examples of extra / missing hits
 among the first 100000 corpus positions. Above `--max-dump` hits (default 5M)
 only totals are compared.
+
+## Manatee through KonText (what `expected/manatee-ud_ewt.jsonl` is)
+
+The local kontext-pando KonText serves `ud_ewt_manatee` (UD English EWT,
+254 820 tokens) from Manatee. Its positions are ud_demo positions
+9659667 … 9914486 (texts en_ewt dev, test, train), so the matching pando index
+is an export of that range:
+
+```sh
+scripts/pando_export_vrt.py path/to/ud_demo ewt.vrt --range 9659667:9914487 \
+    --attrs form,lemma,upos,deprel --structs "doc;s" --escape minimal --header
+pando-index --format vertical ewt.vrt path/to/ud_ewt
+test/dialect_fixtures/compare_pando.py --pando build/pando --corpus path/to/ud_ewt \
+    --expected test/dialect_fixtures/expected/manatee-ud_ewt.jsonl --dialect native
+```
+
+The reference was recorded with `kontext_runner.js` in a browser tab on the
+KonText site (`runFixtures("ud_ewt_manatee", QUERIES)`). KonText cuts the KWIC
+of hits longer than 50 tokens (`kwic_cap` in the file's meta line), so the
+comparison caps pando's match ends the same way. `ud_ewt_manatee` has no `s`
+or `text` structures: those fixtures are recorded as Manatee errors.
