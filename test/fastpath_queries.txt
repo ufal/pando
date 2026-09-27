@@ -113,3 +113,38 @@ fullmax=0	[upos="VERB"] >> [upos="NOUN"] within text
 [upos="ADJ"] [upos="NOUN"] within s having [upos="X"]
 a:[upos="DET"] b:[upos="NOUN"] :: distance(a,b) < 2
 [upos="PUNCT"] []{0,3} [upos="PUNCT"] containing s
+
+# --- one variable-length element (seq_gap, P2.1-P2.3) ---
+[upos="DET"] []{0,3} [upos="NOUN"]
+[upos="DET"] [upos="ADJ"]? [upos="NOUN"]
+fullmax=0	[upos="DET"] []+ [upos="NOUN"]
+fullmax=0	[upos="DET"] []* [upos="NOUN"]
+[upos="DET"] []+ [upos="NOUN"] within s
+[upos="DET"] []{1,10} [upos="NOUN"] within s
+[upos="ADJ"]+ [upos="NOUN"]
+[upos="ADJ"]* [upos="NOUN"]
+[upos="NOUN"] [upos="ADJ"]+
+[upos="NOUN"] [upos="ADJ"]*
+[upos="DET"]? [upos="NOUN"]
+[upos="NOUN"] [upos="PUNCT"]?
+[upos="DET"] [upos="ADJ"]{2,3} [upos="NOUN"]
+[upos="DET"] []{2} [upos="NOUN"]
+[upos="VERB"] []{0,5} [upos="VERB"] within s
+[lemma="be"] []* [upos="VERB"] within s
+[upos="NOUN"] []{0,2} [upos="NOUN"]
+[upos="ADP"] [upos="DET"] [upos="ADJ"]* [upos="NOUN"]
+[upos="ADP"] [upos="DET"] [upos="ADJ"]* [upos="NOUN"] [upos="PUNCT"]
+[upos="DET"] [] [upos="ADJ"]+ [upos="NOUN"]
+[upos="DET"] [upos="ADJ"]+ [] [upos="NOUN"]
+[] [upos="ADJ"]+ [upos="NOUN"]
+[upos="ADJ"]+ [upos="NOUN"] []
+[upos="NOUN"] []{0,2} within s
+[upos="NOUN"] []{1,3}
+[]{1,2} [lemma="book"]
+[lemma="book"] []{0,4} [upos="NOUN"] within text_langcode="en"
+[upos="ADJ"]+ [upos="NOUN"] :: match.text_langcode="cs"
+[upos="DET"] []{0,3} [upos="NOUN"] :: match.text_langcode="cs"
+[upos="ADJ" & text_langcode="en"]+ [upos="NOUN"]
+[upos="DET"] [upos="ADJ" | upos="NUM"]* [upos="NOUN"] within s
+[lemma="un.*"] []{0,3} [upos="NOUN"]
+[upos="PUNCT"] [upos="PUNCT"]* [upos="PUNCT"]

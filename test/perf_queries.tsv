@@ -56,3 +56,7 @@ R3	[lemma="un.*"]
 R4	[form="the" %c]
 D10	[upos="VERB"] > [upos="NOUN"] within text
 D11	[upos="VERB"] > [upos="NOUN"] :: match.text_langcode="cs"
+G4	[upos="DET"] []+ [upos="NOUN"]
+G5	[upos="DET"] []{1,10} [upos="NOUN"] within s
+G6	[upos="DET"]? [upos="NOUN"]
+G7	[lemma="be"] []* [upos="VERB"] within s

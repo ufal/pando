@@ -4058,6 +4058,271 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
         return result;
     }
 
+    // ── Gap / optional / repetition fast path (P2.1–P2.3) ───────────────
+    //
+    // Linear sequences with exactly one variable-length element V:
+    //   prefix(p fixed tokens)  V{min,max}  suffix(q fixed tokens)
+    // V is a gap `[]{n,m}`, an optional `[X]?` or a repetition `[X]{n,m}` / `+` / `*`
+    // (unbounded = REPEAT_UNBOUNDED, as in the generic executor). With one variable
+    // element a (start, end) pair has exactly one segmentation, so the generic
+    // executor's hits are exactly the pairs (s, t) with: prefix at s, suffix at t,
+    // V = [s+p, t-1] of an allowed length whose tokens all match X. We iterate the
+    // rarer fixed side and count the partner side with two gallops per anchor —
+    // exact totals without enumerating hits; only the first page builds matches.
+    // Semantics = native pando (= Manatee without `within`): every (start, end) pair.
+    {
+        bool all_seq = true;
+        for (const auto& rel : q.relations)
+            if (rel.type != RelationType::SEQUENCE) { all_seq = false; break; }
+        int var_idx = -1, n_var = 0;
+        bool simple = all_seq && n >= 2 && fastpath_mode() == FastPathMode::On;
+        for (size_t i = 0; simple && i < n; ++i) {
+            const auto& tok = q.tokens[i];
+            if (tok.is_anchor() || tok.is_dep_subtree) simple = false;
+            if (tok.has_repetition()) { ++n_var; var_idx = static_cast<int>(i); }
+        }
+        if (simple && n_var == 1) {
+            const size_t v = static_cast<size_t>(var_idx);
+            const size_t p = v, qn = n - 1 - v;              // prefix / suffix lengths
+            const int vmin = q.tokens[v].min_repeat, vmax = q.tokens[v].max_repeat;
+            std::vector<SeqMergeOperand> ops(n);
+            bool ok = vmax >= vmin && vmax >= 1;
+            for (size_t i = 0; ok && i < n; ++i) {
+                ops[i] = merge_operand(q.tokens[i].conditions);
+                if (ops[i].kind == SeqMergeTok::Complex) ok = false;
+            }
+            std::string effective_within = q.within.empty() ? corpus_.default_within() : q.within;
+            const bool has_within = !effective_within.empty() && corpus_.has_structure(effective_within);
+            if (has_within && (corpus_.is_nested(effective_within) || corpus_.is_overlapping(effective_within)))
+                ok = false;
+            RegionPosMask region_mask;
+            if (ok) {
+                region_mask = build_region_eq_position_mask(corpus_, q.global_region_filters);
+                if (region_mask.status == RegionMaskStatus::Unsatisfiable) {
+                    result.plan_path = "seq_gap";
+                    result.total_exact = true;
+                    return result;
+                }
+            }
+            const CorpusPos corpus_end = corpus_.size();
+
+            // Starts of a fixed-length run of tokens [lo, hi), sorted; `free` = all
+            // wildcards. With a single constrained token the start list is that
+            // token's `.rev` span shifted by its offset (no copy); starts outside
+            // the corpus are skipped by the callers.
+            struct FixedSide {
+                bool free = true;
+                size_t len = 0;
+                bool use_span = false;
+                RevSpan span{};
+                CorpusPos shift = 0;
+                std::vector<CorpusPos> starts;
+                size_t size() const { return use_span ? span.count : starts.size(); }
+                CorpusPos at(size_t i) const { return use_span ? span.at(i) - shift : starts[i]; }
+                size_t geq(size_t from, CorpusPos x) const {   // first index >= from with at() >= x
+                    if (use_span) return gallop_rev(span, from, x + shift);
+                    return static_cast<size_t>(std::lower_bound(starts.begin() + static_cast<std::ptrdiff_t>(from),
+                                                                starts.end(), x) - starts.begin());
+                }
+            };
+            auto fixed_starts = [&](size_t lo, size_t hi) {
+                FixedSide f;
+                f.len = hi - lo;
+                size_t seed = SIZE_MAX, n_eq = 0;
+                for (size_t i = lo; i < hi; ++i)
+                    if (ops[i].kind == SeqMergeTok::EqRev) {
+                        ++n_eq;
+                        if (seed == SIZE_MAX || ops[i].span.count < ops[seed].span.count) seed = i;
+                    }
+                if (seed == SIZE_MAX) return f;              // only wildcards (or empty)
+                f.free = false;
+                if (n_eq == 1) {
+                    f.use_span = true;
+                    f.span = ops[seed].span;
+                    f.shift = static_cast<CorpusPos>(seed - lo);
+                    return f;
+                }
+                const RevSpan& S = ops[seed].span;
+                std::vector<size_t> cur(hi - lo, 0);
+                for (size_t k = 0; k < S.count; ++k) {
+                    const CorpusPos st = S.at(k) - static_cast<CorpusPos>(seed - lo);
+                    if (st < 0 || st + static_cast<CorpusPos>(f.len) > corpus_end) continue;
+                    bool all = true;
+                    for (size_t i = lo; i < hi && all; ++i) {
+                        if (i == seed || ops[i].kind != SeqMergeTok::EqRev) continue;
+                        const CorpusPos need = st + static_cast<CorpusPos>(i - lo);
+                        size_t& c = cur[i - lo];
+                        c = gallop_rev(ops[i].span, c, need);
+                        all = c < ops[i].span.count && ops[i].span.at(c) == need;
+                    }
+                    if (all) f.starts.push_back(st);
+                }
+                return f;
+            };
+            FixedSide pre, suf;
+            if (ok) {
+                pre = fixed_starts(0, p);
+                suf = fixed_starts(v + 1, n);
+                if (pre.free && suf.free) ok = false;        // e.g. [] []* [] — leave to generic
+            }
+            if (ok) {
+                result.plan_path = "seq_gap";
+                const bool v_wild = ops[v].kind == SeqMergeTok::Wildcard;
+                const RevSpan& X = ops[v].span;
+                // consecutive X positions starting at x (forward) / ending at y (backward)
+                // Callers ask in ascending x / y, so one monotone cursor suffices.
+                size_t xcur = 0;
+                auto run_fwd = [&](CorpusPos x, int cap) -> int {
+                    if (v_wild) return cap;
+                    xcur = gallop_rev(X, xcur, x);
+                    size_t k = xcur;
+                    int r = 0;
+                    while (r < cap && k < X.count && X.at(k) == x + r) { ++r; ++k; }
+                    return r;
+                };
+                auto run_back = [&](CorpusPos y, int cap) -> int {
+                    if (v_wild) return cap;
+                    xcur = gallop_rev(X, xcur, y + 1);         // first > y
+                    size_t k = xcur;
+                    int r = 0;
+                    while (r < cap && k > 0 && X.at(k - 1) == y - r) { ++r; --k; }
+                    return r;
+                };
+                const StructuralAttr* wsa = has_within ? &corpus_.structure(effective_within) : nullptr;
+                FlatRegionCursor wcur;
+                if (wsa) wcur = FlatRegionCursor(*wsa);
+                const bool use_mask = region_mask.status == RegionMaskStatus::Ready;
+                const bool cheap_total_ok = (q.global_region_filters.empty() || use_mask)
+                                            && token_anchor_constraints.empty();
+                bool stop = false;
+                auto emit = [&](CorpusPos st, int L, CorpusPos t) -> bool {
+                    // t = first suffix position (= V start + L)
+                    if (use_mask && !region_mask.contains(st)) return true;
+                    if (max_matches > 0 && result.matches.size() >= max_matches) {
+                        if (!count_total) return false;
+                        if (cheap_total_ok) {
+                            ++result.total_count;
+                            return !reached_total_cap();
+                        }
+                    }
+                    std::vector<CorpusPos> pm(2 * n);
+                    for (size_t i = 0; i < p; ++i) pm[i] = pm[n + i] = st + static_cast<CorpusPos>(i);
+                    const CorpusPos vb = st + static_cast<CorpusPos>(p);
+                    if (L == 0) { pm[v] = pm[n + v] = NO_HEAD; }
+                    else { pm[v] = vb; pm[n + v] = vb + L - 1; }
+                    for (size_t j = 0; j < qn; ++j) pm[v + 1 + j] = pm[n + v + 1 + j] = t + static_cast<CorpusPos>(j);
+                    add_match(std::move(pm));
+                    return !(reached_limit() || reached_total_cap());
+                };
+                // bulk count for a run of pairs that need no per-hit work
+                auto bulk = [&](size_t cnt) {
+                    result.total_count += cnt;
+                    if (max_total_cap > 0 && result.total_count >= max_total_cap) {
+                        result.total_count = max_total_cap;
+                        stop = true;
+                    }
+                };
+                auto page_full = [&] { return max_matches > 0 && result.matches.size() >= max_matches; };
+                const bool anchor_prefix = !pre.free && (suf.free || pre.size() <= suf.size());
+                if (anchor_prefix) {
+                    size_t tlo = 0;
+                    for (size_t a = 0; a < pre.size() && !stop; ++a) {
+                        const CorpusPos st = pre.at(a);
+                        if (st < 0) continue;
+                        const CorpusPos vb = st + static_cast<CorpusPos>(p);
+                        CorpusPos limit = corpus_end - 1;             // last allowed match position
+                        if (wsa) {
+                            const int64_t r = wcur.find(st);
+                            if (r < 0) continue;
+                            limit = std::min(limit, wcur.r[r].end);
+                        }
+                        // prefix, V and suffix must end by `limit`: L <= limit - vb + 1 - qn
+                        const int64_t room = limit - vb + 1 - static_cast<CorpusPos>(qn);
+                        if (room < 0) continue;
+                        const int lmax = static_cast<int>(std::min<int64_t>(vmax, room));
+                        const int L_hi = run_fwd(vb, lmax);
+                        if (L_hi < vmin) continue;
+                        if (use_mask && !region_mask.contains(st)) continue;
+                        if (qn == 0 || suf.free) {
+                            // every L in [vmin, L_hi] is a hit (suffix is wildcards or empty)
+                            if (page_full() && count_total && cheap_total_ok) {
+                                bulk(static_cast<size_t>(L_hi - vmin + 1));
+                                continue;
+                            }
+                            for (int L = vmin; L <= L_hi && !stop; ++L)
+                                if (!emit(st, L, vb + L)) stop = true;
+                            continue;
+                        }
+                        // suffix starts in [vb + vmin, vb + L_hi]
+                        tlo = suf.geq(tlo, vb + vmin);
+                        if (page_full() && count_total && cheap_total_ok) {
+                            bulk(suf.geq(tlo, vb + L_hi + 1) - tlo);
+                            continue;
+                        }
+                        for (size_t k = tlo; k < suf.size() && !stop; ++k) {
+                            const CorpusPos t = suf.at(k);
+                            if (t > vb + L_hi) break;
+                            if (!emit(st, static_cast<int>(t - vb), t)) stop = true;
+                        }
+                    }
+                } else {
+                    // anchor on the suffix: t ascending, match end e = t + qn - 1
+                    size_t slo = 0;
+                    for (size_t a = 0; a < suf.size() && !stop; ++a) {
+                        const CorpusPos t = suf.at(a);
+                        const CorpusPos e = t + static_cast<CorpusPos>(qn) - 1;
+                        if (t < 0 || e >= corpus_end) continue;
+                        CorpusPos first = 0;                          // first allowed match position
+                        if (wsa) {
+                            const int64_t r = wcur.find(e);
+                            if (r < 0) continue;
+                            first = wcur.r[r].start;
+                            if (t < first) continue;                  // suffix itself crosses a boundary
+                        }
+                        // the match must start at or after `first`: L <= t - first - p
+                        const int64_t room = t - first - static_cast<CorpusPos>(p);
+                        if (room < 0) continue;
+                        const int lmax = static_cast<int>(std::min<int64_t>(vmax, room));
+                        const int L_hi = run_back(t - 1, lmax);
+                        if (L_hi < vmin) continue;
+                        if (p == 0 || pre.free) {
+                            if (page_full() && count_total && cheap_total_ok && !use_mask) {
+                                bulk(static_cast<size_t>(L_hi - vmin + 1));
+                                continue;
+                            }
+                            for (int L = vmin; L <= L_hi && !stop; ++L)
+                                if (!emit(t - L - static_cast<CorpusPos>(p), L, t)) stop = true;
+                            continue;
+                        }
+                        // prefix starts st with st + p + L = t, L in [vmin, L_hi]
+                        const CorpusPos smin = t - L_hi - static_cast<CorpusPos>(p);
+                        const CorpusPos smax = t - vmin - static_cast<CorpusPos>(p);
+                        slo = pre.geq(slo, smin);                          // smin is ascending
+                        const size_t shi = pre.geq(slo, smax + 1);
+                        if (page_full() && count_total && cheap_total_ok && !use_mask) {
+                            bulk(shi - slo);
+                            continue;
+                        }
+                        for (size_t k = slo; k < shi && !stop; ++k) {
+                            const CorpusPos st = pre.at(k);
+                            if (!emit(st, static_cast<int>(t - st - static_cast<CorpusPos>(p)), t)) stop = true;
+                        }
+                    }
+                }
+                if (max_total_cap > 0 && result.total_count > max_total_cap)
+                    result.total_count = max_total_cap;
+                apply_anchor_filters(token_anchor_constraints, result);
+                apply_within_having(q, result);
+                apply_not_within(q, result);
+                apply_containing(q, result);
+                apply_position_orders(q, name_map, result);
+                apply_global_filters(q, name_map, result);
+                result.total_exact = !reached_limit() && !reached_total_cap();
+                return result;
+            }
+        }
+    }
+
     // ── Sequence fast path: bypass plan/step/expand for pure linear sequences ──
     //
     // For queries like [upos="ADJ"] [upos="NOUN"] where all relations are
