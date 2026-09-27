@@ -444,6 +444,44 @@ struct AggregateBucketData {
     std::vector<Column> columns;
     std::unordered_map<std::vector<int64_t>, size_t, VecHash, VecEq> counts;
 
+    // P7.2: buckets of the flat counters (one or two positional columns), kept in
+    // their compact form: `flat_dense[id]` (one column) or packed keys
+    // `id1 * flat_v2 + id2` in `flat_keys` / `flat_vals` (kFlatEmpty = free slot).
+    // Read every bucket through for_each_bucket(), never `counts` alone.
+    static constexpr uint64_t kFlatEmpty = ~uint64_t{0};
+    int flat_ncols = 0;
+    uint64_t flat_v2 = 1;
+    std::vector<uint64_t> flat_dense;
+    std::vector<uint64_t> flat_keys, flat_vals;
+
+    /// f(const int64_t* key, size_t key_len, size_t count) for every bucket.
+    template <class F>
+    void for_each_bucket(F&& f) const {
+        for (const auto& [k, c] : counts) f(k.data(), k.size(), c);
+        int64_t key[2];
+        for (size_t i = 0; i < flat_dense.size(); ++i) {
+            if (!flat_dense[i]) continue;
+            key[0] = static_cast<int64_t>(i);
+            f(key, size_t{1}, static_cast<size_t>(flat_dense[i]));
+        }
+        for (size_t i = 0; i < flat_keys.size(); ++i) {
+            if (flat_keys[i] == kFlatEmpty) continue;
+            if (flat_ncols == 1) {
+                key[0] = static_cast<int64_t>(flat_keys[i]);
+            } else {
+                key[0] = static_cast<int64_t>(flat_keys[i] / flat_v2);
+                key[1] = static_cast<int64_t>(flat_keys[i] % flat_v2);
+            }
+            f(key, static_cast<size_t>(flat_ncols), static_cast<size_t>(flat_vals[i]));
+        }
+    }
+    size_t bucket_count() const {
+        size_t n = counts.size();
+        for (uint64_t c : flat_dense) n += c != 0;
+        for (uint64_t k : flat_keys) n += k != kFlatEmpty;
+        return n;
+    }
+
     struct RegionInternCol {
         std::unordered_map<std::string, int64_t> str_to_id;
         std::vector<std::string> id_to_str;
@@ -455,6 +493,8 @@ struct AggregateBucketData {
 /// Decode one bucket key to the same tab-separated string as make_key/read_field.
 std::string decode_aggregate_bucket_key(const AggregateBucketData& data,
                                           const std::vector<int64_t>& key);
+std::string decode_aggregate_bucket_key(const AggregateBucketData& data,
+                                          const int64_t* key, size_t key_len);
 
 struct StatsMetricSpec {
     enum class Kind { Avg, Median } kind = Kind::Avg;

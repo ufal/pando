@@ -479,8 +479,9 @@ static void freq_build_counts(const Corpus& corpus, const MatchSet& ms,
                               size_t& total_matches) {
     counts.clear();
     if (ms.aggregate_buckets) {
-        for (const auto& [k, c] : ms.aggregate_buckets->counts)
-            counts[decode_aggregate_bucket_key(*ms.aggregate_buckets, k)] += c;
+        ms.aggregate_buckets->for_each_bucket([&](const int64_t* key, size_t len, size_t c) {
+            counts[decode_aggregate_bucket_key(*ms.aggregate_buckets, key, len)] += c;
+        });
     } else {
         for (const auto& m : ms.matches) ++counts[make_key(corpus, m, name_map, cmd.fields)];
     }

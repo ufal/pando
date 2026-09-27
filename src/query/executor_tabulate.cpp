@@ -307,8 +307,13 @@ size_t AggregateBucketData::VecHash::operator()(const std::vector<int64_t>& v) c
 
 std::string decode_aggregate_bucket_key(const AggregateBucketData& data,
                                         const std::vector<int64_t>& key) {
+    return decode_aggregate_bucket_key(data, key.data(), key.size());
+}
+
+std::string decode_aggregate_bucket_key(const AggregateBucketData& data,
+                                        const int64_t* key, size_t key_len) {
     std::string out;
-    for (size_t i = 0; i < key.size() && i < data.columns.size(); ++i) {
+    for (size_t i = 0; i < key_len && i < data.columns.size(); ++i) {
         if (i > 0) out += '\t';
         const auto& col = data.columns[i];
         if (col.date_transform != AggregateBucketData::Column::DateTransform::None) {

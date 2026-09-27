@@ -215,3 +215,12 @@ a:[upos="VERB"] > b:[upos="NOUN"]; count by a.lemma, b.lemma
 [upos="VERB" & deprel="root"] >> [upos="NOUN"]
 [upos="NOUN" & deprel="nsubj"] < [upos="VERB"]
 [upos="VERB" & deprel!="root"] > [upos="PRON"]
+# flat counters / aggregation sink (P7.2, P7.3)
+a:[upos="VERB"] > b:[upos="NOUN"]; count by a.lemma, b.lemma
+a:[upos="ADJ"] b:[upos="NOUN"]; count by b.lemma, a.form
+[upos="DET"] a:[upos="ADJ"]? [upos="NOUN"]; count by a.lemma
+[upos="DET"] []{0,2} b:[upos="NOUN"]; count by b.lemma
+a:[upos="ADJ"] [upos="NOUN"] :: match.text_langcode="en"; count by a.lemma
+a:[upos="ADJ"] b:[upos="NOUN"]; count by a.lemma, text_langcode
+[upos="VERB"] !> [deprel="nsubj"]; count by form
+[upos="ADJ"] [upos="NOUN"] within s; count by deprel

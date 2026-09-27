@@ -3112,6 +3112,131 @@ bool QueryExecutor::try_fast_aggregate(
     return true;
 }
 
+// ── P7.2: flat counters for `count by` on positional attributes ─────────
+// One column: a dense array indexed by lexicon id; two columns: an open-
+// addressing table on the packed key id1 * |lexicon 2| + id2. Replaces one
+// std::vector<int64_t> key + unordered_map<vector> probe per hit. The compact
+// buckets are handed to AggregateBucketData (flat_*) when the query finishes and
+// read through for_each_bucket(), without converting them to vector keys.
+// One column over a large lexicon starts as a hash table and turns dense once it
+// holds 1/8 of the lexicon, so a rare query does not allocate and scan a
+// lexicon-sized array.
+struct FlatAggCounter {
+    bool on = false;
+    int ncols = 0;
+    int tok[2] = {-1, -1};                 // label's token index; -1 = match start (first_pos)
+    const PositionalAttr* pa[2] = {nullptr, nullptr};
+    uint64_t v2 = 1;
+    bool dense_mode = false;
+    std::vector<uint64_t> dense;
+    std::vector<uint64_t> keys, vals;      // keys[i] == kEmpty: free
+    size_t used = 0;
+    uint64_t v1 = 0;
+    static constexpr uint64_t kEmpty = ~uint64_t{0};
+    static constexpr uint64_t kDenseAlways = uint64_t{1} << 20;   // 8 MB of counters
+    static constexpr uint64_t kDenseMax = uint64_t{1} << 24;
+
+    static uint64_t mix(uint64_t x) {
+        x ^= x >> 33; x *= 0xff51afd7ed558ccdULL; x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ULL; x ^= x >> 33;
+        return x;
+    }
+    void grow() {
+        if (ncols == 1 && v1 <= kDenseMax && used * 8 >= v1) {   // hash → dense
+            dense.assign(static_cast<size_t>(std::max<uint64_t>(1, v1)), 0);
+            for (size_t i = 0; i < keys.size(); ++i)
+                if (keys[i] != kEmpty) dense[static_cast<size_t>(keys[i])] += vals[i];
+            keys.clear(); keys.shrink_to_fit(); vals.clear(); vals.shrink_to_fit();
+            used = 0;
+            dense_mode = true;
+            return;
+        }
+        std::vector<uint64_t> ok = std::move(keys), ov = std::move(vals);
+        const size_t cap = ok.empty() ? 1024 : ok.size() * 2;
+        keys.assign(cap, kEmpty);
+        vals.assign(cap, 0);
+        used = 0;
+        for (size_t i = 0; i < ok.size(); ++i)
+            if (ok[i] != kEmpty) add_key(ok[i], ov[i]);
+    }
+    void add_key(uint64_t k, uint64_t c) {
+        if ((used + 1) * 10 > keys.size() * 7) {
+            grow();
+            if (dense_mode) { dense[static_cast<size_t>(k)] += c; return; }
+        }
+        const size_t mask = keys.size() - 1;
+        size_t i = static_cast<size_t>(mix(k)) & mask;
+        while (keys[i] != kEmpty && keys[i] != k) i = (i + 1) & mask;
+        if (keys[i] == kEmpty) { keys[i] = k; ++used; }
+        vals[i] += c;
+    }
+    /// Set up for `agg` when every column is a plain positional attribute (at most
+    /// two, no date / strlen transform) whose label resolves to a query token.
+    bool init(const AggregateBucketData& agg, const NameIndexMap& name_map, size_t ntok) {
+        if (agg.columns.empty() || agg.columns.size() > 2) return false;
+        for (size_t c = 0; c < agg.columns.size(); ++c) {
+            const auto& col = agg.columns[c];
+            if (col.kind != AggregateBucketData::Column::Kind::Positional || !col.pa
+                || col.date_transform != AggregateBucketData::Column::DateTransform::None)
+                return false;
+            if (!col.named_anchor.empty()) {
+                auto it = name_map.find(col.named_anchor);
+                if (it == name_map.end() || it->second >= ntok) return false;
+                tok[c] = static_cast<int>(it->second);
+            }
+            pa[c] = col.pa;
+        }
+        ncols = static_cast<int>(agg.columns.size());
+        if (ncols == 2) v2 = static_cast<uint64_t>(std::max<int64_t>(1, pa[1]->lexicon().size()));
+        v1 = static_cast<uint64_t>(std::max<int64_t>(0, pa[0]->lexicon().size()));
+        dense_mode = ncols == 1 && v1 <= kDenseAlways;
+        if (dense_mode) dense.assign(static_cast<size_t>(std::max<uint64_t>(1, v1)), 0);
+        on = true;
+        return true;
+    }
+    /// Key of one hit from its token starts `starts[0..n)`; false = not counted
+    /// (a labelled token that did not take part, as fill_aggregate_key).
+    bool key_of(const CorpusPos* starts, size_t n, uint64_t& key) const {
+        CorpusPos first = NO_HEAD;
+        uint64_t id[2] = {0, 0};
+        for (int c = 0; c < ncols; ++c) {
+            CorpusPos pos;
+            if (tok[c] >= 0) {
+                if (static_cast<size_t>(tok[c]) >= n) return false;
+                pos = starts[tok[c]];
+                if (pos == NO_HEAD) return false;
+            } else {
+                if (first == NO_HEAD) {
+                    for (size_t i = 0; i < n; ++i)
+                        if (starts[i] != NO_HEAD && (first == NO_HEAD || starts[i] < first)) first = starts[i];
+                    if (first == NO_HEAD) first = 0;   // as Match::first_pos()
+                }
+                pos = first;
+            }
+            id[c] = static_cast<uint64_t>(pa[c]->id_at(pos));
+        }
+        key = ncols == 1 ? id[0] : id[0] * v2 + id[1];
+        return true;
+    }
+    void inc(uint64_t key) {
+        if (dense_mode) ++dense[static_cast<size_t>(key)];
+        else add_key(key, 1);
+    }
+    /// Hand the compact buckets to `agg` (read through AggregateBucketData::for_each_bucket).
+    void flush(AggregateBucketData& agg) {
+        if (!on) return;
+        agg.flat_ncols = ncols;
+        agg.flat_v2 = v2;
+        if (dense_mode) {
+            agg.flat_dense = std::move(dense);
+        } else {
+            static_assert(kEmpty == AggregateBucketData::kFlatEmpty, "same empty marker");
+            agg.flat_keys = std::move(keys);
+            agg.flat_vals = std::move(vals);
+        }
+        on = false;
+    }
+};
+
 // ── Main execution ──────────────────────────────────────────────────────
 
 namespace {
@@ -3205,6 +3330,11 @@ bool build_aggregate_plan(const Corpus& corpus, const std::vector<std::string>& 
     out.columns.clear();
     out.region_intern.clear();
     out.counts.clear();
+    out.flat_ncols = 0;
+    out.flat_v2 = 1;
+    out.flat_dense.clear();
+    out.flat_keys.clear();
+    out.flat_vals.clear();
     out.total_hits = 0;
     out.columns.reserve(fields.size());
     out.region_intern.resize(fields.size());
@@ -3715,6 +3845,20 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             || !q.containing_clauses.empty() || !q.position_orders.empty()
             || !q.global_alignment_filters.empty() || !q.global_function_filters.empty());
 
+    // P7.2 / P7.3: flat counters; with no per-hit filters the fast paths' hits go
+    // straight into them (agg_sink) without building a Match.
+    FlatAggCounter flat_agg;
+    bool agg_sink = false;
+    if (agg_ptr && fastpath_mode() == FastPathMode::On && flat_agg.init(*agg_ptr, name_map, n)) {
+        bool any_dep_subtree = false;
+        for (const auto& tok : q.tokens) any_dep_subtree |= tok.is_dep_subtree;
+        agg_sink = !agg_per_match_post && token_anchor_constraints.empty()
+                   && q.global_region_filters.empty() && !any_dep_subtree;
+    }
+    auto flush_flat_agg = [&]() {
+        if (agg_ptr) flat_agg.flush(*agg_ptr);
+    };
+
     unsigned eff_threads = (agg_ptr && num_threads > 1) ? 1u : num_threads;
 
     std::vector<Match> reservoir;
@@ -3741,15 +3885,18 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 !match_survives_post_filters_for_aggregate(q, name_map, token_anchor_constraints,
                                                           post_scratch, m))
                 return true;
+            uint64_t fkey = 0;
             std::vector<int64_t> akey;
-            if (!fill_aggregate_key(*agg_ptr, corpus_, m, name_map, akey))
+            if (flat_agg.on ? !flat_agg.key_of(m.positions.data(), m.positions.size(), fkey)
+                            : !fill_aggregate_key(*agg_ptr, corpus_, m, name_map, akey))
                 return true;
             if (max_total_cap > 0 && agg_ptr->total_hits >= max_total_cap) {
                 agg_capped = true;
                 return false;
             }
+            if (flat_agg.on) flat_agg.inc(fkey);
+            else ++agg_ptr->counts[std::move(akey)];
             ++agg_ptr->total_hits;
-            ++agg_ptr->counts[std::move(akey)];
             progress_tick(m.first_pos(), agg_ptr->total_hits);
             return true;
         }
@@ -3772,6 +3919,20 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
     };
 
     auto add_match = [&](std::vector<CorpusPos>&& positions) {
+        if (agg_sink) {
+            // P7.3: count the hit from its token starts; no Match
+            uint64_t fkey = 0;
+            if (!flat_agg.key_of(positions.data(), n, fkey)) return;
+            if (max_total_cap > 0 && agg_ptr->total_hits >= max_total_cap) {
+                agg_capped = true;
+                return;
+            }
+            flat_agg.inc(fkey);
+            ++agg_ptr->total_hits;
+            // the first token can be an optional one that did not take part
+            progress_tick(positions[0] != NO_HEAD ? positions[0] : 0, agg_ptr->total_hits);
+            return;
+        }
         Match m = build_match(std::move(positions));
         if (token_anchor_constraints.empty()) {
             add_resolved_match(m);
@@ -3800,6 +3961,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
     // directly, which dropped the buckets (`[ADJ] [NOUN]; count by lemma` → 0).
     auto finish_query = [&]() -> MatchSet {
         if (agg_ptr) {
+            flush_flat_agg();
             result.matches.clear();
             result.total_count = agg_ptr->total_hits;
             result.total_exact = !agg_capped;
@@ -4445,6 +4607,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             }
         }
         if (agg_ptr) {
+            flush_flat_agg();
             result.matches.clear();
             result.total_count = agg_ptr->total_hits;
             result.total_exact = !agg_capped;
@@ -6072,6 +6235,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
     if (sample_size > 0 && !reservoir.empty())
         result.matches = std::move(reservoir);
     if (agg_ptr) {
+        flush_flat_agg();
         result.matches.clear();
         result.total_count = agg_ptr->total_hits;
         result.total_exact = !agg_capped;

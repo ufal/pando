@@ -403,6 +403,11 @@ bool build_aggregate_plan_impl(const Corpus& corpus, const std::vector<std::stri
     out.columns.clear();
     out.region_intern.clear();
     out.counts.clear();
+    out.flat_ncols = 0;
+    out.flat_v2 = 1;
+    out.flat_dense.clear();
+    out.flat_keys.clear();
+    out.flat_vals.clear();
     out.total_hits = 0;
     out.columns.reserve(fields.size());
     out.region_intern.resize(fields.size());

@@ -116,9 +116,16 @@ GroupRows group_rows(const Corpus& corpus, const MatchSet& ms, const std::vector
         // Id keys decode to distinct strings (lexicon ids, interned region / date
         // values), so each bucket is one group: select the top `limit` by count on
         // the ids, decode only those (and the ties at the cut, for the key order).
-        std::vector<std::pair<size_t, const std::vector<int64_t>*>> v;
-        v.reserve(agg->counts.size());
-        for (const auto& [k, c] : agg->counts) v.emplace_back(c, &k);
+        // (count, offset of the key in keybuf); keys of 1-2 ids, no allocation per bucket
+        std::vector<std::pair<size_t, size_t>> v;
+        std::vector<int64_t> keybuf;
+        const size_t kl = agg->columns.size();
+        v.reserve(agg->bucket_count());
+        keybuf.reserve(v.capacity() * kl);
+        agg->for_each_bucket([&](const int64_t* key, size_t len, size_t c) {
+            v.emplace_back(c, keybuf.size());
+            for (size_t i = 0; i < kl; ++i) keybuf.push_back(i < len ? key[i] : 0);
+        });
         out.groups = v.size();
         const size_t want = (limit == 0 || limit >= v.size()) ? v.size() : limit;
         auto desc = [](const auto& a, const auto& b) { return a.first > b.first; };
@@ -131,7 +138,8 @@ GroupRows group_rows(const Corpus& corpus, const MatchSet& ms, const std::vector
         }
         out.rows.reserve(keep_n);
         for (size_t i = 0; i < keep_n; ++i)
-            out.rows.emplace_back(decode_aggregate_bucket_key(*agg, *v[i].second), v[i].first);
+            out.rows.emplace_back(decode_aggregate_bucket_key(*agg, keybuf.data() + v[i].second, kl),
+                                  v[i].first);
         std::sort(out.rows.begin(), out.rows.end(), by_count_then_key);
         if (out.rows.size() > want) out.rows.resize(want);
         return out;
@@ -139,7 +147,9 @@ GroupRows group_rows(const Corpus& corpus, const MatchSet& ms, const std::vector
 
     std::map<std::string, size_t> counts;
     if (agg) {
-        for (const auto& [k, c] : agg->counts) counts[decode_aggregate_bucket_key(*agg, k)] += c;
+        agg->for_each_bucket([&](const int64_t* key, size_t len, size_t c) {
+            counts[decode_aggregate_bucket_key(*agg, key, len)] += c;
+        });
     } else {
         for (const auto& m : ms.matches) ++counts[make_group_key(corpus, m, name_map, fields)];
     }
