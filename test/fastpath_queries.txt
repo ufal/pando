@@ -103,3 +103,13 @@ fullmax=0	[upos="VERB"] >> [upos="NOUN"] within text
 [upos="VERB"] !> [deprel="nsubj"] :: match.text_langcode="en"
 [upos="DET"] !< [lemma="book"] within text_langcode="en"
 [upos="VERB"] !> [deprel="nsubj"] within s
+
+# --- anchors and post-filters: totals must include hits past the first page ---
+<s> [upos="DET"]
+[upos="NOUN"] </s>
+[upos="NOUN"] [upos="PUNCT"] </s>
+<s> [upos="DET"] [upos="NOUN"]
+[upos="VERB"] > [upos="NOUN"] </s>
+[upos="ADJ"] [upos="NOUN"] within s having [upos="X"]
+a:[upos="DET"] b:[upos="NOUN"] :: distance(a,b) < 2
+[upos="PUNCT"] []{0,3} [upos="PUNCT"] containing s

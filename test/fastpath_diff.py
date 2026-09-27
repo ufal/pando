@@ -101,6 +101,10 @@ def check_query(opts, query, max_full):
             total, exact, rows = parse_dump(out)
             if total != len(rows):
                 problems.append(f"[{mode}] dump total={total} but {len(rows)} rows")
+            if len(rows) != ref_total:
+                # --dump-matches materialises every hit; --count-only / --total count
+                # past the page — both must agree (anchors, post-filters, …)
+                problems.append(f"[{mode}] dump has {len(rows)} hits but count-only total is {ref_total}")
             if not exact:
                 problems.append(f"[{mode}] dump total not exact")
             if len(rows) != len(set(rows)):

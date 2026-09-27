@@ -3433,6 +3433,29 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
     if (!skip_name_validation)
         validate_query_name_bindings(query);
 
+    // Post-filters that run on the materialised hits (`within … having`,
+    // `containing`, `not within`, `::` functions / alignment, position orders)
+    // cannot see hits that were only counted, nor hits beyond a truncated page
+    // (the first page could come back empty). Until they are applied per hit:
+    // materialise every hit, filter, then cut the page and apply the total cap.
+    if (max_matches > 0 && sample_size == 0 && !aggregate_by_fields
+        && (query.within_having || query.not_within || !query.containing_clauses.empty()
+            || !query.position_orders.empty() || !query.global_alignment_filters.empty()
+            || !query.global_function_filters.empty())) {
+        MatchSet ms = execute(query, 0, true, 0, 0, random_seed, num_threads, nullptr, true);
+        if (ms.matches.size() > max_matches)
+            ms.matches.erase(ms.matches.begin() + static_cast<std::ptrdiff_t>(max_matches),
+                             ms.matches.end());
+        if (!count_total) {
+            ms.total_count = ms.matches.size();
+            ms.total_exact = false;
+        } else if (max_total_cap > 0 && ms.total_count > max_total_cap) {
+            ms.total_count = max_total_cap;
+            ms.total_exact = false;
+        }
+        return ms;
+    }
+
     // Phase A.5: token-group structs (e.g. discontinuous `err`) cover non-contiguous
     // sets of tokens. `within` / `containing` operators assume a contiguous
     // [start..end] interval, so the implicit choice between member positions and
@@ -4097,7 +4120,8 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             const bool use_region_mask =
                 region_mask.status == RegionMaskStatus::Ready;
             const bool cheap_total_ok =
-                q.global_region_filters.empty() || use_region_mask;
+                (q.global_region_filters.empty() || use_region_mask)
+                && token_anchor_constraints.empty();   // anchors are applied in add_match
 
             // ── S1: Manatee-style .rev shift-merge when every token is EQ or [] ──
             std::vector<SeqMergeOperand> ops(n);
@@ -4386,7 +4410,8 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     // reaches it already satisfies global region filters (mask),
                     // or there are no such filters. Otherwise go through add_match.
                     const bool cheap_total_ok =
-                        q.global_region_filters.empty() || use_region_mask;
+                        (q.global_region_filters.empty() || use_region_mask)
+                && token_anchor_constraints.empty();   // anchors are applied in add_match
 
                     // ── Kernel (P1.0g / P1.8 / P1.0h / P1.11) ──
                     // Raw arrays, no cross-file calls per child. head = pos + head_rel
@@ -4748,7 +4773,8 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     const bool use_region_mask =
                         region_mask.status == RegionMaskStatus::Ready;
                     const bool cheap_total_ok =
-                        q.global_region_filters.empty() || use_region_mask;
+                        (q.global_region_filters.empty() || use_region_mask)
+                && token_anchor_constraints.empty();   // anchors are applied in add_match
 
                     const auto& deps = corpus_.deps();
                     const StructuralAttr& sents = corpus_.structure("s");
@@ -4935,7 +4961,8 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     const bool use_region_mask =
                         region_mask.status == RegionMaskStatus::Ready;
                     const bool cheap_total_ok =
-                        q.global_region_filters.empty() || use_region_mask;
+                        (q.global_region_filters.empty() || use_region_mask)
+                && token_anchor_constraints.empty();   // anchors are applied in add_match
 
                     const auto& deps = corpus_.deps();
                     const StructuralAttr& sents = corpus_.structure("s");
@@ -6533,8 +6560,15 @@ void QueryExecutor::apply_anchor_filters(const std::vector<AnchorConstraint>& co
         });
     }
 
+    // add_match() already applied the anchor constraints to every hit, including
+    // those only counted past the page (--total / --count-only), so adjust the total
+    // by what changed on the page instead of resetting it to the page size.
+    const size_t before = result.matches.size();
     result.matches = std::move(kept);
-    result.total_count = result.matches.size();
+    if (result.total_count >= before)
+        result.total_count = result.total_count - before + result.matches.size();
+    else
+        result.total_count = result.matches.size();
 }
 
 void QueryExecutor::apply_within_having(const TokenQuery& query, MatchSet& result) const {
