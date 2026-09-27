@@ -1,5 +1,6 @@
 #include "pando_version.h"
 #include "core/build_info.h"
+#include "api/group_counts.h"
 #include "corpus/corpus.h"
 #include "api/query_json.h"
 #include "core/json_utils.h"
@@ -865,78 +866,6 @@ static std::string make_key(const Corpus& corpus, const Match& m,
     return key;
 }
 
-static bool parse_i64_strict(std::string_view s, int64_t& out) {
-    if (s.empty()) return false;
-    size_t i = 0;
-    bool neg = false;
-    if (s[i] == '+' || s[i] == '-') {
-        neg = (s[i] == '-');
-        ++i;
-    }
-    if (i >= s.size()) return false;
-    int64_t v = 0;
-    for (; i < s.size(); ++i) {
-        const unsigned char c = static_cast<unsigned char>(s[i]);
-        if (!std::isdigit(c)) return false;
-        int d = c - '0';
-        if (v > (INT64_MAX - d) / 10) return false;
-        v = v * 10 + d;
-    }
-    out = neg ? -v : v;
-    return true;
-}
-
-static bool parse_roman_numeral(std::string_view s, int64_t& out) {
-    if (s.empty()) return false;
-    auto val = [](char c) -> int {
-        switch (c) {
-            case 'I': return 1; case 'V': return 5; case 'X': return 10; case 'L': return 50;
-            case 'C': return 100; case 'D': return 500; case 'M': return 1000;
-            default: return 0;
-        }
-    };
-    int64_t total = 0;
-    for (size_t i = 0; i < s.size(); ++i) {
-        char c = static_cast<char>(std::toupper(static_cast<unsigned char>(s[i])));
-        int cur = val(c);
-        if (cur == 0) return false;
-        int next = 0;
-        if (i + 1 < s.size()) {
-            char n = static_cast<char>(std::toupper(static_cast<unsigned char>(s[i + 1])));
-            next = val(n);
-            if (next == 0) return false;
-        }
-        if (next > cur) total -= cur;
-        else total += cur;
-    }
-    out = total;
-    return total > 0;
-}
-
-static bool compare_sort_values(std::string_view a, std::string_view b) {
-    int64_t ai = 0, bi = 0;
-    bool an = parse_i64_strict(a, ai) || parse_roman_numeral(a, ai);
-    bool bn = parse_i64_strict(b, bi) || parse_roman_numeral(b, bi);
-    if (an && bn && ai != bi) return ai < bi;
-    return a < b;
-}
-
-static bool compare_group_keys(std::string_view a, std::string_view b) {
-    size_t sa = 0, sb = 0;
-    while (true) {
-        size_t ea = a.find('\t', sa);
-        size_t eb = b.find('\t', sb);
-        if (ea == std::string_view::npos) ea = a.size();
-        if (eb == std::string_view::npos) eb = b.size();
-        std::string_view pa = a.substr(sa, ea - sa);
-        std::string_view pb = b.substr(sb, eb - sb);
-        if (pa != pb) return compare_sort_values(pa, pb);
-        if (ea == a.size() && eb == b.size()) return false;
-        sa = (ea < a.size()) ? ea + 1 : a.size();
-        sb = (eb < b.size()) ? eb + 1 : b.size();
-    }
-}
-
 static bool aggregate_command_targets_stmt(const Statement& stmt, const GroupCommand& ncmd) {
     if (!ncmd.freq_query_names.empty()) {
         if (ncmd.freq_query_names.size() > 1)
@@ -973,46 +902,15 @@ static void emit_count(const Corpus& corpus, const MatchSet& ms,
         return;
     }
 
+    // P7.1: only the shown rows are decoded (top group_limit by count); the JSON
+    // hierarchy for several fields still needs every group.
+    const bool explode = !opts.no_mv_explode && cmd.fields.size() == 1 && corpus.is_multivalue(cmd.fields[0]);
+    const bool need_all = opts.json && cmd.fields.size() >= 2;
+    GroupRows gr = group_rows(corpus, ms, cmd.fields, name_map, need_all ? 0 : opts.group_limit, explode);
+    const auto& sorted = gr.rows;
+    const size_t total = gr.total;
     std::map<std::string, size_t> counts;
-    if (ms.aggregate_buckets) {
-        for (const auto& [k, c] : ms.aggregate_buckets->counts)
-            counts[decode_aggregate_bucket_key(*ms.aggregate_buckets, k)] += c;
-    } else {
-        for (const auto& m : ms.matches)
-            ++counts[make_key(corpus, m, name_map, cmd.fields)];
-    }
-
-    // RG-5f: For single-column grouping on a multivalue attribute,
-    // explode pipe-separated keys so "artist|writer" contributes to
-    // both "artist" and "writer" buckets.
-    if (!opts.no_mv_explode && cmd.fields.size() == 1 && corpus.is_multivalue(cmd.fields[0])) {
-        std::map<std::string, size_t> exploded;
-        for (const auto& [key, count] : counts) {
-            if (key.find('|') != std::string::npos) {
-                size_t start = 0;
-                while (start < key.size()) {
-                    size_t p = key.find('|', start);
-                    if (p == std::string::npos) p = key.size();
-                    std::string comp = key.substr(start, p - start);
-                    if (!comp.empty()) exploded[comp] += count;
-                    start = p + 1;
-                }
-            } else {
-                exploded[key] += count;
-            }
-        }
-        counts = std::move(exploded);
-    }
-
-    // Sort by count descending
-    std::vector<std::pair<std::string, size_t>> sorted(counts.begin(), counts.end());
-    std::sort(sorted.begin(), sorted.end(),
-              [](const auto& a, const auto& b) {
-                  if (a.second != b.second) return a.second > b.second;
-                  return compare_group_keys(a.first, b.first);
-              });
-
-    size_t total = ms.aggregate_buckets ? ms.aggregate_buckets->total_hits : ms.matches.size();
+    if (need_all) counts.insert(gr.rows.begin(), gr.rows.end());
 
     // Pagination for groups: default to opts.group_limit (1000) when set; else all.
     size_t g_start = 0;
@@ -1023,7 +921,7 @@ static void emit_count(const Corpus& corpus, const MatchSet& ms,
     if (opts.json) {
         std::cout << "{\"ok\": true, \"operation\": \"count\", \"last_command\": \"count\", \"result\": {\n";
         std::cout << "  \"total_matches\": " << total << ",\n";
-        std::cout << "  \"groups\": " << sorted.size() << ",\n";
+        std::cout << "  \"groups\": " << gr.groups << ",\n";
         std::cout << "  \"groups_returned\": " << (g_end - g_start) << ",\n";
         std::cout << "  \"fields\": [";
         for (size_t i = 0; i < cmd.fields.size(); ++i) {
@@ -1062,7 +960,7 @@ static void emit_count(const Corpus& corpus, const MatchSet& ms,
             std::cout << pct << "%\n";
             ++shown;
         }
-        std::cout << "Total: " << total << " matches, " << sorted.size()
+        std::cout << "Total: " << total << " matches, " << gr.groups
                   << " groups (showing " << shown << ")\n";
     }
 }
@@ -1075,11 +973,8 @@ static void emit_sort(const Corpus& corpus, MatchSet& ms,
         return;
     }
 
-    std::sort(ms.matches.begin(), ms.matches.end(),
-              [&](const Match& a, const Match& b) {
-                  return compare_group_keys(make_key(corpus, a, name_map, cmd.fields),
-                                            make_key(corpus, b, name_map, cmd.fields));
-              });
+    // P7.7: one key per hit, not two per comparison
+    sort_matches_by_key(corpus, ms.matches, name_map, cmd.fields);
 
     emit_hits_text(corpus, "(sorted)", ms, opts, 0);
 }
@@ -1795,13 +1690,12 @@ static void emit_freq(const Corpus& corpus, const MatchSet& ms,
         return;
     }
 
-    std::map<std::string, size_t> counts;
-    size_t total_matches = 0;
-    freq_build_counts(corpus, ms, cmd, opts, name_map, counts, total_matches);
-
-    std::vector<std::pair<std::string, size_t>> sorted(counts.begin(), counts.end());
-    std::sort(sorted.begin(), sorted.end(),
-              [](const auto& a, const auto& b) { return a.second > b.second; });
+    // every row (freq is not paged); sorted by count, then key
+    GroupRows gr = group_rows(corpus, ms, cmd.fields, name_map, 0,
+                              !opts.no_mv_explode && cmd.fields.size() == 1
+                                  && corpus.is_multivalue(cmd.fields[0]));
+    const auto& sorted = gr.rows;
+    const size_t total_matches = gr.total;
 
     double corpus_size = static_cast<double>(corpus.size());
 
@@ -3298,11 +3192,9 @@ static void run_query(const Corpus& corpus, const std::string& input,
                         std::cerr << "Error: sort requires 'by' clause\n";
                         return;
                     }
-                    std::sort(ms_to_use->matches.begin(), ms_to_use->matches.end(),
-                              [&](const Match& a, const Match& b) {
-                                  return make_key(corpus, a, *nm_to_use, cmd_to_run.fields)
-                                       < make_key(corpus, b, *nm_to_use, cmd_to_run.fields);
-                              });
+                    // P7.7: keys computed once per hit (bytewise order, as before)
+                    sort_matches_by_key(corpus, ms_to_use->matches, *nm_to_use, cmd_to_run.fields,
+                                        /*group_key_order=*/false);
                     if (should_emit_output) emit_hits_text(corpus, "(sorted)", *ms_to_use, opts, 0);
                     break;
 

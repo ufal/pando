@@ -147,7 +147,7 @@ add_executable(cwb-import src/cli/cwb_import_main.cpp)
 target_link_libraries(cwb-import PRIVATE pando_core)
 
 # API layer: query execution + JSON (used by CLI and server)
-add_library(pando_api STATIC src/api/query_json.cpp src/api/program_api.cpp src/api/query_jobs.cpp)
+add_library(pando_api STATIC src/api/query_json.cpp src/api/program_api.cpp src/api/query_jobs.cpp src/api/group_counts.cpp)
 target_include_directories(pando_api PUBLIC src)
 find_package(Threads REQUIRED)
 target_link_libraries(pando_api PUBLIC pando_core Threads::Threads)
@@ -225,6 +225,10 @@ if(BUILD_TESTING)
     add_executable(bitmap_index_test src/index/bitmap_index_test.cpp)
     target_link_libraries(bitmap_index_test PRIVATE pando_core)
     add_test(NAME bitmap_index COMMAND bitmap_index_test)
+
+    add_executable(group_counts_test src/api/group_counts_test.cpp)
+    target_link_libraries(group_counts_test PRIVATE pando_api)
+    add_test(NAME group_counts COMMAND group_counts_test)
 
     # Differential test: fast paths (S1 merge, dep bitset, seq probe) must return exactly
     # the same matches and totals as the generic executor (PANDO_FASTPATH=on|nomerge|off).

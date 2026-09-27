@@ -3,6 +3,7 @@
 // Lives in the pando_api library so both pando CLI and pando-server can use it.
 
 #include "api/query_json.h"
+#include "api/group_counts.h"
 #include "core/json_utils.h"
 #include "core/count_hierarchy_json.h"
 #include "query/parser.h"
@@ -55,78 +56,6 @@ static std::string make_key(const Corpus& corpus, const Match& m,
         key += read_tabulate_field(corpus, m, name_map, fields[i]);
     }
     return key;
-}
-
-static bool parse_i64_strict(std::string_view s, int64_t& out) {
-    if (s.empty()) return false;
-    size_t i = 0;
-    bool neg = false;
-    if (s[i] == '+' || s[i] == '-') {
-        neg = (s[i] == '-');
-        ++i;
-    }
-    if (i >= s.size()) return false;
-    int64_t v = 0;
-    for (; i < s.size(); ++i) {
-        const unsigned char c = static_cast<unsigned char>(s[i]);
-        if (!std::isdigit(c)) return false;
-        int d = c - '0';
-        if (v > (INT64_MAX - d) / 10) return false;
-        v = v * 10 + d;
-    }
-    out = neg ? -v : v;
-    return true;
-}
-
-static bool parse_roman_numeral(std::string_view s, int64_t& out) {
-    if (s.empty()) return false;
-    auto val = [](char c) -> int {
-        switch (c) {
-            case 'I': return 1; case 'V': return 5; case 'X': return 10; case 'L': return 50;
-            case 'C': return 100; case 'D': return 500; case 'M': return 1000;
-            default: return 0;
-        }
-    };
-    int64_t total = 0;
-    for (size_t i = 0; i < s.size(); ++i) {
-        char c = static_cast<char>(std::toupper(static_cast<unsigned char>(s[i])));
-        int cur = val(c);
-        if (cur == 0) return false;
-        int next = 0;
-        if (i + 1 < s.size()) {
-            char n = static_cast<char>(std::toupper(static_cast<unsigned char>(s[i + 1])));
-            next = val(n);
-            if (next == 0) return false;
-        }
-        if (next > cur) total -= cur;
-        else total += cur;
-    }
-    out = total;
-    return total > 0;
-}
-
-static bool compare_sort_values(std::string_view a, std::string_view b) {
-    int64_t ai = 0, bi = 0;
-    bool an = parse_i64_strict(a, ai) || parse_roman_numeral(a, ai);
-    bool bn = parse_i64_strict(b, bi) || parse_roman_numeral(b, bi);
-    if (an && bn && ai != bi) return ai < bi;
-    return a < b;
-}
-
-static bool compare_group_keys(std::string_view a, std::string_view b) {
-    size_t sa = 0, sb = 0;
-    while (true) {
-        size_t ea = a.find('\t', sa);
-        size_t eb = b.find('\t', sb);
-        if (ea == std::string_view::npos) ea = a.size();
-        if (eb == std::string_view::npos) eb = b.size();
-        std::string_view pa = a.substr(sa, ea - sa);
-        std::string_view pb = b.substr(sb, eb - sb);
-        if (pa != pb) return compare_sort_values(pa, pb);
-        if (ea == a.size() && eb == b.size()) return false;
-        sa = (ea < a.size()) ? ea + 1 : a.size();
-        sb = (eb < b.size()) ? eb + 1 : b.size();
-    }
 }
 
 static std::unordered_set<LexiconId> build_stoplist_ids(const PositionalAttr& pa, size_t top_n) {
@@ -451,43 +380,20 @@ static void emit_count_json(std::ostream& out, const Corpus& corpus, const Match
         return;
     }
     try {
+    // P7.1: only the returned rows are decoded (top group_limit by count); the
+    // hierarchy for several fields still needs every group.
+    const bool need_all = cmd.fields.size() >= 2;
+    GroupRows gr = group_rows(corpus, ms, cmd.fields, name_map, need_all ? 0 : group_limit,
+                              cmd.fields.size() == 1 && corpus.is_multivalue(cmd.fields[0]));
+    const auto& sorted = gr.rows;
     std::map<std::string, size_t> counts;
-    if (ms.aggregate_buckets) {
-        for (const auto& [k, c] : ms.aggregate_buckets->counts)
-            counts[decode_aggregate_bucket_key(*ms.aggregate_buckets, k)] += c;
-    } else {
-        for (const auto& m : ms.matches) ++counts[make_key(corpus, m, name_map, cmd.fields)];
-    }
-    // RG-5f: Explode multivalue keys for single-column grouping.
-    if (cmd.fields.size() == 1 && corpus.is_multivalue(cmd.fields[0])) {
-        std::map<std::string, size_t> exploded;
-        for (const auto& [key, count] : counts) {
-            if (key.find('|') != std::string::npos) {
-                size_t s = 0;
-                while (s < key.size()) {
-                    size_t p = key.find('|', s);
-                    if (p == std::string::npos) p = key.size();
-                    std::string comp = key.substr(s, p - s);
-                    if (!comp.empty()) exploded[comp] += count;
-                    s = p + 1;
-                }
-            } else {
-                exploded[key] += count;
-            }
-        }
-        counts = std::move(exploded);
-    }
-    std::vector<std::pair<std::string, size_t>> sorted(counts.begin(), counts.end());
-    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
-        if (a.second != b.second) return a.second > b.second;
-        return compare_group_keys(a.first, b.first);
-    });
-    size_t total = ms.aggregate_buckets ? ms.aggregate_buckets->total_hits : ms.matches.size();
+    if (need_all) counts.insert(gr.rows.begin(), gr.rows.end());
+    size_t total = gr.total;
     size_t g_end = (group_limit > 0 && group_limit < sorted.size()) ? group_limit : sorted.size();
 
     out << "{\"ok\": true, \"operation\": \"count\", \"last_command\": \"count\", \"result\": {\n";
     out << "  \"total_matches\": " << total << ",\n";
-    out << "  \"groups\": " << sorted.size() << ",\n";
+    out << "  \"groups\": " << gr.groups << ",\n";
     out << "  \"groups_returned\": " << g_end << ",\n";
     out << "  \"fields\": [";
     for (size_t i = 0; i < cmd.fields.size(); ++i) { if (i > 0) out << ", "; out << jstr(cmd.fields[i]); }
@@ -736,14 +642,11 @@ static void emit_freq_json(std::ostream& out, const Corpus& corpus, const MatchS
         return;
     }
     try {
-    std::map<std::string, size_t> counts;
-    size_t total_matches = 0;
-    freq_build_counts(corpus, ms, cmd, opts, name_map, counts, total_matches);
-    std::vector<std::pair<std::string, size_t>> sorted(counts.begin(), counts.end());
-    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
-        if (a.second != b.second) return a.second > b.second;
-        return compare_group_keys(a.first, b.first);
-    });
+    // every row (freq is not paged); sorted by count, then key
+    GroupRows gr = group_rows(corpus, ms, cmd.fields, name_map, 0,
+                              cmd.fields.size() == 1 && corpus.is_multivalue(cmd.fields[0]));
+    const auto& sorted = gr.rows;
+    const size_t total_matches = gr.total;
     double corpus_size = static_cast<double>(corpus.size());
 
     // Per-subcorpus IPM: when grouping by a single region attribute, use per-group
@@ -1668,14 +1571,9 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                 }
                 case CommandType::SORT: {
                     try {
-                        if (!stmt.command.fields.empty()) {
-                            std::sort(ms_to_use->matches.begin(), ms_to_use->matches.end(),
-                                      [&](const Match& a, const Match& b) {
-                                          return compare_group_keys(
-                                              make_key(corpus, a, *nm_to_use, stmt.command.fields),
-                                              make_key(corpus, b, *nm_to_use, stmt.command.fields));
-                                      });
-                        }
+                        if (!stmt.command.fields.empty())   // P7.7: one key per hit
+                            sort_matches_by_key(corpus, ms_to_use->matches, *nm_to_use,
+                                                stmt.command.fields);
                         emit_query_json(out, corpus, "(sorted)", *ms_to_use, opts, 0);
                     } catch (const std::exception& e) {
                         out << "{\"ok\": false, \"error\": " << jstr(e.what()) << "}\n";
