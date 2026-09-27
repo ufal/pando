@@ -1,14 +1,14 @@
 #pragma once
 
-// P3.2: per-chunk bitmap expressions for the bit-parallel sequence kernel.
+// P3.2 / P3.3: per-chunk bitmap expressions for the bit-parallel sequence kernels.
 //
 // A token's condition is compiled into a tree whose leaves are bitmap values
 // (`BitmapIndex`), id sets (OR of values) or plain `.rev` postings (attributes
 // without bitmaps, materialised operands); inner nodes are AND / OR / NOT.
 // load(c) returns the token's positions in chunk c as kWords uint64 words plus
-// the first word of chunk c + 1 (`next`), so the kernel can shift by up to 63
-// positions across the chunk border. Chunks are visited in ascending order;
-// every node keeps monotone cursors.
+// the first kBmExtra words of chunk c + 1 (`nx`), so the kernels can shift by
+// up to kBmMaxShift positions across the chunk border. Chunks are visited in
+// ascending order; every node keeps monotone cursors.
 
 #include "index/bitmap_index.h"
 #include "index/positional_attr.h"
@@ -19,19 +19,49 @@
 
 namespace pando {
 
+constexpr size_t kBmExtra = 4;                                 // words of chunk c + 1
+constexpr int kBmMaxShift = static_cast<int>(64 * (kBmExtra - 1));   // largest token offset
+
 struct BmChunk {
-    const uint64_t* w = nullptr;   // kWords words (never null)
-    uint64_t next = 0;             // bits of positions [0, 64) of chunk c + 1
-    bool zero = false;             // hint: all of w and next are 0
+    const uint64_t* w = nullptr;    // kWords words (never null)
+    const uint64_t* nx = nullptr;   // kBmExtra words of the next chunk (never null)
+    bool zero = false;              // hint: all of w and nx are 0
+    uint64_t word(size_t i) const { return i < BitmapIndex::kWords ? w[i] : nx[i - BitmapIndex::kWords]; }
+    /// Bit j = position 64*i + k + j of the chunk (0 <= k <= kBmMaxShift, i < kWords).
+    uint64_t shifted(size_t i, int k) const {
+        const size_t q = i + static_cast<size_t>(k >> 6);
+        const int r = k & 63;
+        if (r == 0) return word(q);
+        return (word(q) >> r) | (word(q + 1) << (64 - r));
+    }
 };
 
 inline const uint64_t* bm_zero_words() {
-    static const std::vector<uint64_t> z(BitmapIndex::kWords, 0);
+    static const std::vector<uint64_t> z(BitmapIndex::kWords + kBmExtra, 0);
     return z.data();
 }
 inline const uint64_t* bm_ones_words() {
-    static const std::vector<uint64_t> o(BitmapIndex::kWords, ~uint64_t{0});
+    static const std::vector<uint64_t> o(BitmapIndex::kWords + kBmExtra, ~uint64_t{0});
     return o.data();
+}
+
+/// OR the first kBmExtra words of a container into out.
+inline void bm_head_words(const BitmapIndex& bi, const BitmapIndex::Entry& e, uint64_t* out) {
+    if (bi.is_full(e)) {
+        const uint32_t len = bi.chunk_len(e.chunk);
+        for (size_t w = 0; w < kBmExtra; ++w) {
+            const uint32_t lo = static_cast<uint32_t>(w * 64);
+            if (len >= lo + 64) out[w] = ~uint64_t{0};
+            else if (len > lo) out[w] |= (uint64_t{1} << (len - lo)) - 1;
+        }
+    } else if (bi.is_bitmap(e)) {
+        const uint64_t* b = bi.bitmap_words(e);
+        for (size_t w = 0; w < kBmExtra; ++w) out[w] |= b[w];
+    } else {
+        const uint16_t* a = bi.array_values(e);
+        for (uint32_t k = 0; k < e.card && a[k] < 64 * kBmExtra; ++k)
+            out[a[k] >> 6] |= uint64_t{1} << (a[k] & 63);
+    }
 }
 
 class BmExpr {
@@ -42,6 +72,12 @@ public:
     size_t estimate = 0;
 protected:
     std::vector<uint64_t> buf_ = std::vector<uint64_t>(BitmapIndex::kWords);
+    uint64_t nbuf_[kBmExtra] = {};
+    bool nzero() const {
+        uint64_t a = 0;
+        for (size_t w = 0; w < kBmExtra; ++w) a |= nbuf_[w];
+        return a == 0;
+    }
 };
 
 /// One value of a bitmap-indexed attribute.
@@ -52,10 +88,21 @@ public:
         const BitmapIndex::Entry* e = cur_.at(c);
         const BitmapIndex::Entry* nx = cur_.peek_next(c);
         BmChunk r;
-        r.next = nx ? bi_.first_word(*nx) : 0;
+        bool nz = true;
+        if (!nx) {
+            r.nx = bm_zero_words();
+        } else if (bi_.is_bitmap(*nx)) {
+            r.nx = bi_.bitmap_words(*nx);
+            nz = false;
+        } else {
+            std::fill(nbuf_, nbuf_ + kBmExtra, 0);
+            bm_head_words(bi_, *nx, nbuf_);
+            r.nx = nbuf_;
+            nz = nzero();
+        }
         if (!e) {
             r.w = bm_zero_words();
-            r.zero = r.next == 0;
+            r.zero = nz;
         } else if (bi_.is_bitmap(*e)) {
             r.w = bi_.bitmap_words(*e);
         } else if (bi_.is_full(*e) && bi_.chunk_len(c) == static_cast<uint32_t>(BitmapIndex::kChunk)) {
@@ -82,15 +129,17 @@ public:
     BmChunk load(size_t c) override {
         BmChunk r;
         bool any = false;
+        std::fill(nbuf_, nbuf_ + kBmExtra, 0);
         for (auto& cu : cur_) {
             const BitmapIndex::Entry* e = cu.at(c);
-            if (const BitmapIndex::Entry* nx = cu.peek_next(c)) r.next |= bi_.first_word(*nx);
+            if (const BitmapIndex::Entry* nx = cu.peek_next(c)) bm_head_words(bi_, *nx, nbuf_);
             if (!e) continue;
             if (!any) { std::fill(buf_.begin(), buf_.end(), 0); any = true; }
             bi_.or_into(*e, buf_.data());
         }
         r.w = any ? buf_.data() : bm_zero_words();
-        r.zero = !any && r.next == 0;
+        r.nx = nbuf_;
+        r.zero = !any && nzero();
         return r;
     }
 private:
@@ -130,18 +179,63 @@ public:
             ++j;
         }
         i_ = j;
+        std::fill(nbuf_, nbuf_ + kBmExtra, 0);
         for (size_t k = j; k < s_.count; ++k) {
-            const CorpusPos p = s_.at(k);
-            if (p >= end + 64) break;
-            r.next |= uint64_t{1} << (p - end);
+            const CorpusPos d = s_.at(k) - end;
+            if (d >= static_cast<CorpusPos>(64 * kBmExtra)) break;
+            nbuf_[d >> 6] |= uint64_t{1} << (d & 63);
         }
         r.w = any ? buf_.data() : bm_zero_words();
-        r.zero = !any && r.next == 0;
+        r.nx = nbuf_;
+        r.zero = !any && nzero();
         return r;
     }
 private:
     RevSpan s_;
     std::shared_ptr<void> keep_;
+    size_t i_ = 0;
+};
+
+/// Positions covered by sorted, disjoint inclusive intervals (token-level region
+/// attributes: `[text_langcode="en"]`), set range by range per chunk.
+class BmIntervals final : public BmExpr {
+public:
+    explicit BmIntervals(std::vector<std::pair<CorpusPos, CorpusPos>> iv) : iv_(std::move(iv)) {
+        for (const auto& x : iv_) estimate += static_cast<size_t>(x.second - x.first + 1);
+    }
+    BmChunk load(size_t c) override {
+        const CorpusPos base = static_cast<CorpusPos>(c) << BitmapIndex::kChunkShift;
+        const CorpusPos end = base + BitmapIndex::kChunk;
+        const CorpusPos xend = end + static_cast<CorpusPos>(64 * kBmExtra);
+        while (i_ < iv_.size() && iv_[i_].second < base) ++i_;
+        BmChunk r;
+        bool any = false;
+        std::fill(nbuf_, nbuf_ + kBmExtra, 0);
+        for (size_t j = i_; j < iv_.size() && iv_[j].first < xend; ++j) {
+            const CorpusPos a = std::max(iv_[j].first, base), b = std::min(iv_[j].second, xend - 1);
+            if (a < end) {
+                if (!any) { std::fill(buf_.begin(), buf_.end(), 0); any = true; }
+                set(buf_.data(), static_cast<size_t>(a - base), static_cast<size_t>(std::min(b, end - 1) - base));
+            }
+            if (b >= end)
+                set(nbuf_, static_cast<size_t>(std::max(a, end) - end), static_cast<size_t>(b - end));
+        }
+        r.w = any ? buf_.data() : bm_zero_words();
+        r.nx = nbuf_;
+        r.zero = !any && nzero();
+        return r;
+    }
+private:
+    static void set(uint64_t* m, size_t a, size_t b) {   // inclusive
+        const size_t wa = a >> 6, wb = b >> 6;
+        const uint64_t ma = ~uint64_t{0} << (a & 63);
+        const uint64_t mb = ~uint64_t{0} >> (63 - (b & 63));
+        if (wa == wb) { m[wa] |= ma & mb; return; }
+        m[wa] |= ma;
+        for (size_t w = wa + 1; w < wb; ++w) m[w] = ~uint64_t{0};
+        m[wb] |= mb;
+    }
+    std::vector<std::pair<CorpusPos, CorpusPos>> iv_;
     size_t i_ = 0;
 };
 
@@ -156,13 +250,14 @@ public:
         const BmChunk x = a_->load(c);
         if (x.zero) { b_->load(c); return x; }
         const BmChunk y = b_->load(c);
-        BmChunk r;
-        r.next = x.next & y.next;
-        if (y.zero) { r.w = bm_zero_words(); r.zero = r.next == 0; return r; }
+        if (y.zero) return y;
+        for (size_t w = 0; w < kBmExtra; ++w) nbuf_[w] = x.nx[w] & y.nx[w];
         uint64_t any = 0;
         for (size_t w = 0; w < BitmapIndex::kWords; ++w) any |= (buf_[w] = x.w[w] & y.w[w]);
+        BmChunk r;
         r.w = buf_.data();
-        r.zero = any == 0 && r.next == 0;
+        r.nx = nbuf_;
+        r.zero = any == 0 && nzero();
         return r;
     }
 private:
@@ -179,10 +274,11 @@ public:
         const BmChunk y = b_->load(c);
         if (y.zero) return x;   // children's buffers stay valid until their next load
         if (x.zero) return y;
-        BmChunk r;
+        for (size_t w = 0; w < kBmExtra; ++w) nbuf_[w] = x.nx[w] | y.nx[w];
         for (size_t w = 0; w < BitmapIndex::kWords; ++w) buf_[w] = x.w[w] | y.w[w];
+        BmChunk r;
         r.w = buf_.data();
-        r.next = x.next | y.next;
+        r.nx = nbuf_;
         return r;
     }
 private:
@@ -190,7 +286,7 @@ private:
 };
 
 /// Complement within the corpus (`!=`). Bits past the corpus end are set; the
-/// kernel masks starts to the corpus anyway.
+/// kernels mask starts / ends to the corpus anyway.
 class BmNot final : public BmExpr {
 public:
     BmNot(std::unique_ptr<BmExpr> a, size_t corpus_size) : a_(std::move(a)) {
@@ -199,10 +295,15 @@ public:
     BmChunk load(size_t c) override {
         const BmChunk x = a_->load(c);
         BmChunk r;
-        r.next = ~x.next;
-        if (x.zero) { r.w = bm_ones_words(); return r; }
+        if (x.zero) {
+            r.w = bm_ones_words();
+            r.nx = bm_ones_words();
+            return r;
+        }
+        for (size_t w = 0; w < kBmExtra; ++w) nbuf_[w] = ~x.nx[w];
         for (size_t w = 0; w < BitmapIndex::kWords; ++w) buf_[w] = ~x.w[w];
         r.w = buf_.data();
+        r.nx = nbuf_;
         return r;
     }
 private:

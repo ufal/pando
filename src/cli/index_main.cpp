@@ -134,7 +134,36 @@ static int upgrade_bitmaps(const pando::Corpus& corpus, const std::string& spec,
     if (spec == "none") return 0;
     const bool is_auto = spec == "auto";
     std::vector<std::string> names = is_auto ? corpus.attr_names() : split_list(spec);
+    if (is_auto)
+        for (const auto& st : corpus.structure_names()) names.push_back(st);
     for (const auto& name : names) {
+        // P3.6: flat structures → <dir>/<name>.bnd.bm (covered positions + region ends)
+        if (!corpus.has_attr(name) && corpus.has_structure(name)) {
+            if (corpus.is_nested(name) || corpus.is_overlapping(name) || corpus.is_zerowidth(name)) {
+                if (!is_auto) {
+                    std::cerr << "Error: --bitmaps " << name << ": only flat structures\n";
+                    return 1;
+                }
+                continue;
+            }
+            const std::string base = pando::BitmapIndex::structure_base(corpus.dir(), name);
+            pando::BitmapIndex probe;
+            if (probe.open_structure(base, corpus.size())) {
+                if (!quiet) std::cerr << "Bitmaps " << pando::BitmapIndex::path(base) << " up to date\n";
+                continue;
+            }
+            std::string err;
+            pando::BitmapIndex::BuildStats st;
+            if (!pando::BitmapIndex::build_structure(corpus.structure(name), base, corpus.size(), &err, &st)) {
+                std::cerr << (is_auto ? "Note: " : "Error: ") << err << "\n";
+                if (!is_auto) return 1;
+                continue;
+            }
+            if (!quiet)
+                std::cerr << "Wrote " << pando::BitmapIndex::path(base) << " (" << st.entries
+                          << " containers; " << (st.payload_bytes >> 20) << " MB; " << secs() << " s)\n";
+            continue;
+        }
         if (!corpus.has_attr(name) || corpus.is_multivalue(name)) {
             if (!is_auto) {
                 std::cerr << "Error: --bitmaps " << name
@@ -324,8 +353,9 @@ int main(int argc, char* argv[]) {
                   << "    --dep-pairs H:C[,H:C...]  edge postings to build (default upos:upos;\n"
                   << "                    'none' to skip). Low-cardinality attributes only.\n"
                   << "    --bitmaps auto|none|A[,B...]  chunked bitmaps (<attr>.bm) for fast dense\n"
-                  << "                    token patterns (default auto: attributes with <= "
-                  << pando::BitmapIndex::kAutoMaxValues << " values)\n";
+                  << "                    token patterns, <struct>.bnd.bm for `within` (default auto:\n"
+                  << "                    attributes with <= " << pando::BitmapIndex::kAutoMaxValues
+                  << " values, flat structures)\n";
         return 1;
     }
 

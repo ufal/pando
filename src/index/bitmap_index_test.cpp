@@ -13,6 +13,7 @@
 #include "query/executor.h"
 #include "query/parser.h"
 
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
@@ -92,6 +93,16 @@ void test_containers(const Corpus& corpus) {
         CHECK(got.size() == sp.count);
         for (size_t i = 0; i < got.size(); ++i) CHECK(got[i] == sp.at(i));
     }
+    // stale: the attribute re-indexed after the bitmaps were built
+    {
+        const std::string rev = pa.base_path() + ".rev";
+        const auto t0 = fs::last_write_time(rev);
+        fs::last_write_time(rev, fs::last_write_time(BitmapIndex::idx_path(pa.base_path())) + std::chrono::hours(1));
+        BitmapIndex stale;
+        CHECK(!stale.open(pa, corpus.size()));
+        fs::last_write_time(rev, t0);
+        CHECK(stale.open(pa, corpus.size()));
+    }
     std::cerr << "  PASS test_containers (" << st.fulls << " full, " << st.bitmaps << " bitmap, "
               << st.arrays << " array)\n";
 }
@@ -154,9 +165,84 @@ void test_kernel(const Corpus& corpus) {
     }
 }
 
+struct GapPattern {
+    std::string cql;
+    std::vector<std::function<bool(const std::string&)>> pre, suf;   // empty fn = []
+    std::function<bool(const std::string&)> x;                        // empty = [] gap
+    int vmin, vmax;
+    bool within_s = false, lang_y = false;
+};
+
+void test_gap(const Corpus& corpus) {
+    QueryExecutor ex(corpus);
+    auto is = [](const char* v) { return std::function<bool(const std::string&)>([v](const std::string& s) { return s == v; }); };
+    const std::function<bool(const std::string&)> any;
+    std::vector<GapPattern> pats = {
+        {R"([t="A"] []{0,2} [t="B"])", {is("A")}, {is("B")}, any, 0, 2},
+        {R"([t="A"] [t="B"]? [t="A"])", {is("A")}, {is("A")}, is("B"), 0, 1},
+        {R"([t="B"]+ [t="A"])", {}, {is("A")}, is("B"), 1, 100},
+        {R"([t="A"] [t="B"]* [t="C"] within s)", {is("A")}, {is("C")}, is("B"), 0, 100, true},
+        {R"([t="C"]? [t="B"] :: match.text_lang="y")", {}, {is("B")}, is("C"), 0, 1, false, true},
+        {R"([t="D"] []{3,5})", {is("D")}, {}, any, 3, 5},
+        {R"([t="A"] []{1,150} [t="C"])", {is("A")}, {is("C")}, any, 1, 150},
+    };
+    const PositionalAttr& pa = corpus.attr("t");
+    auto val = [&](CorpusPos p) { return std::string(pa.value_at(p)); };
+    for (const auto& pt : pats) {
+        const CorpusPos P = static_cast<CorpusPos>(pt.pre.size()), Q = static_cast<CorpusPos>(pt.suf.size());
+        std::vector<std::pair<CorpusPos, CorpusPos>> want;
+        for (CorpusPos s = 0; s < kN; ++s) {
+            bool ok = true;
+            for (CorpusPos i = 0; i < P && ok; ++i) ok = s + i < kN && (!pt.pre[static_cast<size_t>(i)] || pt.pre[static_cast<size_t>(i)](val(s + i)));
+            if (!ok) continue;
+            if (pt.lang_y && s < 2 * kChunk + 100) continue;
+            for (int L = 0; L <= pt.vmax; ++L) {
+                if (L > 0) {
+                    const CorpusPos xp = s + P + L - 1;
+                    if (xp >= kN || (pt.x && !pt.x(val(xp)))) break;
+                }
+                if (L < pt.vmin) continue;
+                const CorpusPos len = P + L + Q;
+                const CorpusPos e = s + len - 1;
+                if (e >= kN) break;
+                if (pt.within_s && s / kSentLen != e / kSentLen) break;
+                bool sok = true;
+                for (CorpusPos j = 0; j < Q && sok; ++j)
+                    sok = !pt.suf[static_cast<size_t>(j)] || pt.suf[static_cast<size_t>(j)](val(s + P + L + j));
+                if (sok) want.emplace_back(s, e);
+            }
+        }
+        Parser p(pt.cql + ";");
+        Program prog = p.parse();
+        CHECK(prog.size() == 1u);
+        MatchSet all = ex.execute(prog[0].query, 0, true);
+        if (all.plan_path != "seq_gap_bitmap")
+            std::cerr << "  note: " << pt.cql << " ran on " << all.plan_path << "\n";
+        CHECK(all.plan_path == "seq_gap_bitmap");
+        CHECK(all.total_count == want.size());
+        CHECK(all.matches.size() == want.size());
+        for (size_t i = 0; i < want.size(); ++i) {
+            CHECK(all.matches[i].first_pos() == want[i].first);
+            CHECK(all.matches[i].last_pos() == want[i].second);
+        }
+        MatchSet page = ex.execute(prog[0].query, 10, true);
+        CHECK(page.total_count == want.size());
+        CHECK(page.matches.size() == std::min<size_t>(10, want.size()));
+        for (size_t i = 0; i < page.matches.size(); ++i) CHECK(page.matches[i].first_pos() == want[i].first);
+        if (want.size() > 20) {
+            MatchSet cap = ex.execute(prog[0].query, 10, true, want.size() / 2);
+            CHECK(cap.total_count == want.size() / 2);
+        }
+        std::cerr << "  PASS " << pt.cql << " (" << want.size() << ")\n";
+    }
+}
+
 }  // namespace
 
 int main() {
+    // exercise the bitmap kernels on every query (the planner would give rare
+    // or long-gap patterns to the merge paths)
+    setenv("PANDO_BITMAPS", "force", 1);
     fs::path dir = fs::temp_directory_path() / ("pando_bitmap_test_" + std::to_string(::getpid()));
     if (fs::exists(dir)) fs::remove_all(dir);
     fs::create_directories(dir);
@@ -170,6 +256,27 @@ int main() {
         Corpus corpus;   // reopen: the executor finds the new .bm files
         corpus.open(dir.string(), false);
         test_kernel(corpus);
+        test_gap(corpus);
+        // again with the structure boundary bitmaps (P3.6) for `within s`
+        std::string err;
+        BitmapIndex::BuildStats st;
+        const std::string sb = BitmapIndex::structure_base(dir.string(), "s");
+        CHECK(BitmapIndex::build_structure(corpus.structure("s"), sb, corpus.size(), &err, &st));
+        BitmapIndex sbi;
+        CHECK(sbi.open_structure(sb, corpus.size()));
+        for (const auto* e = sbi.begin(BitmapIndex::kStructEnds); e != sbi.end(BitmapIndex::kStructEnds); ++e) {
+            std::vector<uint64_t> w(BitmapIndex::kWords, 0);
+            sbi.or_into(*e, w.data());
+            for (size_t i = 0; i < w.size(); ++i)
+                for (int j = 0; j < 64; ++j)
+                    if (w[i] >> j & 1) {
+                        const CorpusPos p = static_cast<CorpusPos>(e->chunk) * kChunk + static_cast<CorpusPos>(i * 64 + j);
+                        CHECK((p + 1) % kSentLen == 0 || p + 1 == kN);
+                    }
+        }
+        std::cerr << "  structure bitmaps built (" << st.entries << " containers)\n";
+        test_kernel(corpus);
+        test_gap(corpus);
     }
     fs::remove_all(dir);
     std::cerr << "bitmap_index_test: all passed\n";

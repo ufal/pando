@@ -4,11 +4,13 @@
 #include "core/mmap_file.h"
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <string>
 
 namespace pando {
 
 class PositionalAttr;
+class StructuralAttr;
 
 // P3.1: chunked (Roaring-style) bitmaps for a low-cardinality attribute.
 //
@@ -57,6 +59,27 @@ public:
 
     /// Open existing files; false when absent or inconsistent with the attribute.
     bool open(const PositionalAttr& pa, CorpusPos corpus_size);
+
+    // P3.6: a flat structure (`s`, `text`, …) as two "values" in `<dir>/<name>.bnd.bm`:
+    // the positions covered by some region and the regions' last positions. A span
+    // [a, b] lies inside one region iff a is covered and no region ends in [a, b-1].
+    static constexpr int64_t kStructCovered = 0, kStructEnds = 1, kStructValues = 2;
+    static std::string structure_base(const std::string& dir, const std::string& name);
+    static bool build_structure(const StructuralAttr& sa, const std::string& base,
+                                CorpusPos corpus_size, std::string* err, BuildStats* stats = nullptr);
+    /// `base` from structure_base(dir, name); stale when older than `<dir>/<name>.rgn`.
+    bool open_structure(const std::string& base, CorpusPos corpus_size);
+
+    /// Generic builder: gen(v, emit) calls emit(a, b) with ascending, disjoint,
+    /// inclusive position ranges of value v.
+    using RangeSink = std::function<void(CorpusPos, CorpusPos)>;
+    using Generator = std::function<void(int64_t, const RangeSink&)>;
+    static bool build_generic(const std::string& base, CorpusPos corpus_size, int64_t nvalues,
+                              const Generator& gen, std::string* err, BuildStats* stats = nullptr);
+    /// `source`: the file the bitmaps were derived from; files older than it are
+    /// stale (a re-index into the same directory) and not opened.
+    bool open_generic(const std::string& base, CorpusPos corpus_size, int64_t nvalues,
+                      const std::string& source = std::string());
 
     bool valid() const { return idx_.valid(); }
     CorpusPos corpus_size() const { return corpus_size_; }

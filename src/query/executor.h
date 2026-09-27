@@ -837,6 +837,8 @@ private:
     // P3.1: chunked bitmaps per attribute; nullptr = not built.
     mutable std::unordered_map<std::string, std::shared_ptr<BitmapIndex>> bitmap_cache_;
     std::shared_ptr<BitmapIndex> bitmap_index(const std::string& attr) const;
+    /// P3.6: `<struct>.bnd.bm` (covered positions + region ends); nullptr = not built.
+    std::shared_ptr<BitmapIndex> structure_bitmap(const std::string& name) const;
     /// Folded-value lookup: index file when present, else the in-memory FoldMap.
     std::vector<LexiconId> fold_lookup_ids(const std::string& attr, bool case_fold,
                                            bool accent_fold, const std::string& value) const;

@@ -198,3 +198,20 @@ a:[upos="VERB"] > b:[upos="NOUN"]; count by a.lemma, b.lemma
 [upos!="PUNCT"] within s
 [upos="NOUN" & deprel="nsubj"] :: match.text_langcode="cs"
 [upos="ADJ" | deprel="amod"]
+# gaps / optional / repetition on bitmaps (P3.3, seq_gap_bitmap)
+[upos="DET"] [upos="ADJ"]* [upos="NOUN"] :: match.text_langcode="cs"
+[upos="NOUN"] [upos="ADJ"]{2,3}
+[upos="DET"] [upos!="PUNCT"]{0,4} [upos="VERB"] within s
+[upos="ADP"] []{0,3} [upos="NOUN"] [upos="PUNCT"]
+[upos="PUNCT"]+ [upos="PUNCT"]
+[deprel="det"]? [upos="NOUN"] [deprel="punct"] within s
+# token-level region attributes as intervals (P3.6)
+[upos="ADJ"] [upos="NOUN" & text_langcode="en"]
+[upos="VERB" & text_langcode="en"] [upos="DET"]
+[text_langcode="cs" & upos="NOUN"]
+[upos="DET" & text_treebank="ewt"] []{0,2} [upos="NOUN"]
+# merge operands materialised through bitmap expressions (dep paths)
+[upos="VERB" & text_langcode="en"] > [upos="NOUN"]
+[upos="VERB" & deprel="root"] >> [upos="NOUN"]
+[upos="NOUN" & deprel="nsubj"] < [upos="VERB"]
+[upos="VERB" & deprel!="root"] > [upos="PRON"]

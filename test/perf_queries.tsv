@@ -70,3 +70,8 @@ B6	[upos="PUNCT"] [upos="PUNCT"] [upos="PUNCT"] [upos="PUNCT"]
 B7	[deprel="nsubj"] [upos="VERB"] [deprel="obj"] within s
 B8	[] [upos="NOUN"] [upos="PUNCT"]
 B9	[upos=".*N.*"] [upos="VERB"]
+# ── P3.3 gaps on bitmaps, P3.6 structures / region attrs
+B10	[upos="DET"] [upos!="PUNCT"]{0,4} [upos="VERB"] within s
+B11	[upos="NOUN"] [upos="ADJ"]{2,3}
+B12	[upos="VERB" & text_langcode="en"] [upos="DET"]
+B13	[upos="ADP"] []{0,3} [upos="NOUN"] [upos="PUNCT"]

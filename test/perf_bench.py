@@ -21,6 +21,14 @@ Examples:
       --pando build/pando --out perf-$(git rev-parse --short HEAD).json \\
       --baseline perf-previous.json
 
+Environment per binary: `--pando nobm=PANDO_BITMAPS=off@build/pando` runs
+build/pando with PANDO_BITMAPS=off (several: `A=1,B=2@binary`).
+
+Cold cache: `--cold "sudo purge"` (macOS) or `--cold "sync; echo 3 >
+/proc/sys/vm/drop_caches"` (Linux, root) runs the command before one extra
+measurement per query and binary, reported as `cold` (query_sec and wall
+time, which includes opening the corpus files) next to the warm median.
+
 Query file: `id<TAB>query` per line; '#' comments and blank lines ignored.
 Modes (--modes, comma-separated): total = `--limit 20 --total` (KonText-style
 first page + exact total), count = `--count-only`, page = `--limit 20`.
@@ -43,6 +51,14 @@ MODE_ARGS = {
 
 
 def run_once(binary, corpus, query, mode, timeout, env):
+    extra = {}
+    if "@" in binary:
+        assigns, _, binary = binary.rpartition("@")
+        for a in assigns.split(","):
+            k, _, v = a.partition("=")
+            extra[k] = v
+    if extra:
+        env = dict(env, **extra)
     p = subprocess.run([binary, corpus, query, "--timing", *MODE_ARGS[mode]],
                        capture_output=True, text=True, timeout=timeout, env=env)
     if p.returncode != 0:
@@ -70,6 +86,7 @@ def main():
     ap.add_argument("--tol", type=float, default=0.20, help="relative slowdown tolerance (default 0.20)")
     ap.add_argument("--min-ms", type=float, default=5.0, help="ignore slowdowns below this many ms")
     ap.add_argument("--threads", type=int, default=0, help="pass --threads N (0 = default)")
+    ap.add_argument("--cold", help="shell command that drops the page cache; adds one cold run per query")
     opts = ap.parse_args()
 
     bins = []
@@ -117,6 +134,12 @@ def main():
             cells = []
             for label, path in bins:
                 try:
+                    cold = None
+                    if opts.cold:
+                        subprocess.run(opts.cold, shell=True, check=False)
+                        t0 = time.monotonic()
+                        csec, _, _ = run_once(path, opts.corpus, q, mode, opts.timeout, env)
+                        cold = (csec, time.monotonic() - t0)
                     run_once(path, opts.corpus, q, mode, opts.timeout, env)  # warm-up
                     samples = []
                     for _ in range(opts.reps):
@@ -125,9 +148,15 @@ def main():
                     med = statistics.median(samples)
                     row["bins"][label] = {"median_ms": med * 1000, "min_ms": min(samples) * 1000,
                                           "total": total, "path": ppath}
+                    if cold:
+                        row["bins"][label]["cold_ms"] = cold[0] * 1000
+                        row["bins"][label]["cold_wall_ms"] = cold[1] * 1000
                     if mode != "page":
                         totals.add(total)
-                    cells.append(f"{med * 1000:12.1f}ms {ppath[:14]:14}")
+                    cell = f"{med * 1000:12.1f}ms {ppath[:14]:14}"
+                    if cold:
+                        cell += f" cold {cold[0] * 1000:8.1f}ms (wall {cold[1] * 1000:8.1f})"
+                    cells.append(cell)
                 except (RuntimeError, subprocess.TimeoutExpired) as e:
                     row["bins"][label] = {"error": str(e)}
                     cells.append(f"{'ERROR':>14} {'':14}")

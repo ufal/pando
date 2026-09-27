@@ -1521,6 +1521,22 @@ std::shared_ptr<BitmapIndex> QueryExecutor::bitmap_index(const std::string& attr
     return it->second;
 }
 
+std::shared_ptr<BitmapIndex> QueryExecutor::structure_bitmap(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(fold_map_mutex_);
+    const std::string key = "\x01struct:" + name;
+    auto it = bitmap_cache_.find(key);
+    if (it == bitmap_cache_.end()) {
+        std::shared_ptr<BitmapIndex> bi;
+        if (corpus_.has_structure(name) && !corpus_.is_nested(name) && !corpus_.is_overlapping(name)) {
+            bi = std::make_shared<BitmapIndex>();
+            if (!bi->open_structure(BitmapIndex::structure_base(corpus_.dir(), name), corpus_.size()))
+                bi.reset();
+        }
+        it = bitmap_cache_.emplace(key, bi).first;
+    }
+    return it->second;
+}
+
 std::shared_ptr<DepPairIndex> QueryExecutor::dep_pair_index(const std::string& head_attr,
                                                             const std::string& child_attr) const {
     std::lock_guard<std::mutex> lock(fold_map_mutex_);
@@ -3829,12 +3845,41 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
         if (c->is_structural || c->is_count) return false;
         return plain_condition(c->left) && plain_condition(c->right);
     };
+    // (defined below; merge_operand materialises through it when bitmaps apply)
+    std::function<std::unique_ptr<BmExpr>(const ConditionPtr&, bool*)> compile_bm;
+    bool in_compile_bm = false;
     auto merge_operand = [&](const ConditionPtr& c) -> SeqMergeOperand {
         SeqMergeOperand o = seq_merge_operand(corpus_, c);
         if (o.kind != SeqMergeTok::Complex || fastpath_mode() != FastPathMode::On) return o;
         if (!plain_condition(c)) return o;
         const size_t est = estimate_cardinality(c);
         if (est > static_cast<size_t>(corpus_.size()) / 2 || est > materialize_max()) return o;
+        // P3.6: a combination over bitmap attributes / region intervals
+        // (`[upos="VERB" & text_langcode="en"]`) is evaluated chunk by chunk
+        // instead of resolving and intersecting position lists.
+        if (!in_compile_bm && bitmap_mode() != BitmapMode::Off && compile_bm) {
+            in_compile_bm = true;
+            bool dense = false;
+            std::unique_ptr<BmExpr> e = compile_bm(c, &dense);
+            in_compile_bm = false;
+            if (e && dense) {
+                std::vector<CorpusPos> pos;
+                pos.reserve(std::min(est, e->estimate));
+                const CorpusPos N = corpus_.size();
+                const size_t nch = static_cast<size_t>((N + BitmapIndex::kChunk - 1) >> BitmapIndex::kChunkShift);
+                for (size_t ch = 0; ch < nch; ++ch) {
+                    const BmChunk v = e->load(ch);
+                    if (v.zero) continue;
+                    const CorpusPos base = static_cast<CorpusPos>(ch) << BitmapIndex::kChunkShift;
+                    for (size_t w = 0; w < BitmapIndex::kWords; ++w)
+                        for (uint64_t x = v.w[w]; x; x &= x - 1) {
+                            const CorpusPos p = base + static_cast<CorpusPos>(w * 64) + __builtin_ctzll(x);
+                            if (p < N) pos.push_back(p);
+                        }
+                }
+                return owned_postings(pos, corpus_rev_width);
+            }
+        }
         return owned_postings(resolve_conditions(c), corpus_rev_width);
     };
 
@@ -3845,8 +3890,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
     // nullptr = not expressible (feats sub-keys, MV, structural, count, …).
     // *dense is set when a real bitmap or a complement is involved (the cases
     // where the kernel beats the merge paths).
-    std::function<std::unique_ptr<BmExpr>(const ConditionPtr&, bool*)> compile_bm =
-        [&](const ConditionPtr& c, bool* dense) -> std::unique_ptr<BmExpr> {
+    compile_bm = [&](const ConditionPtr& c, bool* dense) -> std::unique_ptr<BmExpr> {
         auto from_merge_operand = [&]() -> std::unique_ptr<BmExpr> {
             SeqMergeOperand o = merge_operand(c);
             if (o.kind != SeqMergeTok::EqRev) return nullptr;
@@ -3864,7 +3908,28 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
         const AttrCondition& ac = c->leaf;
         if (ac.is_nvals) return nullptr;
         const std::string name = normalize_attr(ac.attr);
-        if (!corpus_.has_attr(name) || corpus_.is_multivalue(name)) return from_merge_operand();
+        if (!corpus_.has_attr(name)) {
+            // token-level region attribute: the matching regions' position intervals
+            RegionAttrParts parts;
+            if (ac.op == CompOp::EQ && !ac.case_insensitive && !ac.diacritics_insensitive
+                && split_region_attr_name(name, parts) && corpus_.has_structure(parts.struct_name)) {
+                GlobalRegionFilter gf;
+                gf.region_attr = name;
+                gf.value = ac.value;
+                RegionPosMask m = build_region_eq_position_mask(corpus_, {gf});
+                if (m.status == RegionMaskStatus::Unsatisfiable)
+                    return std::make_unique<BmPostings>(RevSpan{});
+                if (m.status == RegionMaskStatus::Ready) {
+                    std::vector<std::pair<CorpusPos, CorpusPos>> iv;
+                    iv.reserve(m.iv.size());
+                    for (const auto& x : m.iv) iv.emplace_back(x.s, x.e);
+                    *dense = true;
+                    return std::make_unique<BmIntervals>(std::move(iv));
+                }
+            }
+            return from_merge_operand();
+        }
+        if (corpus_.is_multivalue(name)) return from_merge_operand();
         const PositionalAttr& pa = corpus_.attr(name);
         std::shared_ptr<BitmapIndex> bi = bitmap_index(name);
         auto id_count = [&](int64_t id) { return pa.rev_span_of_id(static_cast<LexiconId>(id)).count; };
@@ -3932,8 +3997,10 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
     auto try_seq_bitmap = [&](const StructuralAttr* within_sa, bool within_span_semantics,
                               const RegionPosMask& region_mask, bool use_region_mask,
                               bool cheap_total_ok) -> bool {
+        std::vector<std::shared_ptr<BitmapIndex>> bm_keep;
         if (fastpath_mode() == FastPathMode::On && bitmap_mode() != BitmapMode::Off
-            && n <= 64 && !within_span_semantics && sample_size == 0) {
+            && n <= static_cast<size_t>(kBmMaxShift) + 1 && !within_span_semantics
+            && sample_size == 0) {
             struct BmTok { std::unique_ptr<BmExpr> e; int k; };
             std::vector<BmTok> bt;
             bool compiled = true, dense = false;
@@ -3965,6 +4032,16 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 size_t wr = 0;                                    // within region cursor
                 const Region* wreg = within_sa ? within_sa->region_data() : nullptr;
                 const size_t wn = within_sa ? within_sa->region_count() : 0;
+                // P3.6: the structure's boundary bitmaps instead of walking its regions
+                std::unique_ptr<BmValue> sC, sE;
+                if (within_sa) {
+                    const std::string wname = q.within.empty() ? corpus_.default_within() : q.within;
+                    if (auto sbi = structure_bitmap(wname)) {
+                        sC = std::make_unique<BmValue>(*sbi, BitmapIndex::kStructCovered, 0);
+                        sE = std::make_unique<BmValue>(*sbi, BitmapIndex::kStructEnds, 0);
+                        bm_keep.push_back(sbi);
+                    }
+                }
                 auto set_range = [&](uint64_t* m, uint32_t a, uint32_t b) {   // inclusive
                     const uint32_t wa = a >> 6, wb = b >> 6;
                     const uint64_t ma = ~uint64_t{0} << (a & 63);
@@ -4000,18 +4077,12 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                             if (k == 0) {
                                 for (size_t w = 0; w < nw; ++w) orr |= (acc[w] = v.w[w]);
                             } else {
-                                for (size_t w = 0; w < nw; ++w) {
-                                    const uint64_t nx = w + 1 < W ? v.w[w + 1] : v.next;
-                                    orr |= (acc[w] = (v.w[w] >> k) | (nx << (64 - k)));
-                                }
+                                for (size_t w = 0; w < nw; ++w) orr |= (acc[w] = v.shifted(w, k));
                             }
                         } else if (k == 0) {
                             for (size_t w = 0; w < nw; ++w) orr |= (acc[w] &= v.w[w]);
                         } else {
-                            for (size_t w = 0; w < nw; ++w) {
-                                const uint64_t nx = w + 1 < W ? v.w[w + 1] : v.next;
-                                orr |= (acc[w] &= (v.w[w] >> k) | (nx << (64 - k)));
-                            }
+                            for (size_t w = 0; w < nw; ++w) orr |= (acc[w] &= v.shifted(w, k));
                         }
                         any = orr != 0;
                         if (!any) break;
@@ -4037,7 +4108,15 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                             for (size_t w = 0; w < nw; ++w) acc[w] &= msk[w];
                         }
                     }
-                    if (wreg) {
+                    if (sC) {
+                        // start covered, no region end among the first L-1 positions
+                        const BmChunk cv = sC->load(c), ev = sE->load(c);
+                        for (size_t w = 0; w < nw; ++w) {
+                            uint64_t m = cv.w[w];
+                            for (int d = 0; d + 1 < static_cast<int>(L) && m; ++d) m &= ~ev.shifted(w, d);
+                            acc[w] &= m;
+                        }
+                    } else if (wreg) {
                         // allowed starts: [r.start, r.end - (L-1)] for every region r
                         while (wr < wn && wreg[wr].end < base) ++wr;
                         std::fill(msk.begin(), msk.begin() + nw, 0);
@@ -4399,6 +4478,251 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             const size_t v = static_cast<size_t>(var_idx);
             const size_t p = v, qn = n - 1 - v;              // prefix / suffix lengths
             const int vmin = q.tokens[v].min_repeat, vmax = q.tokens[v].max_repeat;
+
+            // ── P3.3: the same (start, end) pairs on chunked bitmaps (seq_gap_bitmap) ──
+            // For each length L of V the pattern is fixed: prefix at s, X at
+            // s+p … s+p+L-1, suffix at s+p+L. Per chunk:
+            //   PRE  = AND of the shifted prefix tokens (and the `:: match.…` mask)
+            //   R_L  = R_{L-1} & (X >> p+L-1)       (runs of X; R_0 = all)
+            //   A_len = A_{len-1} & ~(E >> len-2)   (no region end inside the span;
+            //          A_1 = covered positions, E = region ends + the corpus end)
+            //   H_L  = PRE & R_L & A_{p+L+q} & AND_j (S_j >> p+L+j)
+            // The total is the sum of popcounts; the first page walks starts in
+            // order and, per start, the lengths in increasing order.
+            if (fastpath_mode() == FastPathMode::On && bitmap_mode() != BitmapMode::Off
+                && all_seq && sample_size == 0 && vmax >= vmin && vmax >= 1
+                && static_cast<int>(n) - 1 + vmax <= kBmMaxShift) {
+                std::string eff_within = q.within.empty() ? corpus_.default_within() : q.within;
+                const StructuralAttr* wsa = (!eff_within.empty() && corpus_.has_structure(eff_within))
+                    ? &corpus_.structure(eff_within) : nullptr;
+                const bool wspan = wsa && (corpus_.is_nested(eff_within) || corpus_.is_overlapping(eff_within));
+                bool compiled = !wspan, dense = false, pre_free = true, suf_free = true;
+                size_t min_fixed = SIZE_MAX;
+                std::vector<std::unique_ptr<BmExpr>> tex(n);   // nullptr = []
+                for (size_t i = 0; i < n && compiled; ++i) {
+                    if (!q.tokens[i].conditions) continue;
+                    tex[i] = compile_bm(q.tokens[i].conditions, &dense);
+                    if (!tex[i]) { compiled = false; break; }
+                    if (i != v) {
+                        min_fixed = std::min(min_fixed, tex[i]->estimate);
+                        (i < v ? pre_free : suf_free) = false;
+                    }
+                }
+                const CorpusPos N = corpus_.size();
+                const size_t nchunks = static_cast<size_t>((N + BitmapIndex::kChunk - 1) >> BitmapIndex::kChunkShift);
+                const bool use_bm = compiled && !(pre_free && suf_free)
+                    && (bitmap_mode() == BitmapMode::Force
+                        || (dense && min_fixed != SIZE_MAX && min_fixed >= 8 * nchunks
+                            // a wildcard / dense V costs one pass per length; runs of a
+                            // selective X die out after a few
+                            && (vmax - vmin + 1 <= 32
+                                || (tex[v] && tex[v]->estimate <= static_cast<size_t>(N) / 2))));
+                RegionPosMask bm_mask;
+                if (use_bm) {
+                    bm_mask = build_region_eq_position_mask(corpus_, q.global_region_filters);
+                    if (bm_mask.status == RegionMaskStatus::Unsatisfiable) {
+                        result.plan_path = "seq_gap_bitmap";
+                        result.total_exact = true;
+                        return result;
+                    }
+                }
+                if (use_bm) {
+                    result.plan_path = "seq_gap_bitmap";
+                    const size_t p = v, qn = n - 1 - v;
+                    const bool use_mask = bm_mask.status == RegionMaskStatus::Ready;
+                    const bool cheap_total_ok = (q.global_region_filters.empty() || use_mask)
+                                                && token_anchor_constraints.empty();
+                    constexpr size_t W = BitmapIndex::kWords;
+                    constexpr size_t WX = W + kBmExtra;
+                    // fixed tokens, rarest first
+                    std::vector<size_t> order;
+                    for (size_t i = 0; i < n; ++i)
+                        if (i != v && tex[i]) order.push_back(i);
+                    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                        return tex[a]->estimate < tex[b]->estimate;
+                    });
+                    std::vector<BmChunk> view(n);
+                    std::vector<uint64_t> pre(W), run(W), alw(W), cw(WX), ew(WX);
+                    const int nlen = vmax + 1;
+                    std::vector<uint64_t> hits(static_cast<size_t>(nlen) * W);
+                    std::vector<char> has_len(static_cast<size_t>(nlen));
+                    size_t ivc = 0, wr = 0;
+                    const Region* wreg = wsa ? wsa->region_data() : nullptr;
+                    const size_t wn = wsa ? wsa->region_count() : 0;
+                    std::shared_ptr<BitmapIndex> sbi = wsa ? structure_bitmap(eff_within) : nullptr;
+                    std::unique_ptr<BmValue> sC, sE;
+                    if (sbi) {
+                        sC = std::make_unique<BmValue>(*sbi, BitmapIndex::kStructCovered, 0);
+                        sE = std::make_unique<BmValue>(*sbi, BitmapIndex::kStructEnds, 0);
+                    }
+                    auto set_range = [](uint64_t* m, size_t a, size_t b) {   // inclusive bit range
+                        const size_t wa = a >> 6, wb = b >> 6;
+                        const uint64_t ma = ~uint64_t{0} << (a & 63);
+                        const uint64_t mb = ~uint64_t{0} >> (63 - (b & 63));
+                        if (wa == wb) { m[wa] |= ma & mb; return; }
+                        m[wa] |= ma;
+                        for (size_t w = wa + 1; w < wb; ++w) m[w] = ~uint64_t{0};
+                        m[wb] |= mb;
+                    };
+                    auto shifted_raw = [](const std::vector<uint64_t>& a, size_t i, int k) -> uint64_t {
+                        const size_t q0 = i + static_cast<size_t>(k >> 6);
+                        const int r = k & 63;
+                        if (r == 0) return a[q0];
+                        return (a[q0] >> r) | (a[q0 + 1] << (64 - r));
+                    };
+                    bool stop = false, counting = false;
+                    for (size_t c = 0; c < nchunks && !stop; ++c) {
+                        const CorpusPos base = static_cast<CorpusPos>(c) << BitmapIndex::kChunkShift;
+                        const CorpusPos top = std::min<CorpusPos>(base + BitmapIndex::kChunk, N) - 1;
+                        const size_t nw = static_cast<size_t>((top - base) >> 6) + 1;
+                        if (use_mask && !bm_mask.use_bits) {
+                            const auto& iv = bm_mask.iv;
+                            while (ivc < iv.size() && iv[ivc].e < base) ++ivc;
+                            if (ivc >= iv.size()) break;
+                            if (iv[ivc].s > top) continue;
+                        }
+                        bool any = true;
+                        for (size_t i : order) {
+                            view[i] = tex[i]->load(c);
+                            if (view[i].zero) { any = false; break; }
+                        }
+                        if (!any) continue;
+                        // PRE
+                        uint64_t orr = 0;
+                        for (size_t w = 0; w < nw; ++w) {
+                            uint64_t x = ~uint64_t{0};
+                            for (size_t i = 0; i < p; ++i)
+                                if (tex[i]) x &= view[i].shifted(w, static_cast<int>(i));
+                            pre[w] = x;
+                        }
+                        if ((top - base + 1) & 63) pre[nw - 1] &= (uint64_t{1} << ((top - base + 1) & 63)) - 1;
+                        if (use_mask) {
+                            if (bm_mask.use_bits) {
+                                const size_t b0 = static_cast<size_t>(base >> 6);
+                                for (size_t w = 0; w < nw; ++w)
+                                    pre[w] &= b0 + w < bm_mask.bits.size() ? bm_mask.bits[b0 + w] : 0;
+                            } else {
+                                std::fill(alw.begin(), alw.begin() + nw, 0);
+                                const auto& iv = bm_mask.iv;
+                                for (size_t j = ivc; j < iv.size() && iv[j].s <= top; ++j) {
+                                    const CorpusPos a = std::max(iv[j].s, base), b = std::min(iv[j].e, top);
+                                    if (b >= a) set_range(alw.data(), static_cast<size_t>(a - base), static_cast<size_t>(b - base));
+                                }
+                                for (size_t w = 0; w < nw; ++w) pre[w] &= alw[w];
+                            }
+                        }
+                        for (size_t w = 0; w < nw; ++w) orr |= pre[w];
+                        if (!orr) continue;
+                        // covered positions C and span ends E over the chunk + the extra words
+                        std::fill(cw.begin(), cw.end(), 0);
+                        std::fill(ew.begin(), ew.end(), 0);
+                        const CorpusPos wend = base + static_cast<CorpusPos>(WX * 64);   // exclusive
+                        if (sC) {
+                            const BmChunk cv = sC->load(c), ev = sE->load(c);
+                            std::copy(cv.w, cv.w + W, cw.begin());
+                            std::copy(cv.nx, cv.nx + kBmExtra, cw.begin() + W);
+                            std::copy(ev.w, ev.w + W, ew.begin());
+                            std::copy(ev.nx, ev.nx + kBmExtra, ew.begin() + W);
+                        } else if (wreg) {
+                            while (wr < wn && wreg[wr].end < base) ++wr;
+                            for (size_t j = wr; j < wn && wreg[j].start < wend; ++j) {
+                                const CorpusPos a = std::max<CorpusPos>(wreg[j].start, base);
+                                const CorpusPos b = std::min<CorpusPos>(wreg[j].end, wend - 1);
+                                if (b >= a) set_range(cw.data(), static_cast<size_t>(a - base), static_cast<size_t>(b - base));
+                                if (wreg[j].end < wend) {
+                                    const size_t o = static_cast<size_t>(wreg[j].end - base);
+                                    ew[o >> 6] |= uint64_t{1} << (o & 63);
+                                }
+                            }
+                        } else {
+                            const CorpusPos b = std::min<CorpusPos>(N, wend) - 1;
+                            set_range(cw.data(), 0, static_cast<size_t>(b - base));
+                        }
+                        if (N - 1 < wend) {
+                            const size_t o = static_cast<size_t>(N - 1 - base);
+                            ew[o >> 6] |= uint64_t{1} << (o & 63);
+                        }
+                        // A for len0 = p + qn (the length at L = 0)
+                        const int len0 = static_cast<int>(p + qn);
+                        for (size_t w = 0; w < nw; ++w) {
+                            uint64_t a = cw[w];
+                            for (int d = 0; d <= len0 - 2; ++d) a &= ~shifted_raw(ew, w, d);
+                            alw[w] = a;
+                        }
+                        std::fill(run.begin(), run.begin() + nw, ~uint64_t{0});
+                        const bool emit_mode = !counting;
+                        for (int L = 0; L <= vmax; ++L) {
+                            const int len = len0 + L;
+                            uint64_t live = 0;
+                            if (L > 0) {
+                                const int kx = static_cast<int>(p) + L - 1;
+                                for (size_t w = 0; w < nw; ++w) {
+                                    if (tex[v]) run[w] &= view[v].shifted(w, kx);
+                                    alw[w] &= ~shifted_raw(ew, w, len - 2);
+                                    live |= run[w] & alw[w] & pre[w];
+                                }
+                            } else {
+                                if (tex[v]) view[v] = tex[v]->load(c);
+                                for (size_t w = 0; w < nw; ++w) live |= alw[w] & pre[w];
+                            }
+                            if (!live) break;
+                            if (L < vmin) continue;
+                            uint64_t* h = hits.data() + static_cast<size_t>(L) * W;
+                            uint64_t hor = 0;
+                            size_t cnt = 0;
+                            for (size_t w = 0; w < nw; ++w) {
+                                uint64_t x = pre[w] & run[w] & alw[w];
+                                for (size_t j = 0; j < qn && x; ++j) {
+                                    const size_t ti = v + 1 + j;
+                                    if (tex[ti]) x &= view[ti].shifted(w, static_cast<int>(p) + L + static_cast<int>(j));
+                                }
+                                if (emit_mode) h[w] = x;
+                                hor |= x;
+                                cnt += static_cast<size_t>(__builtin_popcountll(x));
+                            }
+                            has_len[static_cast<size_t>(L)] = hor != 0;
+                            if (!emit_mode) result.total_count += cnt;
+                        }
+                        if (emit_mode) {
+                            // ordered walk: starts ascending, lengths ascending
+                            for (size_t w = 0; w < nw && !stop; ++w) {
+                                uint64_t starts = 0;
+                                for (int L = vmin; L <= vmax; ++L)
+                                    if (has_len[static_cast<size_t>(L)]) starts |= hits[static_cast<size_t>(L) * W + w];
+                                while (starts && !stop) {
+                                    const int j = __builtin_ctzll(starts);
+                                    starts &= starts - 1;
+                                    const CorpusPos st = base + static_cast<CorpusPos>(w * 64) + j;
+                                    for (int L = vmin; L <= vmax && !stop; ++L) {
+                                        if (!has_len[static_cast<size_t>(L)]) continue;
+                                        if (!(hits[static_cast<size_t>(L) * W + w] >> j & 1)) continue;
+                                        if (counting) { ++result.total_count; continue; }
+                                        if (max_matches > 0 && result.matches.size() >= max_matches) {
+                                            if (!count_total) { stop = true; break; }
+                                            if (cheap_total_ok) { counting = true; ++result.total_count; continue; }
+                                        }
+                                        std::vector<CorpusPos> pm(2 * n);
+                                        for (size_t i = 0; i < p; ++i) pm[i] = pm[n + i] = st + static_cast<CorpusPos>(i);
+                                        const CorpusPos vb = st + static_cast<CorpusPos>(p);
+                                        if (L == 0) { pm[v] = pm[n + v] = NO_HEAD; }
+                                        else { pm[v] = vb; pm[n + v] = vb + L - 1; }
+                                        for (size_t jj = 0; jj < qn; ++jj)
+                                            pm[v + 1 + jj] = pm[n + v + 1 + jj] = vb + L + static_cast<CorpusPos>(jj);
+                                        add_match(std::move(pm));
+                                        if (reached_limit() || reached_total_cap()) { stop = true; break; }
+                                    }
+                                }
+                            }
+                        }
+                        std::fill(has_len.begin(), has_len.end(), 0);
+                        if (counting && max_total_cap > 0 && result.total_count >= max_total_cap) {
+                            result.total_count = max_total_cap;
+                            stop = true;
+                        }
+                    }
+                    return finish_query();
+                }
+            }
             std::vector<SeqMergeOperand> ops(n);
             bool ok = vmax >= vmin && vmax >= 1;
             for (size_t i = 0; ok && i < n; ++i) {
