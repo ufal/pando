@@ -73,18 +73,19 @@ For a **large** corpus spanning the published UD treebanks, use [`scripts/build_
 - Prepends `# newregion` / `# text_*` metadata so tokens resolve `text_lang`, `text_id`, etc. from open text regions,
 - Invokes **`pando-index`** on the extracted treebanks.
 
-Example (adjust paths to your machine):
+Everything has a default — the latest release into `~/ud-data` (or `$PANDO_UD_DATA`), the
+index into `<data-dir>/pando_idx`, and the `pando-index` of this repository's `build/` (or
+next to the script, or on `PATH`); an archive already downloaded is reused:
 
 ```bash
-./scripts/build_ud_corpus.py --data-dir ~/ud-data \
-  --pando-index ./build/pando-index --output-index ~/ud-data/pando_idx
+./scripts/build_ud_corpus.py          # or: pando-build-ud (installed), ./install.sh --ud
+pando ~/ud-data/pando_idx '[upos="VERB"]' --total
 ```
 
 Or reuse a treebank tree you already extracted:
 
 ```bash
-./scripts/build_ud_corpus.py --skip-download --data-dir ~/ud/ud-treebanks-v2.17 \
-  --pando-index ./build/pando-index --output-index ./idx
+./scripts/build_ud_corpus.py --skip-download --data-dir ~/ud/ud-treebanks-v2.17 --output-index ./idx
 ```
 
 See the script’s **docstring** at the top of `build_ud_corpus.py` for defaults, overrides, and REST API resolution of the archive.

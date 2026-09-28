@@ -17,13 +17,26 @@ not support (backreferences, lookaround) still run on std::regex. The configure 
 `pando regex engine: ON|OFF`. A build directory configured before 2026-09-28 keeps its old
 `PANDO_USE_RE2=OFF`: reconfigure with `-DPANDO_USE_RE2=AUTO` to switch.
 
-## Build
+## Build and install
 
 From the repository root:
 
 ```bash
+./install.sh            # Release build, installs pando, pando-index, pando-check,
+                        # pando-server, pando-build-ud into ~/.local/bin
+./install.sh --ud       # … and downloads + indexes the latest UD release (~/ud-data/pando_idx)
+```
+
+Options: `--prefix DIR` (e.g. `/usr/local`, may need sudo), `--no-install` (build only),
+`--test` (run ctest), `--ud-dir DIR`, `--build-dir DIR`. The script checks for CMake and a
+compiler, uses RE2 when it is installed, and says when `~/.local/bin` is not on your `PATH`.
+
+The same by hand:
+
+```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(sysctl -n hw.ncpu 2>/dev/null || nproc || echo 4)
+cmake --install build --prefix ~/.local     # optional: bin/pando, bin/pando-index, …
 ```
 
 Artifacts appear under `build/`:

@@ -4,12 +4,18 @@ Download Universal Dependencies treebanks, prepend # newregion text and # text_*
 (filename → text_id, text_langcode, text_treebank; optional JSON overrides), then run pando-index.
 Tokens then resolve text_lang (etc.) from the open text region.
 
-Example:
-  ./build_ud_corpus.py --data-dir ~/ud-data \\
-    --pando-index ../build-pmltq2/pando-index --output-index ~/ud-data/pando_idx
+Example (everything has a default):
+  ./scripts/build_ud_corpus.py
+      → downloads the latest UD release to ~/ud-data and indexes it into
+        ~/ud-data/pando_idx with the pando-index next to this repository
+        (build/pando-index, else the one on PATH).
 
-  ./build_ud_corpus.py --skip-download --data-dir ~/ud/ud-treebanks-v2.17 \\
-    --pando-index ./pando-index --output-index ./idx
+  ./scripts/build_ud_corpus.py --skip-download --data-dir ~/ud/ud-treebanks-v2.17 \\
+    --output-index ./idx
+
+Defaults: --data-dir $PANDO_UD_DATA or ~/ud-data; --output-index <data-dir>/pando_idx;
+--pando-index $PANDO_INDEX, <repo>/build/pando-index, or pando-index on PATH.
+An archive already in --data-dir is not downloaded again.
 
 By default (no --ud-archive-url): fetches https://universaldependencies.org/download.html,
 takes the latest *published* release line ("Version X.Y treebanks are available at …"),
@@ -21,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -491,31 +498,57 @@ def extract_archive(archive_path: Path, dest_dir: Path) -> None:
 
 
 def run_pando_index(pando_index: Path, input_dir: Path, output_index: Path) -> None:
+    # (pando-index writes the derived files — bitmaps, dependency pairs, %c/%d
+    # folding — itself; `pando-index --upgrade` is only for older indexes)
     output_index.parent.mkdir(parents=True, exist_ok=True)
     cmd = [str(pando_index), str(input_dir), str(output_index)]
     print("Running:", " ".join(cmd))
     subprocess.run(cmd, check=True)
 
 
+def default_pando_index() -> Path | None:
+    """$PANDO_INDEX, this repository's build/pando-index, or pando-index on PATH."""
+    env = os.environ.get("PANDO_INDEX")
+    if env:
+        return Path(env).expanduser()
+    here = Path(__file__).resolve().parent
+    for cand in (here / "pando-index",                 # installed: bin/pando-build-ud
+                 here.parent / "build" / "pando-index"):   # in the repository: scripts/
+        if cand.is_file():
+            return cand
+    found = shutil.which("pando-index")
+    return Path(found) if found else None
+
+
+def download_once(url: str, dest: Path) -> None:
+    """Download unless the archive is already there (a finished earlier run)."""
+    if dest.is_file() and dest.stat().st_size > 0:
+        print(f"Using the archive already downloaded: {dest}")
+        return
+    http_download(url, dest)
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--data-dir",
-        required=True,
+        default=Path(os.environ.get("PANDO_UD_DATA", "~/ud-data")).expanduser(),
         type=Path,
-        help="Root for downloaded zip, extract, and working tree (in-place inject)",
+        help="Root for downloaded archive, extract, and working tree (in-place inject); "
+        "default $PANDO_UD_DATA or ~/ud-data",
     )
     p.add_argument(
         "--pando-index",
-        required=True,
+        default=None,
         type=Path,
-        help="Path to pando-index executable",
+        help="pando-index executable (default: $PANDO_INDEX, the one next to this script, "
+        "<repo>/build/pando-index, or pando-index on PATH)",
     )
     p.add_argument(
         "--output-index",
         default=None,
         type=Path,
-        help="Output directory for pando-index (required unless --inject-only)",
+        help="Output directory for pando-index (default: <data-dir>/pando_idx)",
     )
     p.add_argument(
         "--ud-archive-url",
@@ -585,19 +618,20 @@ def main() -> int:
         help="Print actions without writing files or indexing",
     )
     args = p.parse_args()
-    if not args.inject_only and args.output_index is None:
-        p.error("--output-index is required unless using --inject-only")
-    if args.index_only and args.output_index is None:
-        p.error("--output-index is required with --index-only")
-
-    data_dir = args.data_dir.resolve()
-    pando_index = args.pando_index.resolve()
-    output_index = args.output_index.resolve() if args.output_index else None
+    data_dir = args.data_dir.expanduser().resolve()
+    if args.output_index is None and not args.inject_only:
+        args.output_index = data_dir / "pando_idx"
+    output_index = args.output_index.expanduser().resolve() if args.output_index else None
     manifest = load_manifest(args.manifest)
 
-    if not pando_index.is_file():
-        print(f"Not a file: {pando_index}", file=sys.stderr)
-        return 1
+    pando_index = args.pando_index.expanduser() if args.pando_index else default_pando_index()
+    if not args.inject_only and not args.dry_run:
+        if pando_index is None or not pando_index.is_file():
+            print("pando-index not found: build pando first (./install.sh, or cmake --build build), "
+                  "or pass --pando-index PATH", file=sys.stderr)
+            return 1
+        pando_index = pando_index.resolve()
+    print(f"Data dir:    {data_dir}\nIndex:       {output_index}\npando-index: {pando_index}")
 
     ud_root: Path | None = args.ud_root.resolve() if args.ud_root else None
 
@@ -630,7 +664,7 @@ def main() -> int:
                     if not fname or fname == explicit_url:
                         fname = "ud-treebanks-archive.bin"
                     dest_arc = data_dir / fname
-                    http_download(explicit_url, dest_arc)
+                    download_once(explicit_url, dest_arc)
                     extract_archive(dest_arc, data_dir)
                 elif args.ud_handle:
                     dl_url, fname = resolve_lindat_treebank_archive_url(args.ud_handle)
@@ -639,7 +673,7 @@ def main() -> int:
                         f"-> {fname!r}"
                     )
                     dest_arc = data_dir / fname
-                    http_download(dl_url, dest_arc)
+                    download_once(dl_url, dest_arc)
                     extract_archive(dest_arc, data_dir)
                 else:
                     dl_url, fname, version = resolve_default_ud_archive_url(
@@ -650,10 +684,16 @@ def main() -> int:
                         f"(treebank archive: {fname!r})"
                     )
                     dest_arc = data_dir / fname
-                    http_download(dl_url, dest_arc)
+                    download_once(dl_url, dest_arc)
                     extract_archive(dest_arc, data_dir)
 
-        ud_root = ud_root or discover_ud_root(data_dir)
+        try:
+            ud_root = ud_root or discover_ud_root(data_dir)
+        except FileNotFoundError:
+            if not args.dry_run:
+                raise
+            print(f"[dry-run] would look for UD_* treebank folders under {data_dir} (after the download)")
+            ud_root = data_dir
         print(f"UD root: {ud_root}")
 
         if args.dry_run:
@@ -683,7 +723,7 @@ def main() -> int:
 
     assert output_index is not None
     run_pando_index(pando_index, ud_root, output_index)
-    print("Done.")
+    print(f"Done. Try:\n  pando {output_index} '[upos=\"VERB\"]' --total")
     return 0
 
 

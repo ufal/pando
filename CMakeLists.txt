@@ -325,3 +325,8 @@ if(BUILD_TESTING)
                 --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu)
     endif()
 endif()
+
+# `cmake --install build [--prefix DIR]` (or ./install.sh): the commands, and the UD
+# corpus builder as `pando-build-ud`
+install(TARGETS pando pando-index pando-check pando-server RUNTIME DESTINATION bin)
+install(PROGRAMS scripts/build_ud_corpus.py DESTINATION bin RENAME pando-build-ud)

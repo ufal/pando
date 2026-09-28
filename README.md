@@ -27,16 +27,27 @@ This README is intentionally minimal and documents how to build and run the curr
 
 All C++ library dependencies are pulled in via CMake (e.g. `httplib` vendored through `add_subdirectory`/FetchContent in `CMakeLists.txt`), so you typically do not need system-wide packages beyond a standard build toolchain.
 
-## Quick start: build
+## Quick start
 
-From the repository root:
+```bash
+git clone https://github.com/maartenpt/pando.git && cd pando
+./install.sh --ud                                   # build, install into ~/.local/bin, index all of UD
+pando ~/ud-data/pando_idx '[upos="VERB"]' --total
+```
+
+`./install.sh` alone builds and installs the commands without the UD corpus;
+`--prefix DIR` installs elsewhere, `--no-install` only builds (`./build/pando`, …),
+`--test` runs the test suite. RE2 is used when installed (recommended:
+`brew install re2` / `apt install libre2-dev`). By hand, the same is:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(sysctl -n hw.ncpu 2>/dev/null || nproc || echo 4)
+cmake --install build --prefix ~/.local            # optional
+./scripts/build_ud_corpus.py                       # optional: UD into ~/ud-data/pando_idx
 ```
 
-This should produce several binaries in `build/`, including:
+This produces several binaries in `build/`, including:
 
 - `pando` – main query CLI.
 - `pando-index` – corpus indexing tool.
