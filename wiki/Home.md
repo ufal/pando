@@ -30,7 +30,7 @@ Use `pando --help` for the current option list. Important query options include 
 ## Wiki pages
 
 - [Installation](Installation.md)
-- [Sample corpora](Sample-Corpora.md) — CoNLL-U, JSONL fixture, full UD via `build_ud_corpus.py`
+- [Sample corpora](Sample-Corpora.md) — CoNLL-U, full UD via `build_ud_corpus.py`
 - [Quick Start](Quick-Start.md)
 - [Query language (Pando CQL)](Query-Language-and-CQL.md)
 - [Multivalue attributes](Multivalue-Attributes.md) — MV sets + **KV pipe** (`feats`)

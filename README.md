@@ -58,7 +58,7 @@ Exact binary names and options may evolve; run each with `--help` for the curren
 
 ## Running a simple query
 
-For sample corpora (bundled CoNLL-U, JSONL fixture, and the full-UD download script), see [`wiki/Sample-Corpora.md`](wiki/Sample-Corpora.md).
+For sample corpora (bundled CoNLL-U and the full-UD download script), see [`wiki/Sample-Corpora.md`](wiki/Sample-Corpora.md).
 
 Assuming you already have a Pando-formatted corpus at `/path/to/corpus` and have built the project:
 

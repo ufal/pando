@@ -9,7 +9,7 @@ All pages are Markdown in this folder (same convention as **flexipipe** / **flex
 | [Home](Home.md) | Overview, binaries, features, links to all pages |
 | [Installation](Installation.md) | Build requirements, outputs, optional install path |
 | [Quick Start](Quick-Start.md) | First corpus, first query, pointers to samples |
-| [Sample corpora](Sample-Corpora.md) | CoNLL-U sample, JSONL fixture, full UD download script |
+| [Sample corpora](Sample-Corpora.md) | CoNLL-U sample, full UD download script |
 | [Query language (Pando CQL)](Query-Language-and-CQL.md) | Where the full CQL spec lives; dialects |
 | [Multivalue attributes](Multivalue-Attributes.md) | Pipe values, indexes, queries, count/freq, CLI flags |
 | [Overlapping and nested regions](Overlapping-and-Nested-Regions.md) | Structural types, lookup, zero-width |

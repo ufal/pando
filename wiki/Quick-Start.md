@@ -11,10 +11,9 @@ Pando reads a **directory** of mmap files plus `corpus.info`, not raw CoNLL-U di
 1. Convert or emit **JSONL** in the event format expected by `pando-index` (see [Index and corpus layout](Index-and-Corpus-Layout.md)).
 2. Run `pando-index` to produce a corpus directory.
 
-The repository includes small samples; see [Sample corpora](Sample-Corpora.md) for all three: bundled CoNLL-U, JSONL fixture, and the full-UD download script.
+The repository includes small samples; see [Sample corpora](Sample-Corpora.md) for both: the bundled CoNLL-U and the full-UD download script.
 
 - `test/data/` — example inputs for tests and experiments (including `sample.conllu`).
-- Rich JSONL fixture: run **`python scripts/gen_sample_rich_jsonl.py`**, then index the file it writes (see [Sample corpora](Sample-Corpora.md)).
 
 ## 3. Run a query
 

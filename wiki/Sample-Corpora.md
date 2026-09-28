@@ -1,6 +1,6 @@
 # Sample corpora
 
-The repository ships **three** practical ways to exercise indexing and queries: a tiny **CoNLL-U** file (UD), a **generated JSONL** structural/multivalue fixture, and a **script** to download the full Universal Dependencies release and build a large benchmark-scale index (on the order of **tens of millions of tokens**, depending on UD version and release).
+The repository ships **two** practical ways to exercise indexing and queries: a tiny **CoNLL-U** file (UD) and a **script** to download the full Universal Dependencies release and build a large benchmark-scale index (on the order of **tens of millions of tokens**, depending on UD version and release).
 
 ## 1. Bundled CoNLL-U (`test/data/sample.conllu`)
 
@@ -52,20 +52,7 @@ To exercise the `--cql cwb` dialect adapter (subset implementation):
 ./build/pando test/data/sample_idx_local --cql cwb --debug '[lemma="the"]'
 ```
 
-## 2. JSONL fixture (generator script)
-
-Run **`python scripts/gen_sample_rich_jsonl.py`** from the repository root to emit a **rich** JSONL file in the JSONL event format expected by `pando-index`: multiple region types, nested/overlapping structures, and **multivalue** fields. The script prints the path it wrote (see the script’s `OUT` variable if you want a custom location). Use this when you want to exercise **structural** queries, `nvals`, `::` filters, or multivalue behavior beyond the small UD snippet.
-
-Build an index (replace `PATH/TO/sample-rich-events.jsonl` with the path printed by the generator):
-
-```bash
-./build/pando-index PATH/TO/sample-rich-events.jsonl /tmp/sample-rich-idx
-./build/pando /tmp/sample-rich-idx '<your CQL>' --limit 5
-```
-
-Details of the event format and `corpus.info` expectations are in [Index and corpus layout](Index-and-Corpus-Layout.md).
-
-## 3. Full UD release via `scripts/build_ud_corpus.py`
+## 2. Full UD release via `scripts/build_ud_corpus.py`
 
 For a **large** corpus spanning the published UD treebanks, use [`scripts/build_ud_corpus.py`](../scripts/build_ud_corpus.py). It:
 

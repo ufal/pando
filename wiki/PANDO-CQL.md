@@ -1,7 +1,7 @@
 # Pando Corpus Query Language
 
 The native query language of pando is called pando-CQL, heavily modeled after [CWB-CQL](https://cwb.sourceforge.io/files/CQP_Manual/), with additions that are partially taken from [SketchEngine](https://www.sketchengine.eu/documentation/corpus-querying/), and partially from [PML-TQ](https://ufal.mff.cuni.cz/pmltqdoc/doc/pmltq_tutorial_web_client.html). These guidelines give a general introduction to pando-CQL (henceforth simply CQL when there is no confusion), with example queries illustrated against the **sample corpus** shipped with this repository: `test/data/sample.conllu`, which is annotated using [Universal Dependencies](https://universaldependencies.org/).
-See [Sample-Corpora.md](Sample-Corpora.md) for bundled CoNLL-U, JSONL fixtures, and the full-UD download script.
+See [Sample-Corpora.md](Sample-Corpora.md) for the bundled CoNLL-U and the full-UD download script.
 
 ## Token Queries
 

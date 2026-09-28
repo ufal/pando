@@ -49,7 +49,7 @@ A corpus can carry **both**: UD tokens + `deprel`/`head` for syntax-as-graph, an
 
 ## Example corpus
 
-The JSONL emitted by **`python scripts/gen_sample_rich_jsonl.py`** declares `nested: ["node"]` and includes several `node` regions with `attrs.type` (e.g. `NP`, `S`, `VP`, `CLAUSE`) over the first sentence. Index that file and use it to align the header fields and the `region` records with this documentation.
+A corpus with constituency declares `nested: ["node"]` in its JSONL header and has `node` regions with `attrs.type` (e.g. `NP`, `S`, `VP`, `CLAUSE`); see [Index and corpus layout](Index-and-Corpus-Layout.md) for the header fields and the `region` records.
 
 ## Modeling scope
 
