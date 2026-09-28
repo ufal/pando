@@ -104,7 +104,12 @@ struct ServerApi::Deadline {
 };
 
 ServerApi::ServerApi(Corpus& corpus, ServerConfig cfg)
-    : corpus_(corpus), cfg_(std::move(cfg)), jobs_(corpus, cfg_.jobs),
+    : corpus_(corpus), cfg_(std::move(cfg)),
+      jobs_(corpus, [this] {
+          QueryJobConfig j = cfg_.jobs;
+          j.count_threads = std::max({1u, j.count_threads, cfg_.query_threads});
+          return j;
+      }()),
       started_(std::chrono::system_clock::now()), started_steady_(std::chrono::steady_clock::now()) {
     last_request_ns_.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                started_steady_.time_since_epoch()).count());
@@ -176,6 +181,7 @@ std::string ServerApi::server_fields() const {
         + ", \"features\": " + features_json + ", \"started\": \"" + started_iso_ + "\""
         + ", \"uptime_s\": " + ups + ", \"corpus\": " + jstr(corpus_.dir())
         + ", \"threads\": " + std::to_string(cfg_.threads)
+        + ", \"query_threads\": " + std::to_string(std::max(1u, cfg_.query_threads))
         + ", \"total_workers\": " + std::to_string(cfg_.jobs.workers);
     if (!cfg_.extra_server_fields.empty()) s += ", " + cfg_.extra_server_fields;
     return s;
@@ -324,6 +330,7 @@ ServerResponse ServerApi::run(const std::string& body) {
     opts.total      = json_extract_bool(body, "total", false);
     opts.group_limit = json_extract_num(body, "group_limit", 1000);
     opts.strict_quoted_strings = json_extract_bool(body, "strict_quoted_strings", false);
+    opts.threads = std::max(1u, cfg_.query_threads);
 
     std::lock_guard<std::mutex> lock(program_mu_);
     try {
@@ -357,6 +364,7 @@ ServerResponse ServerApi::query(const std::string& body) {
     opts.debug     = json_extract_bool(body, "debug", false);
     opts.sentence  = json_extract_bool(body, "sentence", false);
     opts.strict_quoted_strings = json_extract_bool(body, "strict_quoted_strings", false);
+    opts.threads = std::max(1u, cfg_.query_threads);
     const size_t timeout_ms = json_extract_num(body, "timeout_ms", cfg_.query_timeout_ms);
     std::string attrs_str = json_extract_str(body, "attrs");
     opts.attrs.clear();

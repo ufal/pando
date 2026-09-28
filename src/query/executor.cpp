@@ -12,6 +12,7 @@
 #include <random>
 #include <stdexcept>
 #include <thread>
+#include <chrono>
 #include <unordered_map>
 #include <unordered_set>
 #include <functional>
@@ -551,6 +552,12 @@ struct RegionPosMask {
     std::vector<PosInterval> iv;   // sorted, disjoint (when Ready)
     bool use_bits = false;         // fine-grained: `bits` also valid
     std::vector<uint64_t> bits;
+    /// P4.1: the executor's position range is folded in (a path that applies
+    /// this mask to every hit it counts honours the range).
+    bool ranged = false;
+    /// P4.1: … and there are no region filters: the mask is exactly the range
+    /// (paths may slice their operands to it instead of testing positions).
+    bool range_only = false;
 
     bool ready() const { return status == RegionMaskStatus::Ready; }
     /// Membership for positions in arbitrary order.
@@ -687,6 +694,42 @@ static RegionPosMask build_region_eq_position_mask(
         for (const auto& x : out.iv) bitset_set_range(out.bits, x.s, x.e);
     }
     return out;
+}
+
+/// P4.1: fold a partition range [lo, hi) into a start mask. Region filters that
+/// cannot be expressed as a mask (Unsupported) are left alone: the path then
+/// post-filters over the whole corpus, does not honour the range, and so must
+/// not claim to (it checks `ranged`). An unsatisfiable filter stays so (no hit
+/// in any range). Always intervals: a corpus-sized bitset per worker would
+/// multiply the stop-gap memory by the thread count (PANDO_MASK_BITS=1 still
+/// forces bits, for the differential tests).
+static void restrict_mask_to_range(RegionPosMask& m, const PosRange& r, CorpusPos ntok) {
+    if (m.status == RegionMaskStatus::Unsupported || m.status == RegionMaskStatus::Unsatisfiable)
+        return;
+    const CorpusPos lo = std::max<CorpusPos>(r.lo, 0);
+    const CorpusPos hi = std::min<CorpusPos>(r.hi, ntok);
+    const bool was_none = m.status == RegionMaskStatus::None;
+    std::vector<PosInterval> riv;
+    if (hi > lo) riv.push_back({lo, hi - 1});
+    m.iv = was_none ? std::move(riv) : intersect_intervals(m.iv, riv);
+    m.ranged = true;
+    m.range_only = was_none;
+    m.bits.clear();
+    m.use_bits = false;
+    if (m.iv.empty()) {
+        m.status = RegionMaskStatus::Unsatisfiable;
+        return;
+    }
+    m.status = RegionMaskStatus::Ready;
+    static const bool force_bits = [] {
+        const char* v = std::getenv("PANDO_MASK_BITS");
+        return v && *v && *v != '0';
+    }();
+    if (force_bits) {
+        m.use_bits = true;
+        m.bits.assign(static_cast<size_t>((ntok + 63) / 64), 0);
+        for (const auto& x : m.iv) bitset_set_range(m.bits, x.s, x.e);
+    }
 }
 
 /// Sub-span [lo, hi) of a `.rev` posting span (zero-copy).
@@ -1464,7 +1507,33 @@ static bool compare_nvals_count(int64_t n, CompOp op, int64_t rhs) {
     return false;
 }
 
-QueryExecutor::QueryExecutor(const Corpus& corpus) : corpus_(corpus) {}
+QueryExecutor::QueryExecutor(const Corpus& corpus)
+    : corpus_(corpus),
+      caches_(std::make_shared<Caches>()),
+      fold_map_cache_(caches_->fold_map),
+      fold_index_cache_(caches_->fold_index),
+      dep_pair_cache_(caches_->dep_pair),
+      bitmap_cache_(caches_->bitmap),
+      fold_map_mutex_(caches_->mu),
+      regex_cache_(caches_->regex),
+      regex_cache_mutex_(caches_->regex_mu) {}
+
+QueryExecutor::QueryExecutor(const QueryExecutor& parent, const PosRange* range,
+                             ExecProgress* progress)
+    : include_empty_alignment_values_(parent.include_empty_alignment_values_),
+      anchor_binding_mode_(parent.anchor_binding_mode_),
+      corpus_(parent.corpus_),
+      range_(range),
+      skip_compile_(true),
+      caches_(parent.caches_),
+      fold_map_cache_(caches_->fold_map),
+      fold_index_cache_(caches_->fold_index),
+      dep_pair_cache_(caches_->dep_pair),
+      progress_(progress),
+      bitmap_cache_(caches_->bitmap),
+      fold_map_mutex_(caches_->mu),
+      regex_cache_(caches_->regex),
+      regex_cache_mutex_(caches_->regex_mu) {}
 
 const FoldMap& QueryExecutor::get_fold_map(const std::string& attr, bool case_fold, bool accent_fold) const {
     std::string key = attr + ":" + (case_fold ? "1" : "0") + (accent_fold ? "1" : "0");
@@ -2916,23 +2985,46 @@ bool QueryExecutor::try_fast_aggregate(
     if (sole_positional_col && filter_cursors.empty() && anchor_infos.empty()) {
         const auto& pa = *col_info[0].pa;
         LexiconId lex_sz = pa.lexicon().size();
-        std::vector<size_t> flat(static_cast<size_t>(lex_sz), 0);
+        std::vector<uint64_t> flat(static_cast<size_t>(std::max<LexiconId>(1, lex_sz)), 0);
         size_t total = 0;
-
-        for_each_seed_position(q.tokens[0].conditions, [&](CorpusPos pos) -> bool {
+        auto count_pos = [&](CorpusPos pos) -> bool {
             if (max_total_cap > 0 && total >= max_total_cap) return false;
             ++flat[static_cast<size_t>(pa.id_at(pos))];
             ++total;
             return true;
-        });
+        };
+
+        // P4.1: a partition counts the hits in its range only — a plain EQ token
+        // walks the slice of its posting list, anything else skips the others.
+        const ConditionPtr& tc = q.tokens[0].conditions;
+        const AttrCondition* eq = (tc && tc->is_leaf && tc->leaf.op == CompOp::EQ
+                                   && !tc->leaf.case_insensitive && !tc->leaf.diacritics_insensitive
+                                   && tc->leaf.resolved_id >= 0) ? &tc->leaf : nullptr;
+        const std::string eq_attr = eq ? normalize_attr(eq->attr) : std::string();
+        if (range_ && eq && corpus_.has_attr(eq_attr) && !corpus_.is_multivalue(eq_attr)) {
+            const RevSpan sp = corpus_.attr(eq_attr).rev_span_of_id(static_cast<LexiconId>(eq->resolved_id));
+            const size_t a = gallop_rev(sp, 0, range_->lo);
+            const size_t b = gallop_rev(sp, a, range_->hi);
+            for (size_t i = a; i < b; ++i)
+                if (!count_pos(sp.at(i))) break;
+            result.range_ok = true;
+        } else if (range_) {
+            const CorpusPos rlo = range_->lo, rhi = range_->hi;
+            for_each_seed_position(tc, [&](CorpusPos pos) -> bool {
+                if (pos < rlo || pos >= rhi) return true;
+                return count_pos(pos);
+            });
+            result.range_ok = true;
+        } else {
+            for_each_seed_position(tc, count_pos);
+        }
 
         agg.total_hits = total;
-        for (LexiconId id = 0; id < lex_sz; ++id) {
-            if (flat[static_cast<size_t>(id)] > 0) {
-                std::vector<int64_t> key = {static_cast<int64_t>(id)};
-                agg.counts[std::move(key)] = flat[static_cast<size_t>(id)];
-            }
-        }
+        // P7.2 buckets: the dense array as is (read through for_each_bucket), no
+        // vector key per value — and P4.1 partitions merge by adding arrays
+        agg.flat_ncols = 1;
+        agg.flat_v2 = 1;
+        agg.flat_dense = std::move(flat);
         result.total_count = total;
         result.total_exact = !(max_total_cap > 0 && total >= max_total_cap);
         return true;
@@ -3599,7 +3691,7 @@ NameIndexMap QueryExecutor::build_name_map_for_stripped_query(const TokenQuery& 
     return map;
 }
 
-MatchSet QueryExecutor::execute(const TokenQuery& query,
+MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                                 size_t max_matches,
                                 bool count_total,
                                 size_t max_total_cap,
@@ -3620,7 +3712,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
         && (query.within_having || query.not_within || !query.containing_clauses.empty()
             || !query.position_orders.empty() || !query.global_alignment_filters.empty()
             || !query.global_function_filters.empty())) {
-        MatchSet ms = execute(query, 0, true, 0, 0, random_seed, num_threads, nullptr, true);
+        MatchSet ms = execute_impl(query, 0, true, 0, 0, random_seed, num_threads, nullptr, true);
         if (ms.matches.size() > max_matches)
             ms.matches.erase(ms.matches.begin() + static_cast<std::ptrdiff_t>(max_matches),
                              ms.matches.end());
@@ -3736,7 +3828,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
     if (has_anchors) stripped_query = strip_anchors(query, anchor_constraints);
     const TokenQuery& q = has_anchors ? stripped_query : query;
 
-    compile_query(q);
+    if (!skip_compile_) compile_query(q);
     if (global_region_eq_unsatisfiable(corpus_, q.global_region_filters)) {
         MatchSet empty;
         empty.total_exact = true;
@@ -3808,6 +3900,18 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
     MatchSet result;
     size_t n = q.tokens.size();
     result.num_tokens = n;
+
+    // P4.1 (see QueryExecutor::range_): the fast paths' start mask with this
+    // worker's position range folded in. A path marks its result (range_ok) once
+    // it has applied such a mask to every hit it emits or counts.
+    auto build_start_mask = [&]() {
+        RegionPosMask m = build_region_eq_position_mask(corpus_, q.global_region_filters);
+        if (range_) restrict_mask_to_range(m, *range_, corpus_.size());
+        return m;
+    };
+    auto mark_ranged = [&](const RegionPosMask& m) {
+        if (range_ && m.ranged) result.range_ok = true;
+    };
     NameIndexMap name_map = build_name_map(q);
 
     std::shared_ptr<AggregateBucketData> agg_storage;
@@ -3859,7 +3963,6 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
         if (agg_ptr) flat_agg.flush(*agg_ptr);
     };
 
-    unsigned eff_threads = (agg_ptr && num_threads > 1) ? 1u : num_threads;
 
     std::vector<Match> reservoir;
     if (sample_size > 0) reservoir.reserve(sample_size);
@@ -4018,33 +4121,50 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
         if (!plain_condition(c)) return o;
         const size_t est = estimate_cardinality(c);
         if (est > static_cast<size_t>(corpus_.size()) / 2 || est > materialize_max()) return o;
-        // P3.6: a combination over bitmap attributes / region intervals
-        // (`[upos="VERB" & text_langcode="en"]`) is evaluated chunk by chunk
-        // instead of resolving and intersecting position lists.
-        if (!in_compile_bm && bitmap_mode() != BitmapMode::Off && compile_bm) {
-            in_compile_bm = true;
-            bool dense = false;
-            std::unique_ptr<BmExpr> e = compile_bm(c, &dense);
-            in_compile_bm = false;
-            if (e && dense) {
-                std::vector<CorpusPos> pos;
-                pos.reserve(std::min(est, e->estimate));
-                const CorpusPos N = corpus_.size();
-                const size_t nch = static_cast<size_t>((N + BitmapIndex::kChunk - 1) >> BitmapIndex::kChunkShift);
-                for (size_t ch = 0; ch < nch; ++ch) {
-                    const BmChunk v = e->load(ch);
-                    if (v.zero) continue;
-                    const CorpusPos base = static_cast<CorpusPos>(ch) << BitmapIndex::kChunkShift;
-                    for (size_t w = 0; w < BitmapIndex::kWords; ++w)
-                        for (uint64_t x = v.w[w]; x; x &= x - 1) {
-                            const CorpusPos p = base + static_cast<CorpusPos>(w * 64) + __builtin_ctzll(x);
-                            if (p < N) pos.push_back(p);
-                        }
+        auto materialize = [&]() -> SeqMergeOperand {
+            // P3.6: a combination over bitmap attributes / region intervals
+            // (`[upos="VERB" & text_langcode="en"]`) is evaluated chunk by chunk
+            // instead of resolving and intersecting position lists.
+            if (!in_compile_bm && bitmap_mode() != BitmapMode::Off && compile_bm) {
+                in_compile_bm = true;
+                bool dense = false;
+                std::unique_ptr<BmExpr> e = compile_bm(c, &dense);
+                in_compile_bm = false;
+                if (e && dense) {
+                    std::vector<CorpusPos> pos;
+                    pos.reserve(std::min(est, e->estimate));
+                    const CorpusPos N = corpus_.size();
+                    const size_t nch = static_cast<size_t>((N + BitmapIndex::kChunk - 1) >> BitmapIndex::kChunkShift);
+                    for (size_t ch = 0; ch < nch; ++ch) {
+                        const BmChunk v = e->load(ch);
+                        if (v.zero) continue;
+                        const CorpusPos base = static_cast<CorpusPos>(ch) << BitmapIndex::kChunkShift;
+                        for (size_t w = 0; w < BitmapIndex::kWords; ++w)
+                            for (uint64_t x = v.w[w]; x; x &= x - 1) {
+                                const CorpusPos p = base + static_cast<CorpusPos>(w * 64) + __builtin_ctzll(x);
+                                if (p < N) pos.push_back(p);
+                            }
+                    }
+                    return owned_postings(pos, corpus_rev_width);
                 }
-                return owned_postings(pos, corpus_rev_width);
             }
+            return owned_postings(resolve_conditions(c), corpus_rev_width);
+        };
+        // P4.1: the ranges of one partitioned query share the materialised list
+        // (the probe range builds it, the others reuse it)
+        Caches& cc = *caches_;
+        if (!cc.share_operands) return materialize();
+        {
+            std::lock_guard<std::mutex> lk(cc.operands_mu);
+            auto it = cc.operands.find(c.get());
+            if (it != cc.operands.end())
+                return *std::static_pointer_cast<SeqMergeOperand>(it->second.second);
         }
-        return owned_postings(resolve_conditions(c), corpus_rev_width);
+        SeqMergeOperand r = materialize();
+        std::lock_guard<std::mutex> lk(cc.operands_mu);
+        cc.operands.emplace(c.get(), std::make_pair(std::shared_ptr<const void>(c),
+                                                    std::shared_ptr<void>(std::make_shared<SeqMergeOperand>(r))));
+        return r;
     };
 
     // ── Bitmap expressions (P3.2) ────────────────────────────────────────
@@ -4370,14 +4490,18 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             const StructuralAttr* wsa = (!eff_within.empty() && corpus_.has_structure(eff_within))
                 ? &corpus_.structure(eff_within) : nullptr;
             const bool wspan = wsa && (corpus_.is_nested(eff_within) || corpus_.is_overlapping(eff_within));
-            RegionPosMask rm = build_region_eq_position_mask(corpus_, q.global_region_filters);
+            RegionPosMask rm = build_start_mask();
             if (rm.status == RegionMaskStatus::Unsatisfiable) {
+                mark_ranged(rm);
                 result.total_exact = true;
                 return result;
             }
             const bool urm = rm.ready();
             const bool cheap = (q.global_region_filters.empty() || urm) && token_anchor_constraints.empty();
-            if (try_seq_bitmap(wsa, wspan, rm, urm, cheap)) return finish_query();
+            if (try_seq_bitmap(wsa, wspan, rm, urm, cheap)) {
+                mark_ranged(rm);
+                return finish_query();
+            }
         }
 
         // ── Single EQ token: first page straight from `.rev`, the rest only counted
@@ -4396,6 +4520,8 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 const AttrCondition& ac = tok_cond->leaf;
                 const std::string aname = normalize_attr(ac.attr);
                 if (corpus_.has_attr(aname) && !corpus_.is_multivalue(aname)) {
+                    // O(#ids + page) for any total: not worth partitioning (P4.1),
+                    // so the plain region mask — the probe range then computes it all
                     RegionPosMask mask =
                         build_region_eq_position_mask(corpus_, q.global_region_filters);
                     const bool iv_mask = mask.ready() && !mask.use_bits;
@@ -4415,11 +4541,15 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                             result.total_exact = true;
                             return result;
                         }
-                        // first page: ascending k-way merge
+                        // first page: ascending k-way merge (from the first allowed start)
                         using HeapItem = std::pair<CorpusPos, size_t>;   // (pos, span)
                         std::priority_queue<HeapItem, std::vector<HeapItem>, std::greater<HeapItem>> heap;
                         std::vector<size_t> cur(spans.size(), 0);
-                        for (size_t k = 0; k < spans.size(); ++k) heap.push({spans[k].at(0), k});
+                        const CorpusPos first_allowed = iv_mask ? mask.iv.front().s : 0;
+                        for (size_t k = 0; k < spans.size(); ++k) {
+                            if (first_allowed > 0) cur[k] = gallop_rev(spans[k], 0, first_allowed);
+                            if (cur[k] < spans[k].count) heap.push({spans[k].at(cur[k]), k});
+                        }
                         MaskCursor mc(mask);
                         size_t emitted = 0;
                         bool capped = false;
@@ -4460,6 +4590,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             }
             SeqMergeOperand op = merge_operand(tok_cond);
             if (op.kind == SeqMergeTok::EqRev) {
+                // O(#intervals) totals: not partitioned (see single_idset)
                 RegionPosMask mask =
                     build_region_eq_position_mask(corpus_, q.global_region_filters);
                 if (mask.status == RegionMaskStatus::Unsatisfiable) {
@@ -4685,15 +4816,17 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                                 || (tex[v] && tex[v]->estimate <= static_cast<size_t>(N) / 2))));
                 RegionPosMask bm_mask;
                 if (use_bm) {
-                    bm_mask = build_region_eq_position_mask(corpus_, q.global_region_filters);
+                    bm_mask = build_start_mask();
                     if (bm_mask.status == RegionMaskStatus::Unsatisfiable) {
                         result.plan_path = "seq_gap_bitmap";
+                        mark_ranged(bm_mask);
                         result.total_exact = true;
                         return result;
                     }
                 }
                 if (use_bm) {
                     result.plan_path = "seq_gap_bitmap";
+                    mark_ranged(bm_mask);
                     const size_t p = v, qn = n - 1 - v;
                     const bool use_mask = bm_mask.status == RegionMaskStatus::Ready;
                     const bool cheap_total_ok = (q.global_region_filters.empty() || use_mask)
@@ -4902,9 +5035,10 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 ok = false;
             RegionPosMask region_mask;
             if (ok) {
-                region_mask = build_region_eq_position_mask(corpus_, q.global_region_filters);
+                region_mask = build_start_mask();
                 if (region_mask.status == RegionMaskStatus::Unsatisfiable) {
                     result.plan_path = "seq_gap";
+                    mark_ranged(region_mask);
                     result.total_exact = true;
                     return result;
                 }
@@ -4930,9 +5064,22 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                                                                 starts.end(), x) - starts.begin());
                 }
             };
+            // run starts that can take part at all: the prefix starts a match, so
+            // it lies in the start mask's hull; the suffix follows it by p + [vmin, vmax]
+            // (P4.1 ranges: a materialised side then only covers its range)
+            CorpusPos hull_lo = 0, hull_hi = std::numeric_limits<CorpusPos>::max();
+            if (region_mask.ready() && !region_mask.iv.empty()) {
+                hull_lo = region_mask.iv.front().s;
+                hull_hi = region_mask.iv.back().e;
+            }
             auto fixed_starts = [&](size_t lo, size_t hi) {
                 FixedSide f;
                 f.len = hi - lo;
+                const bool is_prefix = lo == 0;
+                const int64_t smin = is_prefix ? hull_lo : hull_lo + static_cast<int64_t>(p) + vmin;
+                const int64_t smax = is_prefix ? hull_hi
+                    : (hull_hi == std::numeric_limits<CorpusPos>::max()
+                           ? hull_hi : hull_hi + static_cast<int64_t>(p) + vmax);
                 size_t seed = SIZE_MAX, n_eq = 0;
                 for (size_t i = lo; i < hi; ++i)
                     if (ops[i].kind == SeqMergeTok::EqRev) {
@@ -4949,8 +5096,10 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 }
                 const RevSpan& S = ops[seed].span;
                 std::vector<size_t> cur(hi - lo, 0);
-                for (size_t k = 0; k < S.count; ++k) {
+                const size_t k0 = smin > 0 ? gallop_rev(S, 0, smin + static_cast<CorpusPos>(seed - lo)) : 0;
+                for (size_t k = k0; k < S.count; ++k) {
                     const CorpusPos st = S.at(k) - static_cast<CorpusPos>(seed - lo);
+                    if (st > smax) break;
                     if (st < 0 || st + static_cast<CorpusPos>(f.len) > corpus_end) continue;
                     bool all = true;
                     for (size_t i = lo; i < hi && all; ++i) {
@@ -4972,6 +5121,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             }
             if (ok) {
                 result.plan_path = "seq_gap";
+                mark_ranged(region_mask);
                 const bool v_wild = ops[v].kind == SeqMergeTok::Wildcard;
                 const RevSpan& X = ops[v].span;
                 // consecutive X positions starting at x (forward) / ending at y (backward)
@@ -5031,11 +5181,22 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 };
                 auto page_full = [&] { return max_matches > 0 && result.matches.size() >= max_matches; };
                 const bool anchor_prefix = !pre.free && (suf.free || pre.size() <= suf.size());
+                // interval mask (region filter / P4.1 range): jump the anchor list
+                // to the next allowed start instead of testing every anchor
+                const bool mask_iv = use_mask && !region_mask.use_bits;
+                MaskCursor amask(region_mask);
                 if (anchor_prefix) {
                     size_t tlo = 0;
                     for (size_t a = 0; a < pre.size() && !stop; ++a) {
                         const CorpusPos st = pre.at(a);
                         if (st < 0) continue;
+                        if (mask_iv && !amask.contains(st)) {
+                            if (amask.exhausted()) break;
+                            const size_t j = pre.geq(a, amask.next_start());
+                            if (j >= pre.size()) break;
+                            a = j - 1;
+                            continue;
+                        }
                         const CorpusPos vb = st + static_cast<CorpusPos>(p);
                         CorpusPos limit = corpus_end - 1;             // last allowed match position
                         if (wsa) {
@@ -5075,8 +5236,17 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 } else {
                     // anchor on the suffix: t ascending, match end e = t + qn - 1
                     size_t slo = 0;
-                    for (size_t a = 0; a < suf.size() && !stop; ++a) {
+                    size_t a0 = 0;
+                    // P4.1 range [lo, hi): starts st = t - p - L with L in [vmin, vmax],
+                    // so only suffixes t in [lo + p + vmin, hi - 1 + p + vmax] can count
+                    const bool rng = region_mask.range_only;
+                    const int64_t t_first = rng ? region_mask.iv.front().s + static_cast<int64_t>(p) + vmin : 0;
+                    const int64_t t_last = rng ? region_mask.iv.back().e + static_cast<int64_t>(p) + vmax
+                                               : std::numeric_limits<int64_t>::max();
+                    if (rng) a0 = suf.geq(0, t_first);
+                    for (size_t a = a0; a < suf.size() && !stop; ++a) {
                         const CorpusPos t = suf.at(a);
+                        if (t > t_last) break;
                         const CorpusPos e = t + static_cast<CorpusPos>(qn) - 1;
                         if (t < 0 || e >= corpus_end) continue;
                         CorpusPos first = 0;                          // first allowed match position
@@ -5177,7 +5347,9 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             if (within_sa && !within_span_semantics) within_cur = FlatRegionCursor(*within_sa);
 
             RegionPosMask region_mask =
-                build_region_eq_position_mask(corpus_, q.global_region_filters);
+                build_start_mask();
+            // every path of this block applies region_mask to the starts it emits / counts
+            mark_ranged(region_mask);
             if (region_mask.status == RegionMaskStatus::Unsatisfiable) {
                 result.total_exact = true;
                 return result;
@@ -5281,15 +5453,34 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     }
                 } else if (n == 2 && first_eq == 0 && ops[1].kind == SeqMergeTok::Wildcard) {
                     result.plan_path = "seq_merge_wild";
-                    for (size_t i = 0; i < ops[0].span.count; ++i) {
-                        if (!accept_start(ops[0].span.at(i))) { ok = true; break; }
+                    const RevSpan& A = ops[0].span;
+                    MaskCursor jm(region_mask);
+                    for (size_t i = 0; i < A.count; ++i) {
+                        const CorpusPos a = A.at(i);
+                        if (mask_intervals && !jm.contains(a)) {
+                            if (jm.exhausted()) break;
+                            const size_t j = gallop_rev(A, i, jm.next_start());
+                            if (j >= A.count) break;
+                            i = j - 1;
+                            continue;
+                        }
+                        if (!accept_start(a)) { ok = true; break; }
                     }
                 } else if (n == 2 && first_eq == 1 && ops[0].kind == SeqMergeTok::Wildcard) {
                     // [][B]: starts at b-1
                     result.plan_path = "seq_merge_wild";
-                    for (size_t i = 0; i < ops[1].span.count; ++i) {
-                        CorpusPos b = ops[1].span.at(i);
+                    const RevSpan& B = ops[1].span;
+                    MaskCursor jm(region_mask);
+                    for (size_t i = 0; i < B.count; ++i) {
+                        CorpusPos b = B.at(i);
                         if (b == 0) continue;
+                        if (mask_intervals && !jm.contains(b - 1)) {
+                            if (jm.exhausted()) break;
+                            const size_t j = gallop_rev(B, i, jm.next_start() + 1);
+                            if (j >= B.count) break;
+                            i = j - 1;
+                            continue;
+                        }
                         if (!accept_start(b - 1)) { ok = true; break; }
                     }
                 } else {
@@ -5427,9 +5618,9 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                 if (left.kind == SeqMergeTok::EqRev && right.kind == SeqMergeTok::EqRev
                     && !left.span.empty() && !right.span.empty()) {
                     // GOVERNS: head(right)=left.  GOVERNED_BY: head(left)=right.
-                    const RevSpan& parent_span =
+                    RevSpan parent_span =
                         (rt == RelationType::GOVERNS) ? left.span : right.span;
-                    const RevSpan& child_span =
+                    RevSpan child_span =
                         (rt == RelationType::GOVERNS) ? right.span : left.span;
                     const bool parent_is_token0 = (rt == RelationType::GOVERNS);
 
@@ -5455,13 +5646,30 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     // mask and prune parent/child streams before the join —
                     // otherwise we pay for the full-corpus dep join then discard.
                     RegionPosMask region_mask =
-                        build_region_eq_position_mask(corpus_, q.global_region_filters);
+                        build_start_mask();
+                    mark_ranged(region_mask);
                     if (region_mask.status == RegionMaskStatus::Unsatisfiable) {
                         result.total_exact = true;
                         return result;
                     }
+                    // P4.1: a bare partition range (no region filter) slices both
+                    // posting lists instead of masking positions: a head and its
+                    // dependents share the sentence, which lies inside one range
+                    // (ranges are cut at sentence starts), so the unmasked kernels
+                    // — with their exact-total hot loops — run on the slices.
+                    const bool slice_range = region_mask.range_only;
+                    if (slice_range) {
+                        const CorpusPos rlo = region_mask.iv.front().s;
+                        const CorpusPos rhi = region_mask.iv.back().e + 1;
+                        auto cut = [&](const RevSpan& sp) {
+                            const size_t a = gallop_rev(sp, 0, rlo);
+                            return rev_slice(sp, a, gallop_rev(sp, a, rhi));
+                        };
+                        parent_span = cut(parent_span);
+                        child_span = cut(child_span);
+                    }
                     const bool use_region_mask =
-                        region_mask.status == RegionMaskStatus::Ready;
+                        region_mask.status == RegionMaskStatus::Ready && !slice_range;
                     // Cheap total++ bypass is only safe when every candidate that
                     // reaches it already satisfies global region filters (mask),
                     // or there are no such filters. Otherwise go through add_match.
@@ -5652,9 +5860,12 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     if (use_pair) {
                         result.plan_path = "dep_pair";
                         const RevSpan& S = pair_span;
+                        // the edge postings are sliced per interval: the region
+                        // filter's, or the P4.1 range (sentence-aligned by construction)
+                        const bool pair_iv = mask_iv || slice_range;
                         std::vector<PosInterval> whole;
                         const std::vector<PosInterval>* ivs = &region_mask.iv;
-                        if (!mask_iv) {
+                        if (!pair_iv) {
                             whole.push_back({0, corpus_end - 1});
                             ivs = &whole;
                         }
@@ -5669,7 +5880,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                             // Heads of the children in I lie in I when I starts and
                             // ends on sentence boundaries (heads share the sentence).
                             bool aligned = true;
-                            if (mask_iv) {
+                            if (pair_iv) {
                                 const int64_t a = bcur.find(I.s);
                                 const int64_t b = bcur.find(I.e);
                                 aligned = (a < 0 || sent_r[a].start >= I.s)
@@ -5683,7 +5894,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                                 const CorpusPos c = S.at(k);
                                 CorpusPos par;
                                 if (!head_of(c, par)) continue;
-                                if (mask_iv && !aligned && !region_mask.contains(par)) continue;
+                                if (pair_iv && !aligned && !region_mask.contains(par)) continue;
                                 if (!emit(par, c)) { stop = true; break; }
                                 if (can_fast_count && result.matches.size() >= max_matches)
                                     counting = true;
@@ -5816,7 +6027,8 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                                        corpus_.is_overlapping(effective_within));
 
                     RegionPosMask region_mask =
-                        build_region_eq_position_mask(corpus_, q.global_region_filters);
+                        build_start_mask();
+                    mark_ranged(region_mask);
                     if (region_mask.status == RegionMaskStatus::Unsatisfiable) {
                         result.total_exact = true;
                         return result;
@@ -5879,6 +6091,10 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                         const size_t nd = D.count, no = O.count;
                         const bool gallop_other = no > (nd << 3);
                         size_t id = 0, io = 0, si = 0;
+                        if (mask_iv) {   // region filter / P4.1 range: start at the first interval
+                            id = gallop_ptr(Dp, nd, 0, region_mask.iv.front().s);
+                            io = gallop_ptr(Op, no, 0, region_mask.iv.front().s);
+                        }
                         FlatRegionCursor scur(sents);
                         bool counting = false;
                         bool stop = false;
@@ -5999,13 +6215,17 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                                        corpus_.is_overlapping(effective_within));
 
                     RegionPosMask region_mask =
-                        build_region_eq_position_mask(corpus_, q.global_region_filters);
+                        build_start_mask();
+                    mark_ranged(region_mask);
                     if (region_mask.status == RegionMaskStatus::Unsatisfiable) {
                         result.total_exact = true;
                         return result;
                     }
+                    // P4.1: bare partition range → slice both lists, run unmasked
+                    // (governor and dependents share a sentence inside the range)
+                    const bool slice_range = region_mask.range_only;
                     const bool use_region_mask =
-                        region_mask.status == RegionMaskStatus::Ready;
+                        region_mask.status == RegionMaskStatus::Ready && !slice_range;
                     const bool cheap_total_ok =
                         (q.global_region_filters.empty() || use_region_mask)
                 && token_anchor_constraints.empty();   // anchors are applied in add_match
@@ -6035,8 +6255,18 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                     };
 
                     const bool keep_token0 = (rt == RelationType::NOT_GOVERNS);
-                    const RevSpan& G = keep_token0 ? left.span : right.span;    // governor side
-                    const RevSpan& Dd = keep_token0 ? right.span : left.span;   // dependent side
+                    RevSpan G = keep_token0 ? left.span : right.span;    // governor side
+                    RevSpan Dd = keep_token0 ? right.span : left.span;   // dependent side
+                    if (slice_range) {
+                        const CorpusPos rlo = region_mask.iv.front().s;
+                        const CorpusPos rhi = region_mask.iv.back().e + 1;
+                        auto cut = [&](const RevSpan& sp) {
+                            const size_t a = gallop_rev(sp, 0, rlo);
+                            return rev_slice(sp, a, gallop_rev(sp, a, rhi));
+                        };
+                        G = cut(G);
+                        Dd = cut(Dd);
+                    }
                     result.seed_token = keep_token0 ? 0 : 1;
 
                     // Forbidden governors = heads of the dependent side, kept in a
@@ -6146,7 +6376,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
     QueryPlan plan = plan_query(q);
     result.seed_token = plan.seed;
     result.cardinalities = plan.cardinalities;
-    result.plan_path = (eff_threads > 1 && n > 1) ? "generic_mt" : "generic";
+    result.plan_path = "generic";
 
     // #9: Use default_within from corpus when query does not specify within
     std::string effective_within = q.within.empty()
@@ -6159,68 +6389,17 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
         has_within && (corpus_.is_nested(effective_within) ||
                        corpus_.is_overlapping(effective_within));
 
-    // Parallel path: materialize seeds and process chunks in parallel (multi-token only)
-    if (eff_threads > 1 && n > 1) {
-        std::vector<CorpusPos> seeds = resolve_conditions(q.tokens[plan.seed].conditions);
-        // #24: Pre-filter seeds that fall outside any within-region (parallel path).
-        // Seeds are sorted, so cursor-based scan is efficient.
-        if (within_sa && !seeds.empty()) {
-            int64_t hint = -1;
-            seeds.erase(std::remove_if(seeds.begin(), seeds.end(), [&](CorpusPos p) {
-                int64_t rgn = (hint >= 0)
-                    ? within_sa->find_region_from(p, hint)
-                    : within_sa->find_region(p);
-                if (rgn < 0) return true;  // remove: not in any region
-                hint = rgn;
-                return false;
-            }), seeds.end());
-        }
-        if (!seeds.empty()) {
-            size_t nw = std::min(static_cast<size_t>(eff_threads), seeds.size());
-            size_t chunk_sz = (seeds.size() + nw - 1) / nw;
-            std::vector<std::vector<Match>> thread_matches(nw);
-            std::vector<std::thread> workers;
-            for (size_t w = 0; w < nw; ++w) {
-                size_t start = w * chunk_sz;
-                size_t end = std::min(start + chunk_sz, seeds.size());
-                workers.emplace_back([this, &q, &plan, within_sa, within_span_semantics,
-                                      &seeds, &thread_matches, start, end, w]() {
-                    for (size_t i = start; i < end; ++i) {
-                        auto matches = expand_one_seed(q, plan, within_sa, seeds[i],
-                                                       within_span_semantics);
-                        for (auto& m : matches)
-                            thread_matches[w].push_back(std::move(m));
-                    }
-                });
-            }
-            for (auto& t : workers) t.join();
-            result.total_count = 0;
-            for (const auto& vec : thread_matches) result.total_count += vec.size();
-            for (auto& vec : thread_matches)
-                for (auto& m : vec)
-                    result.matches.push_back(std::move(m));
-            if (sample_size > 0 && result.matches.size() > sample_size) {
-                std::mt19937 rng(random_seed != 0 ? random_seed : static_cast<uint32_t>(std::random_device{}()));
-                std::shuffle(result.matches.begin(), result.matches.end(), rng);
-                result.matches.resize(sample_size);
-            } else if (max_matches > 0 && !count_total && result.matches.size() > max_matches) {
-                result.matches.resize(max_matches);
-            }
-            apply_anchor_filters(token_anchor_constraints, result);
-            apply_within_having(q, result);
-            apply_not_within(q, result);
-            apply_containing(q, result);
-            apply_position_orders(q, name_map, result);
-            apply_global_filters(q, name_map, result);
-            result.total_exact = true;
-            return result;
-        }
-    }
-
     // Sequential path: process one seed at a time (lazy when possible)
     // #24: Skip seeds not contained in any within-region (cheap find_region check;
     // full span containment is enforced in expand_seed).
+    // P4.1: a partition expands only its own seeds (every match has exactly one
+    // seed position, so the ranges split the matches; seeds arrive ascending,
+    // so the ranges' concatenated output keeps the single-threaded order).
+    const CorpusPos seed_lo = range_ ? range_->lo : 0;
+    const CorpusPos seed_hi = range_ ? range_->hi : std::numeric_limits<CorpusPos>::max();
+    if (range_) result.range_ok = true;
     for_each_seed_position(q.tokens[plan.seed].conditions, [&](CorpusPos seed_p) {
+        if (seed_p < seed_lo || seed_p >= seed_hi) return true;
         // #24: Early within rejection — seed must lie in *some* region (cheap scalar check).
         if (within_sa && within_sa->find_region(seed_p) < 0) return true;
         expand_seed(q, plan, within_sa, seed_p,
@@ -6243,6 +6422,304 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
         return result;
     }
     return finish_query();
+}
+
+// ── P4.1: query-time range partitioning ─────────────────────────────────
+
+namespace {
+
+/// Smallest partition worth a thread (PANDO_PARTITION_MIN overrides, for tests
+/// on small corpora).
+CorpusPos partition_min_tokens() {
+    static const CorpusPos v = [] {
+        if (const char* e = std::getenv("PANDO_PARTITION_MIN")) {
+            const long long x = std::atoll(e);
+            if (x > 0) return static_cast<CorpusPos>(x);
+        }
+        return static_cast<CorpusPos>(1) << 20;
+    }();
+    return v;
+}
+
+/// Add one partition's buckets to another's. Positional keys are lexicon ids
+/// (global); interned values (region attributes, transforms) get a partition-
+/// local id each, so those columns are re-keyed through their strings.
+void merge_aggregate_into(AggregateBucketData& dst, AggregateBucketData& src) {
+    dst.total_hits += src.total_hits;
+    dst.total_exact = dst.total_exact && src.total_exact;
+
+    const size_t nc = std::max(dst.columns.size(), src.region_intern.size());
+    if (dst.region_intern.size() < nc) dst.region_intern.resize(nc);
+    std::vector<std::vector<int64_t>> remap(src.region_intern.size());
+    bool any_remap = false;
+    for (size_t i = 0; i < src.region_intern.size(); ++i) {
+        const auto& from = src.region_intern[i];
+        if (from.id_to_str.empty()) continue;
+        auto& to = dst.region_intern[i];
+        remap[i].assign(from.id_to_str.size() + 1, 0);
+        for (size_t j = 0; j < from.id_to_str.size(); ++j) {
+            const std::string& v = from.id_to_str[j];
+            auto it = to.str_to_id.find(v);
+            int64_t id;
+            if (it != to.str_to_id.end()) {
+                id = it->second;
+            } else {
+                id = static_cast<int64_t>(to.id_to_str.size() + 1);
+                to.str_to_id.emplace(v, id);
+                to.id_to_str.push_back(v);
+            }
+            remap[i][j + 1] = id;
+        }
+        any_remap = true;
+    }
+    for (auto& [k, c] : src.counts) {
+        if (!any_remap) {
+            dst.counts[k] += c;
+            continue;
+        }
+        std::vector<int64_t> key = k;
+        for (size_t i = 0; i < key.size() && i < remap.size(); ++i)
+            if (!remap[i].empty() && key[i] > 0 && static_cast<size_t>(key[i]) < remap[i].size())
+                key[i] = remap[i][static_cast<size_t>(key[i])];
+        dst.counts[std::move(key)] += c;
+    }
+
+    // flat counters (P7.2): same plan in every partition, so same ncols / v2
+    if (src.flat_ncols == 0) return;
+    if (dst.flat_ncols == 0) {
+        dst.flat_ncols = src.flat_ncols;
+        dst.flat_v2 = src.flat_v2;
+    }
+    const bool dense = !dst.flat_dense.empty() || !src.flat_dense.empty();
+    if (dense) {
+        // one column: everything into one dense array (keys are lexicon ids)
+        auto& d = dst.flat_dense;
+        if (d.size() < src.flat_dense.size()) d.resize(src.flat_dense.size(), 0);
+        for (size_t i = 0; i < src.flat_dense.size(); ++i) d[i] += src.flat_dense[i];
+        auto fold = [&](const std::vector<uint64_t>& keys, const std::vector<uint64_t>& vals) {
+            for (size_t i = 0; i < keys.size(); ++i) {
+                if (keys[i] == AggregateBucketData::kFlatEmpty) continue;
+                if (keys[i] >= d.size()) d.resize(static_cast<size_t>(keys[i]) + 1, 0);
+                d[static_cast<size_t>(keys[i])] += vals[i];
+            }
+        };
+        fold(dst.flat_keys, dst.flat_vals);
+        fold(src.flat_keys, src.flat_vals);
+        dst.flat_keys.clear();
+        dst.flat_vals.clear();
+    } else {
+        // packed keys: sort both tables' live entries and add equal keys
+        std::vector<std::pair<uint64_t, uint64_t>> kv;
+        kv.reserve(dst.flat_keys.size() + src.flat_keys.size());
+        for (int side = 0; side < 2; ++side) {
+            const auto& keys = side ? src.flat_keys : dst.flat_keys;
+            const auto& vals = side ? src.flat_vals : dst.flat_vals;
+            for (size_t i = 0; i < keys.size(); ++i)
+                if (keys[i] != AggregateBucketData::kFlatEmpty) kv.emplace_back(keys[i], vals[i]);
+        }
+        std::sort(kv.begin(), kv.end());
+        dst.flat_keys.clear();
+        dst.flat_vals.clear();
+        for (const auto& [k, v] : kv) {
+            if (!dst.flat_keys.empty() && dst.flat_keys.back() == k) dst.flat_vals.back() += v;
+            else { dst.flat_keys.push_back(k); dst.flat_vals.push_back(v); }
+        }
+    }
+}
+
+}  // namespace
+
+MatchSet QueryExecutor::execute(const TokenQuery& query,
+                                size_t max_matches,
+                                bool count_total,
+                                size_t max_total_cap,
+                                size_t sample_size,
+                                uint32_t random_seed,
+                                unsigned num_threads,
+                                const std::vector<std::string>* aggregate_by_fields,
+                                bool skip_name_validation) {
+    if (num_threads > 1 && !range_ && sample_size == 0) {
+        if (auto r = execute_partitioned(query, max_matches, count_total, max_total_cap,
+                                         random_seed, num_threads, aggregate_by_fields,
+                                         skip_name_validation))
+            return std::move(*r);
+    }
+    return execute_impl(query, max_matches, count_total, max_total_cap, sample_size,
+                        random_seed, num_threads, aggregate_by_fields, skip_name_validation);
+}
+
+std::optional<MatchSet> QueryExecutor::execute_partitioned(
+        const TokenQuery& query, size_t max_matches, bool count_total, size_t max_total_cap,
+        uint32_t random_seed, unsigned num_threads,
+        const std::vector<std::string>* aggregate_by_fields, bool skip_name_validation) {
+    const bool agg = aggregate_by_fields && !aggregate_by_fields->empty();
+    // A page without a total stops at its first hits: nothing to split. Capped
+    // buckets would depend on which hits came first.
+    if (!count_total && !agg) return std::nullopt;
+    if (agg && max_total_cap > 0) return std::nullopt;
+    const CorpusPos N = corpus_.size();
+    const CorpusPos min_part = partition_min_tokens();
+    if (N / min_part < 2) return std::nullopt;
+    const unsigned K = static_cast<unsigned>(
+        std::min<CorpusPos>(static_cast<CorpusPos>(num_threads), N / min_part));
+    if (K < 2) return std::nullopt;
+
+    if (!skip_name_validation) validate_query_name_bindings(query);
+    // Workers skip compile_query (it writes into the shared condition nodes):
+    // compile once here. Anchor stripping copies the tokens, not the nodes.
+    compile_query(query);
+
+    // Cut points at bitmap-chunk boundaries moved forward to the next sentence
+    // start: a dependency tree never crosses a cut, and the bitmap kernels see
+    // whole chunks except at the two ends of a range.
+    const StructuralAttr* sents = corpus_.has_structure("s") ? &corpus_.structure("s") : nullptr;
+    const bool chunk_align = min_part >= BitmapIndex::kChunk;   // (tests use tiny ranges)
+    auto align = [&](CorpusPos x) -> CorpusPos {
+        if (chunk_align)
+            x = ((x + BitmapIndex::kChunk - 1) >> BitmapIndex::kChunkShift) << BitmapIndex::kChunkShift;
+        if (x >= N) return N;
+        if (sents) {
+            const int64_t r = sents->find_region(x);
+            if (r >= 0) {
+                const Region reg = sents->get(static_cast<size_t>(r));
+                if (reg.start < x) x = reg.end + 1;
+            }
+        }
+        return std::min(x, N);
+    };
+    // Range 0 is a short probe run first, alone: its result says whether the
+    // query's path honours ranges at all. If not, the probe never saw its range
+    // and already holds the full answer — no work is wasted either way.
+    std::vector<PosRange> ranges;
+    CorpusPos prev = 0;
+    const CorpusPos probe_end = align(N / (8 * static_cast<CorpusPos>(K)));
+    if (probe_end <= 0 || probe_end >= N) return std::nullopt;
+    ranges.push_back({0, probe_end});
+    prev = probe_end;
+    for (unsigned w = 1; w <= K; ++w) {
+        const CorpusPos target = probe_end + (N - probe_end) * static_cast<CorpusPos>(w) / K;
+        const CorpusPos cut = (w == K) ? N : align(target);
+        if (cut > prev) {
+            ranges.push_back({prev, cut});
+            prev = cut;
+        }
+    }
+    if (ranges.back().hi < N) ranges.back().hi = N;
+
+    // materialised operands are shared by the ranges while this query runs
+    struct ShareOperands {
+        Caches& c;
+        explicit ShareOperands(Caches& cc) : c(cc) { c.share_operands = true; }
+        ~ShareOperands() {
+            c.share_operands = false;
+            std::lock_guard<std::mutex> lk(c.operands_mu);
+            c.operands.clear();
+        }
+    } share_guard(*caches_);
+
+    auto run_range = [&](const PosRange& r, ExecProgress* prog) {
+        QueryExecutor ex(*this, &r, prog);
+        return ex.execute_impl(query, max_matches, count_total, max_total_cap, 0, random_seed,
+                               1, aggregate_by_fields, true);
+    };
+
+    MatchSet result = run_range(ranges[0], progress_);
+    if (!result.range_ok) return result;              // the path ignored the range
+    if (ranges.size() == 1) return result;
+
+    const size_t nw = ranges.size() - 1;
+    std::vector<std::unique_ptr<ExecProgress>> wprog(nw);
+    for (auto& p : wprog) p = std::make_unique<ExecProgress>();
+    std::vector<std::optional<MatchSet>> parts(nw);
+    std::vector<std::exception_ptr> errs(nw);
+    std::atomic<size_t> done{0};
+    std::vector<std::thread> threads;
+    threads.reserve(nw);
+    for (size_t w = 0; w < nw; ++w) {
+        threads.emplace_back([&, w] {
+            try {
+                parts[w] = run_range(ranges[w + 1], wprog[w].get());
+            } catch (...) {
+                errs[w] = std::current_exception();
+                for (auto& p : wprog) p->cancel.store(true, std::memory_order_relaxed);
+            }
+            done.fetch_add(1, std::memory_order_release);
+        });
+    }
+    // Publish the partitions' progress as one scan: counted = sum; scanned = the
+    // number of positions covered so far, as a position in one sequential scan.
+    const size_t probe_total = result.total_count;
+    auto publish = [&] {
+        if (!progress_) return;
+        size_t counted = probe_total;
+        int64_t covered = static_cast<int64_t>(ranges[0].hi);
+        for (size_t w = 0; w < nw; ++w) {
+            counted += wprog[w]->counted.load(std::memory_order_relaxed);
+            const int64_t sc = wprog[w]->scanned.load(std::memory_order_relaxed);
+            const PosRange& r = ranges[w + 1];
+            if (sc >= r.lo) covered += std::min<int64_t>(sc, r.hi - 1) - r.lo + 1;
+        }
+        progress_->counted.store(counted, std::memory_order_relaxed);
+        if (covered - 1 > progress_->scanned.load(std::memory_order_relaxed))
+            progress_->scanned.store(covered - 1, std::memory_order_relaxed);
+        if (progress_->cancel.load(std::memory_order_relaxed))
+            for (auto& p : wprog) p->cancel.store(true, std::memory_order_relaxed);
+    };
+    if (progress_) {
+        while (done.load(std::memory_order_acquire) < nw) {
+            publish();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+    for (auto& t : threads) t.join();
+    publish();
+
+    // errors: a real one first; otherwise the cancellation
+    std::exception_ptr cancelled;
+    for (auto& e : errs) {
+        if (!e) continue;
+        try {
+            std::rethrow_exception(e);
+        } catch (const QueryCancelled&) {
+            cancelled = e;
+        } catch (...) {
+            throw;
+        }
+    }
+    if (cancelled) std::rethrow_exception(cancelled);
+    if (progress_ && progress_->cancel.load()) throw QueryCancelled();
+
+    for (size_t w = 0; w < nw; ++w) {
+        MatchSet& p = *parts[w];
+        if (!p.range_ok) {
+            // a range took a different path than the probe (should not happen);
+            // be safe: the plain single-threaded run
+            return execute_impl(query, max_matches, count_total, max_total_cap, 0, random_seed,
+                                1, aggregate_by_fields, true);
+        }
+        result.total_count += p.total_count;
+        result.total_exact = result.total_exact && p.total_exact;
+        for (auto& m : p.matches) {
+            if (max_matches > 0 && result.matches.size() >= max_matches) break;
+            result.matches.push_back(std::move(m));
+        }
+        if (p.aggregate_buckets) {
+            if (!result.aggregate_buckets) result.aggregate_buckets = std::move(p.aggregate_buckets);
+            else merge_aggregate_into(*result.aggregate_buckets, *p.aggregate_buckets);
+        }
+    }
+    if (result.aggregate_buckets) {
+        result.total_count = result.aggregate_buckets->total_hits;
+        result.total_exact = result.total_exact && result.aggregate_buckets->total_exact;
+    }
+    if (max_total_cap > 0 && result.total_count >= max_total_cap) {
+        // as the single-threaded count, which stops (inexact) on reaching the cap
+        result.total_count = max_total_cap;
+        result.total_exact = false;
+    }
+    result.partitions = static_cast<unsigned>(ranges.size());
+    result.range_ok = false;
+    return result;
 }
 
 // ── Shared seed expansion (single source of truth for match logic) ───────

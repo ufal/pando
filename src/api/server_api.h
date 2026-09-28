@@ -34,6 +34,10 @@ namespace pando {
 struct ServerConfig {
     QueryJobConfig jobs;              // background totals (P6.2)
     unsigned threads = 0;             // reported in /health (the transport's request threads)
+    /// P4.1: a counting query (a /query total, a background total, a /run
+    /// `count by`) is split over this many position ranges counted in parallel.
+    /// 1 = one thread per query (the default: a busy server already runs many).
+    unsigned query_threads = 1;
     bool preload = false;             // reported: the corpus was opened with preload
     /// Default per-request time limit for /query in ms (0 = none); a request can
     /// set its own with "timeout_ms". An expired query answers 408.

@@ -121,7 +121,8 @@ std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
     size_t max_total_cap = (opts.total && opts.max_total > 0) ? opts.max_total : 0;
 
     auto t0 = std::chrono::high_resolution_clock::now();
-    MatchSet ms = executor.execute(prog[0].query, max_m, count_t, max_total_cap);
+    MatchSet ms = executor.execute(prog[0].query, max_m, count_t, max_total_cap, 0, 0,
+                                   std::max(1u, opts.threads));
     auto t1 = std::chrono::high_resolution_clock::now();
     double elapsed = std::chrono::duration<double, std::milli>(t1 - t0).count();
     return {std::move(ms), elapsed};

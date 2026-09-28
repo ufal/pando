@@ -42,7 +42,9 @@ int main(int argc, char* argv[]) {
                   << "    --result-ttl SEC        drop an unused finished result after SEC (default 3600)\n"
                   << "    --abandon-after SEC     cancel a count nobody polled for SEC (default 120; 0 = never)\n"
                   << "    --debug-total-delay MS  testing: reveal every total gradually over MS\n"
-                  << "  --query-timeout MS          default /query time limit (0 = none; per request \"timeout_ms\")\n";
+                  << "  --query-timeout MS          default /query time limit (0 = none; per request \"timeout_ms\")\n"
+                  << "  --query-threads N           count a total / count by over N position ranges in parallel\n"
+                  << "                              (default 1: one thread per query)\n";
         return 1;
     }
     std::string corpus_dir = argv[1];
@@ -52,6 +54,7 @@ int main(int argc, char* argv[]) {
     int positional = 0;
     QueryJobConfig job_cfg;
     size_t query_timeout_ms = 0;
+    unsigned query_threads = 1;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
         auto num_arg = [&](long long& out) -> bool {
@@ -64,13 +67,15 @@ int main(int argc, char* argv[]) {
         };
         long long v = 0;
         if (a == "--total-workers" || a == "--result-cache" || a == "--result-ttl"
-            || a == "--abandon-after" || a == "--debug-total-delay" || a == "--query-timeout") {
+            || a == "--abandon-after" || a == "--debug-total-delay" || a == "--query-timeout"
+            || a == "--query-threads") {
             if (!num_arg(v) || v < 0) return 1;
             if (a == "--total-workers") job_cfg.workers = static_cast<unsigned>(std::max(1LL, v));
             else if (a == "--result-cache") job_cfg.max_entries = static_cast<size_t>(std::max(1LL, v));
             else if (a == "--result-ttl") job_cfg.ttl = std::chrono::seconds(v);
             else if (a == "--abandon-after") job_cfg.abandon = std::chrono::seconds(v);
             else if (a == "--query-timeout") query_timeout_ms = static_cast<size_t>(v);
+            else if (a == "--query-threads") query_threads = static_cast<unsigned>(std::max(1LL, v));
             else job_cfg.debug_delay = std::chrono::milliseconds(v);
             continue;
         }
@@ -111,6 +116,7 @@ int main(int argc, char* argv[]) {
     cfg.threads = nthreads;
     cfg.preload = preload;
     cfg.query_timeout_ms = query_timeout_ms;
+    cfg.query_threads = query_threads;
     ServerApi api(corpus, cfg);
 
     httplib::Server svr;
@@ -133,6 +139,7 @@ int main(int argc, char* argv[]) {
               << ", threads " << nthreads
               << (preload ? ", preload=on" : ", preload=off (lazy mmap)")
               << ", background totals: " << job_cfg.workers << " workers"
+              << (query_threads > 1 ? ", query threads " + std::to_string(query_threads) : std::string())
               << (query_timeout_ms ? ", query timeout " + std::to_string(query_timeout_ms) + " ms" : std::string())
               << "\n";
     if (!svr.listen("0.0.0.0", static_cast<int>(port))) {

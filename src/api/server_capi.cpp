@@ -88,6 +88,7 @@ PANDO_API pando_server_t* pando_server_open(const char* corpus_dir, const char* 
         cfg.query_timeout_ms = json_extract_num(opts, "query_timeout_ms", 0);
         cfg.jobs.debug_delay = std::chrono::milliseconds(json_extract_num(opts, "debug_total_delay_ms", 0));
         cfg.threads = static_cast<unsigned>(json_extract_num(opts, "threads", 0));
+        cfg.query_threads = static_cast<unsigned>(std::max<size_t>(1, json_extract_num(opts, "query_threads", 1)));
         const std::string emb = json_extract_str(opts, "embedded_in");
         if (!emb.empty()) cfg.extra_server_fields = "\"embedded_in\": " + jstr(emb);
 

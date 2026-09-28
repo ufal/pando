@@ -24,6 +24,8 @@ struct QueryOptions {
     bool strict_quoted_strings = false;
     /// Alignment filters (`:: a.attr = b.attr`): include empty/"_" values (legacy behavior).
     bool allow_empty_alignment = false;
+    /// P4.1: count the total over this many position ranges in parallel (1 = one thread).
+    unsigned threads = 1;
 };
 
 // Run a single query (one statement, no trailing command). Returns (MatchSet, elapsed_ms).
@@ -111,6 +113,8 @@ struct ProgramOptions {
     size_t coll_max_items = 50;
     size_t coll_stoplist = 0; // 0 = disabled; otherwise top-N most frequent words are excluded
     std::vector<std::string> coll_measures;
+    /// P4.1: totals and `count by` over this many position ranges in parallel.
+    unsigned threads = 1;
 };
 
 // Run a full CQL program and return the JSON output.

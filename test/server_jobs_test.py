@@ -97,6 +97,53 @@ def poll(srv, job_id, timeout=15, interval=0.25):
     return 0, seen
 
 
+def check_query_threads(opts, corpus, tmp):
+    """P4.1: --query-threads splits sync totals, background totals and /run count by
+    into position ranges (PANDO_PARTITION_MIN makes the sample corpus split too);
+    every number must equal the single-threaded CLI's."""
+    port = free_port()
+    log = open(os.path.join(tmp, "server_mt.log"), "w")
+    env = dict(os.environ, PANDO_PARTITION_MIN="50")
+    proc = subprocess.Popen([opts.server, corpus, str(port), "4", "--query-threads", "4"],
+                            stdout=log, stderr=subprocess.STDOUT, env=env)
+    srv = Server(port)
+    try:
+        for _ in range(100):
+            try:
+                if srv.get("/health")[0] == 200:
+                    break
+            except (urllib.error.URLError, ConnectionError):
+                pass
+            time.sleep(0.05)
+        code, h = srv.get("/health")
+        check(code == 200 and h.get("query_threads") == 4, f"/health query_threads: {h.get('query_threads')}")
+        for q in ('[upos="NOUN"] [upos="PUNCT"]', '[upos="VERB"] > [upos="NOUN"]',
+                  '[upos="DET"] []{0,2} [upos="NOUN"]', '[upos="VERB"] >> [upos="NOUN"]',
+                  '[upos="NOUN"] !> [upos="DET"]', '[upos="ADJ"] [] [upos="NOUN"] within s'):
+            want = count_only(opts.pando, corpus, q)
+            res, _ = srv.query(q, total=True, limit=5)
+            page = res["result"]["page"]
+            check(page["total"] == want and page["total_exact"], f"--query-threads sync {q}: {page} vs {want}")
+            res, _ = srv.query(q + " ", total="async", limit=1)   # a new result set
+            code, seen = poll(srv, res["result"]["job"]["id"])
+            last = seen[-1] if seen else {}
+            check(code == 200 and last.get("state") == "finished" and last.get("total") == want,
+                  f"--query-threads async {q}: {last} vs {want}")
+        cli = subprocess.run([opts.pando, corpus, 'a:[upos="ADJ"] b:[upos="NOUN"]; count by b.lemma',
+                              "--json"], capture_output=True, text=True, check=True).stdout
+        res = srv.post("/run", {"cql": 'a:[upos="ADJ"] b:[upos="NOUN"]; count by b.lemma', "group_limit": 1000})
+        want_rows = {r["key"]: r["count"] for r in json.loads(cli)["result"]["rows"]}
+        got_rows = {r["key"]: r["count"] for r in res["result"]["rows"]}
+        check(got_rows == want_rows and got_rows, f"--query-threads /run count by: {len(got_rows)} vs {len(want_rows)} rows")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        log.close()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--server", required=True)
@@ -231,6 +278,9 @@ def main():
         log.close()
         if FAILS:
             print(open(os.path.join(tmp, "server.log")).read()[-2000:])
+    try:
+        check_query_threads(opts, corpus, tmp)
+    finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"server_jobs_test: {'FAILED (' + str(len(FAILS)) + ')' if FAILS else 'all passed'}")
     return 1 if FAILS else 0

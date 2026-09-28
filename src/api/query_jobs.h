@@ -39,6 +39,7 @@ struct QueryJobConfig {
     std::chrono::seconds ttl{3600};              // idle time before a finished result is dropped
     std::chrono::seconds abandon{120};           // cancel a count nobody polled for this long (0 = never)
     std::chrono::milliseconds debug_delay{0};    // testing: reveal each total gradually over this long
+    unsigned count_threads = 1;                  // P4.1: position ranges counted in parallel per job
 };
 
 struct QueryJobStatus {

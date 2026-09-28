@@ -1352,7 +1352,8 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
             if (stmt.is_parallel)
                 S.last_ms = executor.execute_parallel(stmt.query, stmt.target_query, max_m, count_t);
             else
-                S.last_ms = executor.execute(stmt.query, max_m, count_t, max_total_cap, 0, 0, 1,
+                S.last_ms = executor.execute(stmt.query, max_m, count_t, max_total_cap, 0, 0,
+                                             std::max(1u, opts.threads),
                                              aggregate_by);
             auto t1 = std::chrono::high_resolution_clock::now();
             double query_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();

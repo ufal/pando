@@ -36,7 +36,7 @@ Exact options change over time; always run **`pando --help`**, **`pando-index --
 | `--timing` | Print timing on stderr (`open_sec`, `query_sec`, …) |
 | `--sample N` | Random sample of N matches (reservoir sampling) |
 | `--seed N` | RNG seed for `--sample` (reproducible runs) |
-| `--threads N` | Parallel seed expansion for multi-token queries (default: 1) |
+| `--threads N` | Count a total (`--total`, `--count-only`) or a `count by` over N position ranges in parallel; same result as one thread, first page in the same order (default: 1). See [Parallel counting](#parallel-counting-threads) |
 | `--preload` | Load mmap pages eagerly at corpus open (slower open, can speed first queries) |
 
 ### Quoting and string semantics
@@ -93,6 +93,33 @@ pando-server <corpus_dir> [port] [threads] [--preload] [options]
 | `--result-ttl SEC` | Drop a finished result nobody asked about for SEC (default 3600) |
 | `--abandon-after SEC` | Cancel a background count nobody polled for SEC (default 120; 0 = never) |
 | `--debug-total-delay MS` | Testing: reveal every total gradually over MS, so a client can be tested against a "slow" count on a small corpus |
+| `--query-threads N` | Split every counting query — a `/query` total, a background (`"async"`) total, a `/run` `count by` — over N position ranges counted in parallel (default 1: one thread per query). `/health` reports it as `query_threads` |
+
+### Parallel counting (`--threads`)
+
+`pando --threads N` and `pando-server --query-threads N` (P4.1) split a query
+that has to see every hit — an exact total, a background total, a
+`… ; count by …` — into up to N ranges of corpus positions and count them at
+the same time. The corpus stays one corpus with one position space; the ranges
+exist only for the duration of the query:
+
+- ranges are cut at sentence starts (`s`), so a dependency tree is never split;
+  a sequence belongs to the range that holds its first token, so a match that
+  runs over a cut is counted once;
+- the result is the one-thread result: the same total, the same `count by`
+  buckets, and the first page in the same order (the ranges' pages are joined in
+  position order);
+- a short first range runs alone first. Paths that count in O(#values) anyway
+  (a single EQ token, a regex / `%c` id set, `[H] > [C]` edge postings) are not
+  split, nor are queries whose path cannot be restricted to a range (anchors,
+  some region filters): they run as before, with no extra work;
+- a page without a total (`--limit 20` alone) is never split: it stops at its
+  first hits.
+
+Worth it for long counts on large corpora; on a server that already runs many
+queries at once, more request threads may be the better use of the cores
+(`--query-threads` defaults to 1). Ranges smaller than 2^20 tokens are not
+made (`PANDO_PARTITION_MIN` overrides, for tests on small corpora).
 
 ### Endpoints
 

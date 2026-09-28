@@ -85,7 +85,7 @@ struct Options {
     bool timing     = false;  // print open_sec, query_sec, fetch_sec, total, returned to stderr
     size_t sample   = 0;      // return N randomly sampled matches (reservoir sampling)
     uint32_t sample_seed = 0; // RNG seed for --sample (0 = non-deterministic)
-    unsigned threads = 1;    // parallel seed processing when > 1 (multi-token queries)
+    unsigned threads = 1;    // P4.1: totals / count by over N position ranges in parallel
     bool preload    = false; // load all mmap'd pages into RAM at open (slower open, faster first query)
     int  max_gap    = REPEAT_UNBOUNDED; // cap for + and * quantifiers (--max-gap)
     // When true: only /.../ is regex; "..." in [attr="..."] is always literal (legacy behavior).
@@ -123,6 +123,7 @@ struct QueryTiming {
     double open_sec = 0, query_sec = 0, fetch_sec = 0;
     size_t total = 0, returned = 0;
     std::string path;  // MatchSet::plan_path of the last query step
+    unsigned parts = 1;  // MatchSet::partitions (P4.1 position ranges) of the last query step
 };
 
 // ── JSON output ─────────────────────────────────────────────────────────
@@ -2644,6 +2645,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                 out_timing->total = session.last_ms.total_count;
                 out_timing->returned = session.last_ms.matches.size();
                 out_timing->path = session.last_ms.plan_path;
+                out_timing->parts = session.last_ms.partitions;
             }
 
             if (!next_is_command) {
@@ -3555,7 +3557,7 @@ static Options parse_args(int argc, char* argv[]) {
                   << "  --dump-matches   Print total and every match as `starts;ends` (testing)\n"
                   << "  --sample N       Return N randomly sampled matches (reservoir sampling)\n"
                   << "  --seed N         RNG seed for --sample (reproducible runs)\n"
-                  << "  --threads N      Parallel seed processing for multi-token queries (default: 1)\n"
+                  << "  --threads N      Count totals / aggregations over N position ranges in parallel (default: 1)\n"
                   << "  --overlay DIR    Merge stand-off overlay index (repeatable); attrs are overlay-<layer>-…\n"
                   << "  --allow-empty-alignment  Alignment join (`:: a.attr=b.attr`) may match empty/_ values (legacy)\n"
                   << "  --max-gap N      Cap for + and * quantifiers (default: " << REPEAT_UNBOUNDED << ")\n"
@@ -3690,7 +3692,8 @@ int main(int argc, char* argv[]) {
                           << " fetch_sec=" << timing.fetch_sec
                           << " total=" << timing.total
                           << " returned=" << timing.returned
-                          << " path=" << (timing.path.empty() ? "-" : timing.path) << "\n";
+                          << " path=" << (timing.path.empty() ? "-" : timing.path)
+                          << " parts=" << timing.parts << "\n";
         } catch (const std::exception& e) {
             if (opts.json || opts.api) {
                 std::cout << "{\"ok\": false, \"error\": {\"stage\": \"query\", \"message\": "

@@ -36,21 +36,33 @@ import sys
 import tempfile
 import time
 
-MODES = ("on", "onbits", "nobm", "bmforce", "nomerge", "off")
+ALL_MODES = ("on", "onbits", "nobm", "bmforce", "nomerge", "off", "mt", "mtbits", "mtoff")
+MODES = ALL_MODES
+REF = "off"
 # onbits  = fast paths with region filters forced to the bitset representation
 #           (PANDO_MASK_BITS=1) instead of position intervals;
 # nobm    = fast paths without the bitmap kernels (PANDO_BITMAPS=off): the merge paths;
 # bmforce = bitmap kernels wherever the query compiles to them (PANDO_BITMAPS=force),
 #           also for rare operands the planner would give to a merge.
 # The bitmap modes only differ from "on" on an index with <attr>.bm files.
+# mt / mtbits / mtoff = on / onbits / off with P4.1 range partitioning
+#           (--threads MT_THREADS, ranges down to PANDO_PARTITION_MIN tokens so a
+#           small corpus is split too); the concordance page with a total must be
+#           identical to the single-threaded one, in order.
+MT_THREADS = 4
+MT_MODES = ("mt", "mtbits", "mtoff")
+PARTITION_MIN = "50"
 
 
 def run(pando, corpus, query, args, mode, timeout):
-    env = dict(os.environ, PANDO_FASTPATH="off" if mode == "off" else
+    env = dict(os.environ, PANDO_FASTPATH="off" if mode in ("off", "mtoff") else
                "nomerge" if mode == "nomerge" else "on")
-    for k in ("PANDO_MASK_BITS", "PANDO_BITMAPS"):
+    for k in ("PANDO_MASK_BITS", "PANDO_BITMAPS", "PANDO_PARTITION_MIN"):
         env.pop(k, None)
-    if mode == "onbits":
+    if mode in MT_MODES:
+        env["PANDO_PARTITION_MIN"] = PARTITION_MIN
+        args = [*args, "--threads", str(MT_THREADS)]
+    if mode in ("onbits", "mtbits"):
         env["PANDO_MASK_BITS"] = "1"
     elif mode == "nobm":
         env["PANDO_BITMAPS"] = "off"
@@ -86,16 +98,19 @@ def check_agg_query(opts, query):
     """Aggregation: the whole output (buckets + total) must not depend on the path."""
     problems, info, outs = [], {}, {}
     for mode in MODES:
-        out, path, dt, _ = run(opts.pando, opts.corpus, query, [], mode, opts.timeout)
+        out, path, dt, err = run(opts.pando, opts.corpus, query, [], mode, opts.timeout)
         outs[mode] = out
         info[mode] = (path, dt)
-    m = re.search(r"Total:\s*(\d+)", outs["off"])
+        if mode == "mt":
+            m = re.search(r"\bparts=(\d+)", err)
+            info["parts"] = int(m.group(1)) if m else 1
+    m = re.search(r"Total:\s*(\d+)", outs[REF])
     if not m:
-        problems.append(f"no 'Total:' line in the generic output: {outs['off'].strip()[-200:]!r}")
+        problems.append(f"no 'Total:' line in the reference output: {outs[REF].strip()[-200:]!r}")
     ref = int(m.group(1)) if m else -1
     for mode in MODES:
-        if outs[mode] != outs["off"]:
-            a, b = outs[mode].splitlines(), outs["off"].splitlines()
+        if outs[mode] != outs[REF]:
+            a, b = outs[mode].splitlines(), outs[REF].splitlines()
             diff = next((i for i in range(max(len(a), len(b)))
                          if i >= len(a) or i >= len(b) or a[i] != b[i]), None)
             problems.append(f"[{mode}] aggregation output differs from generic at line {diff}: "
@@ -112,19 +127,28 @@ def check_query(opts, query, max_full):
     info = {}
     totals = {}
     for mode in MODES:
-        out, path, dt, _ = run(opts.pando, opts.corpus, query, ["--count-only"], mode, opts.timeout)
+        out, path, dt, err = run(opts.pando, opts.corpus, query, ["--count-only"], mode, opts.timeout)
         totals[mode] = int(out.strip().splitlines()[-1])
         info[mode] = (path, dt)
+        if mode == "mt":
+            m = re.search(r"\bparts=(\d+)", err)
+            info["parts"] = int(m.group(1)) if m else 1
     if len(set(totals.values())) != 1:
         problems.append(f"count-only totals differ: {totals}")
-    ref_total = totals["off"]
+    ref_total = totals[REF]
 
     k = opts.page
+    pages = {}
     for mode in MODES:
-        _, _, _, err = run(opts.pando, opts.corpus, query, ["--limit", str(k), "--total"], mode, opts.timeout)
+        out, _, _, err = run(opts.pando, opts.corpus, query, ["--limit", str(k), "--total"], mode, opts.timeout)
+        pages[mode] = out
         t = total_from_timing(err)
         if t != ref_total:
             problems.append(f"[{mode}] --limit {k} --total gives {t}, expected {ref_total}")
+    # P4.1: the partitioned page is the single-threaded page, in the same order
+    for mode, ref in (("mt", "on"), ("mtbits", "onbits"), ("mtoff", "off")):
+        if mode in pages and ref in pages and pages[mode] != pages[ref]:
+            problems.append(f"[{mode}] --limit {k} --total page differs from [{ref}]")
 
     # capped total (--max-total): every mode must stop at the same cap
     if ref_total >= 2:
@@ -153,9 +177,9 @@ def check_query(opts, query, max_full):
                 problems.append(f"[{mode}] duplicate matches in dump ({len(rows) - len(set(rows))})")
             sets[mode] = set(rows)
         for mode in MODES:
-            if sets[mode] != sets["off"]:
-                a = sorted(sets[mode] - sets["off"])[:3]
-                b = sorted(sets["off"] - sets[mode])[:3]
+            if sets[mode] != sets[REF]:
+                a = sorted(sets[mode] - sets[REF])[:3]
+                b = sorted(sets[REF] - sets[mode])[:3]
                 problems.append(f"[{mode}] match set differs from generic: extra={a} missing={b}")
         # first page (normal concordance path, no total): K distinct members of the full set
         for mode in MODES:
@@ -165,7 +189,7 @@ def check_query(opts, query, max_full):
             want = min(k, ref_total)
             if len(rows) != want or len(set(rows)) != len(rows):
                 problems.append(f"[{mode}] first page has {len(rows)} rows ({len(set(rows))} distinct), expected {want}")
-            bad = [r for r in rows if r not in sets["off"]]
+            bad = [r for r in rows if r not in sets[REF]]
             if bad:
                 problems.append(f"[{mode}] first page contains non-matches: {bad[:3]}")
         info["full"] = True
@@ -220,7 +244,16 @@ def main():
     ap.add_argument("--page", type=int, default=20)
     ap.add_argument("--timeout", type=float, default=600)
     ap.add_argument("--filter", help="only queries containing this substring")
+    ap.add_argument("--modes", help="comma-separated subset of the modes (default: all); "
+                    "the reference is 'off' if listed, else the first")
     opts = ap.parse_args()
+    global MODES, REF
+    if opts.modes:
+        MODES = tuple(m for m in opts.modes.split(","))
+        bad = [m for m in MODES if m not in ALL_MODES]
+        if bad:
+            ap.error(f"unknown modes {bad}")
+    REF = "off" if "off" in MODES else MODES[0]
 
     tmp = None
     if opts.conllu:
@@ -245,7 +278,8 @@ def main():
             queries.append((line, mf))
 
     failures = 0
-    print(f"{'total':>10}  {'full':4}  {'on-path':15} {'on s':>7} {'nobm s':>9} {'off s':>7}  query")
+    split = 0
+    print(f"{'total':>10}  {'full':4}  {'on-path':15} {'parts':>5} {'on s':>7} {'nobm s':>9} {'off s':>7}  query")
     try:
         for q, mf in queries:
             try:
@@ -255,8 +289,12 @@ def main():
                 print(f"{'ERROR':>10}  {'':4}  {'':15} {'':>7} {'':>9} {'':>7}  {q}\n    {e}")
                 continue
             status = "" if not problems else "  <-- MISMATCH"
-            print(f"{totals['off']:>10}  {info['full'] if isinstance(info['full'], str) else ('yes' if info['full'] else 'no'):4}  {info['on'][0]:15} "
-                  f"{info['on'][1]:7.3f} {info['nobm'][1]:9.3f} {info['off'][1]:7.3f}  {q}{status}")
+            parts = info.get("parts", 1)
+            split += parts > 1
+            t = lambda m: info[m][1] if m in info else float("nan")
+            first = info.get("on", info[MODES[0]])
+            print(f"{totals[REF]:>10}  {info['full'] if isinstance(info['full'], str) else ('yes' if info['full'] else 'no'):4}  {first[0]:15} "
+                  f"{parts:>5} {t('on'):7.3f} {t('nobm'):9.3f} {t('off'):7.3f}  {q}{status}")
             for p in problems:
                 print("    " + p)
             if problems:
@@ -264,7 +302,8 @@ def main():
     finally:
         if tmp:
             shutil.rmtree(tmp, ignore_errors=True)
-    print(f"\n{len(queries) - failures}/{len(queries)} queries consistent across modes")
+    print(f"\n{len(queries) - failures}/{len(queries)} queries consistent across modes"
+          f" ({split} split into position ranges in mode mt)")
     return 1 if failures else 0
 
 

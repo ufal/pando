@@ -280,7 +280,8 @@ void QueryJobManager::run_job(Job& j) {
         ExecProgress hidden;
         ex.set_progress(cfg_.debug_delay.count() > 0 ? &hidden : &j.prog);
         // count only: one match materialised, the rest counted (cheap paths / popcounts)
-        MatchSet ms = ex.execute(prog[0].query, 1, true, j.opts.max_total);
+        MatchSet ms = ex.execute(prog[0].query, 1, true, j.opts.max_total, 0, 0,
+                                 std::max(1u, cfg_.count_threads));
         total = ms.total_count;
         exact = ms.total_exact;
         if (cfg_.debug_delay.count() > 0) {

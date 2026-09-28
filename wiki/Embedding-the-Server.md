@@ -46,7 +46,9 @@ pando_server_close(s);
 ```
 
 Open options (JSON, all optional): `preload`, `total_workers`, `result_cache`,
-`result_ttl`, `abandon_after`, `query_timeout_ms`, `threads` (reported only),
+`result_ttl`, `abandon_after`, `query_timeout_ms`, `query_threads` (position ranges
+counted in parallel per counting query, default 1 — see the CLI reference),
+`threads` (reported only),
 `embedded_in` (reported in `/health`, `/version` and `/info` `server`), and
 `debug_total_delay_ms` (for testing).
 
@@ -57,7 +59,8 @@ features. A host can report it for each engine without opening a corpus.
 
 **Threads.** A handle can serve any number of threads at once. Queries run
 concurrently on the shared corpus. `/run` is serialised inside the handle, because the named-query
-session is shared state. `pando_server_request` blocks, so call it from a blocking pool
+session is shared state. With `query_threads` > 1 a counting request also runs
+that many worker threads of its own while it lasts. `pando_server_request` blocks, so call it from a blocking pool
 (in tokio, use `spawn_blocking`).
 
 **Errors.** No entry point throws or aborts on bad input. Errors come back as JSON

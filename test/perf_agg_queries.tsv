@@ -1,0 +1,13 @@
+# Aggregation battery (Phase 7 / P4.1): `… ; count by …` on UD-style corpora.
+# id<TAB>query — used by test/scale_bench.py (output compared across --threads).
+
+A1	[upos="NOUN"]; count by lemma
+A2	[upos="ADJ"] [upos="NOUN"]; count by lemma
+A3	a:[upos="ADJ"] b:[upos="NOUN"]; count by a.lemma, b.lemma
+A4	[upos="DET"] []{0,3} [upos="NOUN"]; count by lemma
+A5	[upos="VERB"] > [upos="NOUN"]; count by lemma
+A6	a:[upos="VERB"] > b:[upos="NOUN"]; count by a.lemma, b.lemma
+A7	a:[upos="ADJ"] b:[upos="NOUN"]; count by a.lemma, text_langcode
+A8	[upos="VERB"] >> [upos="NOUN"]; count by lemma
+A9	[upos="NOUN"] !> [upos="DET"]; count by lemma
+A10	[upos="VERB"] > [deprel="nsubj"]; count by text_langcode

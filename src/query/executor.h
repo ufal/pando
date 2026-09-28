@@ -579,6 +579,17 @@ struct MatchSet {
     /// "seq_probe", "generic"). Reported by `--timing` / JSON debug so benchmarks
     /// can detect a query silently falling off a fast path.
     std::string plan_path = "other";
+    /// P4.1: the path that produced this result honoured QueryExecutor's position
+    /// range (internal to the partitioned driver; always false otherwise).
+    bool range_ok = false;
+    /// P4.1: number of position ranges the query was split into (1 = not split).
+    unsigned partitions = 1;
+};
+
+/// P4.1: half-open corpus position range [lo, hi) of one partition.
+struct PosRange {
+    CorpusPos lo = 0;
+    CorpusPos hi = 0;
 };
 
 // Query plan: start from the most selective token, expand outward.
@@ -621,7 +632,9 @@ public:
     // max_total_cap: when count_total and cap > 0, stop counting at cap and set total_exact=false
     // sample_size > 0: reservoir sample this many random matches (ignores max_matches for output).
     // random_seed: for reproducible --sample (default 0 uses time-based seed when sampling).
-    // num_threads > 1: process seed positions in parallel (multi-token queries only; materializes seeds).
+    // num_threads > 1 (P4.1): a total or an aggregation is computed over up to num_threads
+    // position ranges in parallel (cut at sentence starts; see execute_partitioned). The
+    // result is the single-threaded one: same total, buckets, and first page in order.
     MatchSet execute(const TokenQuery& query,
                      size_t max_matches = 0,
                      bool count_total = false,
@@ -882,13 +895,77 @@ private:
 
     const Corpus& corpus_;
 
+    // ── P4.1: query-time range partitioning ─────────────────────────────
+    //
+    // execute() with num_threads > 1 splits a counting / aggregating query into
+    // position ranges cut at sentence starts and runs execute_impl() once per
+    // range on a worker executor (range_ set). Inside execute_impl the range is
+    // folded into the start mask of the fast paths (build_start_mask), so a
+    // match is counted by exactly one range: the one holding its start (sequence
+    // paths) or its sentence (dependency paths, which never cross a cut), or its
+    // seed (generic path). A path that honours the range sets
+    // MatchSet::range_ok; any other path never sees the range and computes the
+    // full answer, which the driver then returns as is (see execute_partitioned).
+    const PosRange* range_ = nullptr;
+    /// Workers run on a query the driver already compiled (compile_conditions
+    /// writes into the shared AST, so it must not run concurrently).
+    bool skip_compile_ = false;
+
+    MatchSet execute_impl(const TokenQuery& query,
+                          size_t max_matches,
+                          bool count_total,
+                          size_t max_total_cap,
+                          size_t sample_size,
+                          uint32_t random_seed,
+                          unsigned num_threads,
+                          const std::vector<std::string>* aggregate_by_fields,
+                          bool skip_name_validation);
+    /// Runs the query over K position ranges in parallel; std::nullopt when the
+    /// query is not worth splitting (page only, sampling, small corpus, …).
+    std::optional<MatchSet> execute_partitioned(const TokenQuery& query,
+                                                size_t max_matches,
+                                                bool count_total,
+                                                size_t max_total_cap,
+                                                uint32_t random_seed,
+                                                unsigned num_threads,
+                                                const std::vector<std::string>* aggregate_by_fields,
+                                                bool skip_name_validation);
+    /// Worker executor for one range: shares the parent's caches (index files,
+    /// fold maps, compiled regexes), has its own progress counters.
+    QueryExecutor(const QueryExecutor& parent, const PosRange* range, ExecProgress* progress);
+
+    // Caches of opened index files and derived lookup tables, shared by the
+    // worker executors of one partitioned query (every access is under `mu`).
+    struct Caches {
+        std::unordered_map<std::string, FoldMap> fold_map;
+        std::unordered_map<std::string, std::shared_ptr<FoldIndex>> fold_index;
+        std::unordered_map<std::string, std::shared_ptr<DepPairIndex>> dep_pair;
+        std::unordered_map<std::string, std::shared_ptr<BitmapIndex>> bitmap;
+        std::mutex mu;
+#ifdef PANDO_USE_RE2
+        std::unordered_map<std::string, std::unique_ptr<re2::RE2>> regex;
+#else
+        std::unordered_map<std::string, std::regex> regex;
+#endif
+        std::mutex regex_mu;
+        /// P4.1: materialised merge operands (AND / regex / %c / … postings) of the
+        /// partitioned query in progress, keyed by condition node: the probe range
+        /// resolves an operand over the whole corpus once, the other ranges reuse it
+        /// (instead of K copies of the same list). Filled only while
+        /// `share_operands` is set, cleared when the partitioned query ends.
+        bool share_operands = false;
+        std::unordered_map<const void*, std::pair<std::shared_ptr<const void>, std::shared_ptr<void>>> operands;
+        std::mutex operands_mu;
+    };
+    std::shared_ptr<Caches> caches_;
+
     // Fold map cache: keyed by "attr:mode" where mode is "lc", "noacc", "lcnoacc"
     const FoldMap& get_fold_map(const std::string& attr, bool case_fold, bool accent_fold) const;
-    mutable std::unordered_map<std::string, FoldMap> fold_map_cache_;
+    std::unordered_map<std::string, FoldMap>& fold_map_cache_;
     /// P1.6: opened `<attr>.fold_<mode>.perm` files (nullptr = not available).
-    mutable std::unordered_map<std::string, std::shared_ptr<FoldIndex>> fold_index_cache_;
+    std::unordered_map<std::string, std::shared_ptr<FoldIndex>>& fold_index_cache_;
     // P5.2: edge postings per (head attr, child attr); nullptr = not built.
-    mutable std::unordered_map<std::string, std::shared_ptr<DepPairIndex>> dep_pair_cache_;
+    std::unordered_map<std::string, std::shared_ptr<DepPairIndex>>& dep_pair_cache_;
     std::shared_ptr<DepPairIndex> dep_pair_index(const std::string& head_attr,
                                                  const std::string& child_attr) const;
     ExecProgress* progress_ = nullptr;
@@ -904,24 +981,23 @@ private:
         if (progress_->cancel.load(std::memory_order_relaxed)) throw QueryCancelled();
     }
     // P3.1: chunked bitmaps per attribute; nullptr = not built.
-    mutable std::unordered_map<std::string, std::shared_ptr<BitmapIndex>> bitmap_cache_;
+    std::unordered_map<std::string, std::shared_ptr<BitmapIndex>>& bitmap_cache_;
     std::shared_ptr<BitmapIndex> bitmap_index(const std::string& attr) const;
     /// P3.6: `<struct>.bnd.bm` (covered positions + region ends); nullptr = not built.
     std::shared_ptr<BitmapIndex> structure_bitmap(const std::string& name) const;
     /// Folded-value lookup: index file when present, else the in-memory FoldMap.
     std::vector<LexiconId> fold_lookup_ids(const std::string& attr, bool case_fold,
                                            bool accent_fold, const std::string& value) const;
-    mutable std::mutex fold_map_mutex_;
+    std::mutex& fold_map_mutex_;
 
 #ifdef PANDO_USE_RE2
     // RE2 objects are thread-safe for matching once constructed.
-    // Only the cache insertion needs synchronization (handled by mutable + unique_ptr).
-    mutable std::unordered_map<std::string, std::unique_ptr<re2::RE2>> regex_cache_;
-    mutable std::mutex regex_cache_mutex_;  // protects cache insertion only
+    // Only the cache insertion needs synchronization (regex_cache_mutex_).
+    std::unordered_map<std::string, std::unique_ptr<re2::RE2>>& regex_cache_;
 #else
-    mutable std::unordered_map<std::string, std::regex> regex_cache_;
-    mutable std::mutex regex_cache_mutex_;
+    std::unordered_map<std::string, std::regex>& regex_cache_;
 #endif
+    std::mutex& regex_cache_mutex_;  // protects cache insertion only
 };
 
 } // namespace pando
