@@ -23,26 +23,435 @@
 #include <set>
 #include <cmath>
 #include <iomanip>
+#include <numeric>
 #include <stdexcept>
 
 namespace pando {
 
-// ── Session impl ────────────────────────────────────────────────────────
+// ── Session impl: hit sets (P6.1) ───────────────────────────────────────
+
+namespace {
+
+using SessionClock = std::chrono::steady_clock;
+
+// Hits without per-hit extras, flat: hit i is pos[i*stride, +stride) (and ends).
+struct CompactHits {
+    size_t n = 0;
+    size_t stride = 0;
+    bool has_ends = false;
+    std::vector<CorpusPos> pos, ends;
+
+    static bool fits(const std::vector<Match>& v, size_t& stride, bool& has_ends) {
+        stride = v.empty() ? 0 : v[0].positions.size();
+        has_ends = !v.empty() && !v[0].span_ends.empty();
+        for (const Match& m : v) {
+            if (m.positions.size() != stride) return false;
+            if (has_ends ? m.span_ends.size() != stride : !m.span_ends.empty()) return false;
+            if (!m.named_regions.empty() || !m.named_dep_subtrees.empty() || !m.token_group_props.empty()
+                || m.token_group_match)
+                return false;
+        }
+        return true;
+    }
+    static std::optional<CompactHits> from(const std::vector<Match>& v) {
+        CompactHits c;
+        if (!fits(v, c.stride, c.has_ends)) return std::nullopt;
+        c.n = v.size();
+        c.pos.reserve(c.n * c.stride);
+        if (c.has_ends) c.ends.reserve(c.n * c.stride);
+        for (const Match& m : v) {
+            c.pos.insert(c.pos.end(), m.positions.begin(), m.positions.end());
+            if (c.has_ends) c.ends.insert(c.ends.end(), m.span_ends.begin(), m.span_ends.end());
+        }
+        return c;
+    }
+    void fill(size_t i, Match& m) const {
+        const auto b = pos.begin() + static_cast<std::ptrdiff_t>(i * stride);
+        m.positions.assign(b, b + static_cast<std::ptrdiff_t>(stride));
+        if (has_ends) {
+            const auto e = ends.begin() + static_cast<std::ptrdiff_t>(i * stride);
+            m.span_ends.assign(e, e + static_cast<std::ptrdiff_t>(stride));
+        } else {
+            m.span_ends.clear();
+        }
+    }
+    std::vector<Match> expand(size_t from, size_t to) const {
+        std::vector<Match> out(to > from ? to - from : 0);
+        for (size_t i = from; i < to; ++i) fill(i, out[i - from]);
+        return out;
+    }
+    void permute(const std::vector<size_t>& idx) {
+        std::vector<CorpusPos> p2, e2;
+        p2.reserve(pos.size());
+        if (has_ends) e2.reserve(ends.size());
+        for (size_t i : idx) {
+            p2.insert(p2.end(), pos.begin() + static_cast<std::ptrdiff_t>(i * stride),
+                      pos.begin() + static_cast<std::ptrdiff_t>((i + 1) * stride));
+            if (has_ends)
+                e2.insert(e2.end(), ends.begin() + static_cast<std::ptrdiff_t>(i * stride),
+                          ends.begin() + static_cast<std::ptrdiff_t>((i + 1) * stride));
+        }
+        pos = std::move(p2);
+        ends = std::move(e2);
+    }
+    size_t bytes() const { return sizeof(*this) + (pos.capacity() + ends.capacity()) * sizeof(CorpusPos); }
+};
+
+size_t match_heap_bytes(const Match& m) {
+    size_t x = (m.positions.capacity() + m.span_ends.capacity()) * sizeof(CorpusPos);
+    x += m.named_regions.size() * 96;
+    for (const auto& kv : m.named_dep_subtrees) x += 96 + kv.second.capacity() * sizeof(CorpusPos);
+    x += m.token_group_props.capacity() * sizeof(std::pair<std::string, std::string>);
+    return x;
+}
+
+size_t estimate_bytes(const MatchSet& ms) {
+    size_t b = sizeof(MatchSet) + ms.matches.capacity() * sizeof(Match)
+             + ms.parallel_matches.capacity() * sizeof(std::pair<Match, Match>);
+    for (const auto& m : ms.matches) b += match_heap_bytes(m);
+    for (const auto& pm : ms.parallel_matches) b += match_heap_bytes(pm.first) + match_heap_bytes(pm.second);
+    return b;
+}
+
+// Bytes `n` hits of a `tokens`-token query take as Match objects (+ malloc overhead).
+size_t transient_bytes(size_t n, size_t tokens) {
+    return n * (sizeof(Match) + 2 * (tokens * sizeof(CorpusPos) + 32));
+}
+
+// One stored result: the recipe (query AST + sort steps) and, once a command
+// needed every hit, the materialised hits (compact when they are plain).
+struct HitSet {
+    std::shared_ptr<Program> prog;   // keeps the AST alive (compile state is corpus-bound)
+    size_t stmt = 0;                 // the query statement in *prog
+    std::string text;                // the /query text (empty for /run statements)
+    std::string display;             // shown in results / info
+    bool allow_empty_alignment = false;
+    std::vector<std::vector<std::string>> sorts;
+    NameIndexMap nm, tnm;
+    bool total_known = false;
+    size_t total = 0;
+    bool total_exact = false;
+    bool materialised = false;
+    std::optional<CompactHits> compact;   // the hits, when plain …
+    MatchSet ms;                          // … otherwise here (parallel: parallel_matches)
+    size_t bytes = 0;
+    SessionClock::time_point last_used = SessionClock::now();
+
+    const Statement& st() const { return (*prog)[stmt]; }
+    bool parallel() const { return st().is_parallel; }
+    size_t hit_count() const {
+        if (compact) return compact->n;
+        return parallel() ? ms.parallel_matches.size() : ms.matches.size();
+    }
+    void touch() { last_used = SessionClock::now(); }
+    void know_total(size_t n, bool exact) {
+        if (total_known && total_exact && !exact) return;   // an exact total wins
+        total_known = true;
+        total = n;
+        total_exact = exact;
+    }
+    // Keep every hit (`all` holds all of them, in the set's order).
+    void keep(MatchSet&& all) {
+        const size_t n = parallel() ? all.parallel_matches.size() : all.matches.size();
+        know_total(n, true);
+        compact.reset();
+        if (!parallel()) compact = CompactHits::from(all.matches);
+        if (compact) {
+            ms = MatchSet{};
+            ms.plan_path = all.plan_path;
+            bytes = compact->bytes();
+        } else {
+            all.total_count = n;
+            all.total_exact = true;
+            all.aggregate_buckets.reset();
+            ms = std::move(all);
+            bytes = estimate_bytes(ms);
+        }
+        materialised = true;
+    }
+    void drop() {
+        compact.reset();
+        ms = MatchSet{};
+        materialised = false;
+        bytes = 0;
+    }
+    // Every hit as a MatchSet (compact sets are expanded into `tmp`).
+    const MatchSet& full_view(std::optional<MatchSet>& tmp) const {
+        if (!compact) return ms;
+        tmp.emplace();
+        tmp->matches = compact->expand(0, compact->n);
+        tmp->total_count = compact->n;
+        tmp->total_exact = true;
+        tmp->plan_path = ms.plan_path;
+        return *tmp;
+    }
+    // `sort … by fields` on the kept hits (stable; the order sort_matches_by_key gives).
+    void sort_by(const Corpus& corpus, const std::vector<std::string>& fields) {
+        if (!compact) {
+            sort_matches_by_key(corpus, ms.matches, nm, fields);
+            return;
+        }
+        std::vector<std::string> keys(compact->n);
+        Match m;
+        for (size_t i = 0; i < compact->n; ++i) {
+            compact->fill(i, m);
+            keys[i] = make_group_key(corpus, m, nm, fields);
+        }
+        std::vector<size_t> idx(compact->n);
+        std::iota(idx.begin(), idx.end(), size_t{0});
+        std::stable_sort(idx.begin(), idx.end(),
+                         [&](size_t a, size_t b) { return compare_group_keys(keys[a], keys[b]); });
+        compact->permute(idx);
+        bytes = compact->bytes();
+    }
+    // /query JSON for a page of the kept hits.
+    std::string page(const Corpus& corpus, const QueryOptions& opts, std::string_view extra) {
+        if (!compact) {
+            ms.total_count = hit_count();
+            ms.total_exact = true;
+            return to_query_result_json(corpus, display, ms, opts, 0.0, extra);
+        }
+        const size_t from = std::min(opts.offset, compact->n);
+        const size_t to = std::min(compact->n, from + opts.limit);
+        MatchSet pm;
+        pm.matches = compact->expand(from, to);
+        pm.total_count = compact->n;
+        pm.total_exact = true;
+        pm.plan_path = ms.plan_path;
+        return to_query_result_json(corpus, display, pm, opts, 0.0, extra, from);
+    }
+};
+using HitSetPtr = std::shared_ptr<HitSet>;
+
+}  // namespace
+
+HitSetTooLarge::HitSetTooLarge(const std::string& name, size_t h, size_t lim)
+    : std::runtime_error("hit set " + name + " has " + std::to_string(h)
+                         + " hits, more than this session materialises (" + std::to_string(lim) + ")"),
+      hits(h), limit(lim) {}
 
 struct ProgramSession::Impl {
-    std::map<std::string, MatchSet> named_results;
-    std::map<std::string, NameIndexMap> named_name_maps;
-    std::map<std::string, NameIndexMap> named_target_name_maps;
-    MatchSet last_ms;
-    NameIndexMap last_name_map;
-    NameIndexMap last_target_name_map;
-    bool has_last = false;
+    std::map<std::string, HitSetPtr> sets;   // "Last" and the named sets
+    size_t max_hits = 0;                     // 0 = no limit
+    ProgramSession::AdmitFn admit;
+
+    HitSetPtr find(const std::string& name) const {
+        auto it = sets.find(name);
+        return it == sets.end() ? nullptr : it->second;
+    }
+    void bind(const std::string& name, const HitSetPtr& hs) {
+        sets["Last"] = hs;
+        if (!name.empty() && name != "Last") sets[name] = hs;
+    }
+    HitSetInfo describe(const std::string& name, const HitSetPtr& hs) const {
+        HitSetInfo i;
+        i.name = name;
+        i.query = hs->display;
+        i.parallel = hs->parallel();
+        i.materialised = hs->materialised;
+        i.hits = hs->materialised ? hs->hit_count() : 0;
+        i.total_known = hs->total_known;
+        i.total = hs->total;
+        i.total_exact = hs->total_exact;
+        i.bytes = hs->materialised ? hs->bytes : 0;
+        i.sorts = hs->sorts;
+        for (const auto& [n, other] : sets)
+            if (other == hs && n != name) i.aliases.push_back(n);
+        i.idle_s = std::chrono::duration<double>(SessionClock::now() - hs->last_used).count();
+        return i;
+    }
 };
 
 ProgramSession::ProgramSession() : impl_(std::make_unique<Impl>()) {}
 ProgramSession::~ProgramSession() = default;
 ProgramSession::ProgramSession(ProgramSession&&) noexcept = default;
 ProgramSession& ProgramSession::operator=(ProgramSession&&) noexcept = default;
+
+namespace {
+
+void setup_executor(QueryExecutor& ex, const HitSet& hs, ExecProgress* progress) {
+    ex.set_include_empty_alignment_values(hs.allow_empty_alignment);
+    if (progress) ex.set_progress(progress);
+}
+
+// The exact total of a set (counted once, then known).
+size_t set_total_count(const Corpus& corpus, HitSet& hs, unsigned threads, ExecProgress* progress) {
+    hs.touch();
+    if (hs.total_known && hs.total_exact) return hs.total;
+    if (hs.materialised) { hs.know_total(hs.hit_count(), true); return hs.total; }
+    QueryExecutor ex(corpus);
+    setup_executor(ex, hs, progress);
+    const Statement& st = hs.st();
+    MatchSet ms = st.is_parallel ? ex.execute_parallel(st.query, st.target_query, 1, true)
+                                 : ex.execute(st.query, 1, true, 0, 0, 0, std::max(1u, threads));
+    hs.know_total(ms.total_count, ms.total_exact);
+    return hs.total;
+}
+
+// Every hit of `hs` in memory (the query again, then its sort steps). The total
+// is counted first when unknown, so the size limit and the admission (the Match
+// objects exist until they are compacted) are decided before anything is built.
+void materialise(const Corpus& corpus, HitSet& hs, const std::string& name, const ProgramSession::Impl& S,
+                 unsigned threads, ExecProgress* progress) {
+    hs.touch();
+    if (hs.materialised) return;
+    const size_t total = set_total_count(corpus, hs, threads, progress);
+    if (S.max_hits && total > S.max_hits) throw HitSetTooLarge(name, total, S.max_hits);
+    std::shared_ptr<void> token;
+    const Statement& st = hs.st();
+    if (S.admit) {
+        const size_t toks = std::max<size_t>(1, st.query.tokens.size() + (st.is_parallel ? st.target_query.tokens.size() : 0));
+        token = S.admit(transient_bytes(total, toks), progress);
+    }
+    QueryExecutor ex(corpus);
+    setup_executor(ex, hs, progress);
+    MatchSet ms = st.is_parallel
+        ? ex.execute_parallel(st.query, st.target_query, 0, false)
+        : ex.execute(st.query, 0, true, 0, 0, 0, std::max(1u, threads));
+    for (const auto& keys : hs.sorts)
+        sort_matches_by_key(corpus, ms.matches, hs.nm, keys);
+    hs.keep(std::move(ms));
+}
+
+// `count / freq … by fields` over a set without its hits: the aggregation sink.
+MatchSet aggregate(const Corpus& corpus, HitSet& hs, const std::vector<std::string>& fields,
+                   unsigned threads, ExecProgress* progress) {
+    hs.touch();
+    QueryExecutor ex(corpus);
+    setup_executor(ex, hs, progress);
+    MatchSet ms = ex.execute(hs.st().query, 0, true, 0, 0, 0, std::max(1u, threads), &fields);
+    if (ms.aggregate_buckets) hs.know_total(ms.aggregate_buckets->total_hits, true);
+    else if (ms.total_exact) hs.know_total(ms.total_count, true);
+    return ms;
+}
+
+}  // namespace
+
+// ── ProgramSession: hit-set API ─────────────────────────────────────────
+
+void ProgramSession::store_query(const Corpus& corpus, const std::string& name, const std::string& query_text,
+                                 const QueryOptions& opts, const MatchSet& result) {
+    (void)corpus;
+    Parser parser(query_text, ParserOptions{opts.strict_quoted_strings});
+    auto prog = std::make_shared<Program>(parser.parse());
+    size_t si = 0;
+    while (si < prog->size() && !(*prog)[si].has_query) ++si;
+    if (si == prog->size()) throw std::runtime_error("not a query: " + query_text);
+    auto hs = std::make_shared<HitSet>();
+    hs->prog = prog;
+    hs->stmt = si;
+    hs->text = query_text;
+    hs->display = query_text;
+    hs->allow_empty_alignment = opts.allow_empty_alignment;
+    const Statement& st = hs->st();
+    hs->nm = st.is_parallel ? build_name_map(st.query) : QueryExecutor::build_name_map_for_stripped_query(st.query);
+    hs->tnm = st.is_parallel ? build_name_map(st.target_query) : NameIndexMap{};
+    if (opts.total && result.total_exact) {
+        hs->know_total(result.total_count, true);
+        // the page held every hit (run_single_query pages from 0): keep them
+        if (!st.is_parallel && result.matches.size() == result.total_count && !result.aggregate_buckets) {
+            MatchSet all = result;
+            hs->keep(std::move(all));
+        }
+    }
+    impl_->bind(name, hs);
+}
+
+bool ProgramSession::has(const std::string& name) const { return impl_->find(name) != nullptr; }
+
+std::optional<HitSetInfo> ProgramSession::info(const std::string& name) const {
+    auto hs = impl_->find(name);
+    if (!hs) return std::nullopt;
+    return impl_->describe(name, hs);
+}
+
+std::vector<HitSetInfo> ProgramSession::list() const {
+    std::vector<HitSetInfo> out;
+    for (const auto& [n, hs] : impl_->sets) out.push_back(impl_->describe(n, hs));
+    return out;
+}
+
+std::string ProgramSession::query_text(const std::string& name) const {
+    auto hs = impl_->find(name);
+    return hs ? hs->text : std::string();
+}
+
+void ProgramSession::set_total(const std::string& name, size_t total, bool exact) {
+    if (auto hs = impl_->find(name)) hs->know_total(total, exact);
+}
+
+std::string ProgramSession::page_json(const Corpus& corpus, const std::string& name, const QueryOptions& opts,
+                                      ExecProgress* progress, std::string_view extra_result_fields,
+                                      std::optional<std::pair<size_t, bool>> shown_total) {
+    auto hs = impl_->find(name);
+    if (!hs) throw UnknownHitSet(name);
+    hs->touch();
+    const unsigned threads = std::max(1u, opts.threads);
+    if (!hs->materialised && (!hs->sorts.empty() || hs->parallel()))
+        materialise(corpus, *hs, name, *impl_, threads, progress);
+    // A deep page of a lazy set: materialise once (every later page is a slice)
+    // instead of running the query to offset+limit again for each page.
+    constexpr size_t kDeepPage = 10000;
+    if (!hs->materialised && opts.offset >= kDeepPage && opts.limit > 0) {
+        try {
+            materialise(corpus, *hs, name, *impl_, threads, progress);
+        } catch (const HitSetTooLarge&) {
+            // too many to keep: page by running the query (below)
+        }
+    }
+    if (hs->materialised) return hs->page(corpus, opts, extra_result_fields);
+    if (opts.limit == 0) {   // the total only (a limit-0 run would materialise every hit)
+        MatchSet ms;
+        if (opts.total && !shown_total) set_total_count(corpus, *hs, threads, progress);
+        if (hs->total_known) { ms.total_count = hs->total; ms.total_exact = hs->total_exact; }
+        else if (shown_total) { ms.total_count = shown_total->first; ms.total_exact = shown_total->second; }
+        else ms.total_exact = false;
+        return to_query_result_json(corpus, hs->display, ms, opts, 0.0, extra_result_fields);
+    }
+    // not materialised, not sorted: the page of the query itself
+    QueryExecutor ex(corpus);
+    setup_executor(ex, *hs, progress);
+    const bool count = opts.total && !(hs->total_known && hs->total_exact) && !shown_total;
+    const size_t cap = (count && opts.max_total > 0) ? opts.max_total : 0;
+    auto t0 = std::chrono::high_resolution_clock::now();
+    MatchSet ms = ex.execute(hs->st().query, opts.offset + opts.limit, count, cap, 0, 0, threads);
+    const double elapsed = std::chrono::duration<double, std::milli>(
+                               std::chrono::high_resolution_clock::now() - t0).count();
+    if (count && ms.total_exact) hs->know_total(ms.total_count, true);
+    if (hs->total_known && (opts.total || hs->total_exact)) {
+        ms.total_count = hs->total;
+        ms.total_exact = hs->total_exact;
+    } else if (shown_total) {
+        ms.total_count = std::max(shown_total->first, ms.matches.size());
+        ms.total_exact = shown_total->second;
+    }
+    return to_query_result_json(corpus, hs->display, ms, opts, elapsed, extra_result_fields);
+}
+
+size_t ProgramSession::cache_bytes() const {
+    std::set<const HitSet*> seen;
+    size_t b = 0;
+    for (const auto& kv : impl_->sets)
+        if (kv.second->materialised && seen.insert(kv.second.get()).second) b += kv.second->bytes;
+    return b;
+}
+
+size_t ProgramSession::drop_caches() {
+    size_t freed = 0;
+    std::set<const HitSet*> seen;
+    for (auto& kv : impl_->sets) {
+        HitSet& hs = *kv.second;
+        if (!hs.materialised || !seen.insert(&hs).second) continue;
+        freed += hs.bytes;
+        hs.drop();
+    }
+    return freed;
+}
+
+void ProgramSession::set_max_hits(size_t n) { impl_->max_hits = n; }
+void ProgramSession::set_admission(AdmitFn admit) { impl_->admit = std::move(admit); }
+size_t ProgramSession::size() const { return impl_->sets.size(); }
+void ProgramSession::clear() { impl_->sets.clear(); }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 // build_name_map is already inline in executor.h — just use it directly.
@@ -506,46 +915,18 @@ static void freq_build_counts(const Corpus& corpus, const MatchSet& ms,
     total_matches = ms.aggregate_buckets ? ms.aggregate_buckets->total_hits : ms.matches.size();
 }
 
-static bool session_lookup_ms(ProgramSession::Impl& session, const std::string& qn,
-                              MatchSet*& ms, NameIndexMap*& nm) {
-    if (qn == "Last") {
-        if (!session.has_last) return false;
-        ms = &session.last_ms;
-        nm = &session.last_name_map;
-        return true;
-    }
-    auto it = session.named_results.find(qn);
-    if (it == session.named_results.end()) return false;
-    ms = &it->second;
-    auto nm_it = session.named_name_maps.find(qn);
-    nm = (nm_it != session.named_name_maps.end()) ? &nm_it->second : &session.last_name_map;
-    return true;
-}
+struct FreqSrc {
+    std::string label;
+    const MatchSet* ms;
+    const NameIndexMap* nm;
+};
 
-static void emit_freq_compare_json(std::ostream& out, const Corpus& corpus, ProgramSession& ps,
+static void emit_freq_compare_json(std::ostream& out, const Corpus& corpus, const std::vector<FreqSrc>& srcs,
                                    const GroupCommand& cmd, const ProgramOptions& opts) {
     if (cmd.fields.empty()) {
         out << "{\"ok\": false, \"error\": \"freq requires 'by' clause\"}\n";
         return;
     }
-    auto& session = *ps.impl_;
-    struct Src {
-        std::string label;
-        MatchSet* ms;
-        NameIndexMap* nm;
-    };
-    std::vector<Src> srcs;
-    srcs.reserve(cmd.freq_query_names.size());
-    for (const std::string& qn : cmd.freq_query_names) {
-        MatchSet* ms = nullptr;
-        NameIndexMap* nm = nullptr;
-        if (!session_lookup_ms(session, qn, ms, nm)) {
-            out << "{\"ok\": false, \"error\": " << jstr("Unknown named query: " + qn) << "}\n";
-            return;
-        }
-        srcs.push_back({qn, ms, nm});
-    }
-
     std::vector<std::map<std::string, size_t>> counts_per(srcs.size());
     std::vector<size_t> totals(srcs.size());
     for (size_t i = 0; i < srcs.size(); ++i)
@@ -1235,12 +1616,16 @@ static void emit_keyness_json(std::ostream& out, const Corpus& corpus, const Mat
     out << "\n  ]\n}}\n";
 }
 
-static void emit_query_json(std::ostream& out, const Corpus& corpus, const std::string& query_text,
-                            const MatchSet& ms, const ProgramOptions& opts, double elapsed_ms) {
+static QueryOptions query_options_of(const ProgramOptions& opts) {
     QueryOptions qopts;
     qopts.limit = opts.limit; qopts.offset = opts.offset; qopts.max_total = opts.max_total;
     qopts.context = opts.context; qopts.total = opts.total; qopts.attrs = opts.attrs;
-    out << to_query_result_json(corpus, query_text, ms, qopts, elapsed_ms);
+    return qopts;
+}
+
+static void emit_query_json(std::ostream& out, const Corpus& corpus, const std::string& query_text,
+                            const MatchSet& ms, const ProgramOptions& opts, double elapsed_ms) {
+    out << to_query_result_json(corpus, query_text, ms, query_options_of(opts), elapsed_ms);
 }
 
 static void emit_show_values_json(std::ostream& out, const Corpus& corpus, const std::string& attr_name,
@@ -1294,12 +1679,15 @@ static void emit_show_info_json(std::ostream& out, const Corpus& corpus) {
     out << to_info_json(corpus);
 }
 
-static void emit_show_named_json(std::ostream& out, const ProgramSession::Impl& session) {
+static void emit_show_named_json(std::ostream& out, const ProgramSession& ps) {
     out << "{\"ok\": true, \"operation\": \"show_named\", \"result\": [";
     size_t idx = 0;
-    for (const auto& [name, ms] : session.named_results) {
+    for (const HitSetInfo& i : ps.list()) {
         if (idx++ > 0) out << ", ";
-        out << "{\"name\": " << jstr(name) << ", \"matches\": " << ms.matches.size() << "}";
+        const size_t n = i.materialised ? i.hits : (i.total_known ? i.total : 0);
+        out << "{\"name\": " << jstr(i.name) << ", \"matches\": " << n
+            << ", \"materialised\": " << (i.materialised ? "true" : "false")
+            << ", \"total_known\": " << (i.total_known ? "true" : "false") << "}";
     }
     out << "]}\n";
 }
@@ -1311,36 +1699,38 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
     auto& S = *ps.impl_;
 
     Parser parser(cql, ParserOptions{opts.strict_quoted_strings});
-    Program prog = parser.parse();
+    auto prog = std::make_shared<Program>(parser.parse());
+    const unsigned threads = std::max(1u, opts.threads);
 
     QueryExecutor executor(corpus);
     executor.set_include_empty_alignment_values(opts.allow_empty_alignment);
+    if (opts.progress) executor.set_progress(opts.progress);
     std::ostringstream out;
 
-    for (size_t si = 0; si < prog.size(); ++si) {
-        auto& stmt = prog[si];
-        bool next_is_command = (si + 1 < prog.size() && prog[si + 1].has_command);
+    // `q; count by f` computes the counts while the query runs (aggregation
+    // sink): that result serves only the command right after its query; the
+    // stored hit set keeps no hits (a later command re-derives them).
+    std::optional<MatchSet> immediate;
+    size_t immediate_si = 0;
+
+    for (size_t si = 0; si < prog->size(); ++si) {
+        auto& stmt = (*prog)[si];
+        bool next_is_command = (si + 1 < prog->size() && (*prog)[si + 1].has_command);
 
         if (stmt.has_query) {
-            size_t max_m = 0;
-            bool count_t = false;
-            size_t max_total_cap = 0;
-            if (!next_is_command) {
-                // See query_main.cpp: do not page-limit named assignments (stored for freq/count).
-                if (!stmt.name.empty()) {
-                    max_m = 0;
-                    count_t = opts.total;
-                    max_total_cap = (opts.total && opts.max_total > 0) ? opts.max_total : 0;
-                } else {
-                    max_m = opts.offset + opts.limit;
-                    count_t = opts.total;
-                    max_total_cap = (opts.total && opts.max_total > 0) ? opts.max_total : 0;
-                }
-            }
+            immediate.reset();
+            auto hs = std::make_shared<HitSet>();
+            hs->prog = prog;
+            hs->stmt = si;
+            hs->display = cql;
+            hs->allow_empty_alignment = opts.allow_empty_alignment;
+            hs->nm = stmt.is_parallel ? build_name_map(stmt.query)
+                                      : QueryExecutor::build_name_map_for_stripped_query(stmt.query);
+            hs->tnm = stmt.is_parallel ? build_name_map(stmt.target_query) : NameIndexMap{};
 
             const std::vector<std::string>* aggregate_by = nullptr;
             if (next_is_command && !stmt.is_parallel) {
-                const GroupCommand& ncmd = prog[si + 1].command;
+                const GroupCommand& ncmd = (*prog)[si + 1].command;
                 if (!ncmd.fields.empty()
                     && (ncmd.type == CommandType::COUNT || ncmd.type == CommandType::GROUP
                         || ncmd.type == CommandType::FREQ)
@@ -1348,55 +1738,48 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                     aggregate_by = &ncmd.fields;
             }
 
-            auto t0 = std::chrono::high_resolution_clock::now();
-            if (stmt.is_parallel)
-                S.last_ms = executor.execute_parallel(stmt.query, stmt.target_query, max_m, count_t);
-            else
-                S.last_ms = executor.execute(stmt.query, max_m, count_t, max_total_cap, 0, 0,
-                                             std::max(1u, opts.threads),
-                                             aggregate_by);
-            auto t1 = std::chrono::high_resolution_clock::now();
-            double query_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-
-            S.has_last = true;
-            S.last_name_map = stmt.is_parallel
-                ? build_name_map(stmt.query)
-                : QueryExecutor::build_name_map_for_stripped_query(stmt.query);
-            S.last_target_name_map =
-                    stmt.is_parallel ? build_name_map(stmt.target_query) : NameIndexMap{};
-            S.named_results["Last"] = S.last_ms;
-            S.named_name_maps["Last"] = S.last_name_map;
-            S.named_target_name_maps["Last"] = S.last_target_name_map;
-            if (!stmt.name.empty()) {
-                S.named_results[stmt.name] = S.last_ms;
-                S.named_name_maps[stmt.name] = S.last_name_map;
-                S.named_target_name_maps[stmt.name] = S.last_target_name_map;
-            }
-
-            if (!next_is_command) {
+            if (aggregate_by) {
+                // counted while the query runs; no hits kept
+                MatchSet res = executor.execute(stmt.query, 0, true, 0, 0, 0, threads, aggregate_by);
+                if (res.aggregate_buckets) hs->know_total(res.aggregate_buckets->total_hits, true);
+                else if (res.total_exact) hs->know_total(res.total_count, true);
+                immediate = std::move(res);
+                immediate_si = si;
+            } else if (!next_is_command) {
+                // the page (a named query also gets its total); the hits are
+                // materialised only when a command needs them all
+                const bool count_t = opts.total || !stmt.name.empty();
+                const size_t max_total_cap = (opts.total && opts.max_total > 0) ? opts.max_total : 0;
+                const size_t max_m = opts.offset + opts.limit;
+                auto t0 = std::chrono::high_resolution_clock::now();
+                MatchSet res = stmt.is_parallel
+                    ? executor.execute_parallel(stmt.query, stmt.target_query, max_m, count_t)
+                    : executor.execute(stmt.query, max_m, count_t, max_total_cap, 0, 0, threads);
+                auto t1 = std::chrono::high_resolution_clock::now();
+                double query_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                const size_t n = stmt.is_parallel ? res.parallel_matches.size() : res.matches.size();
+                if (count_t && res.total_exact) hs->know_total(res.total_count, true);
                 out.str(""); out.clear();
-                emit_query_json(out, corpus, cql, S.last_ms, opts, query_ms);
+                emit_query_json(out, corpus, cql, res, opts, query_ms);
+                if (count_t && res.total_exact && n == res.total_count && max_m > 0)
+                    hs->keep(std::move(res));   // the page held every hit
             }
+            // else: the next command materialises the set (materialise: size
+            // limit, admission) or counts it
+            S.bind(stmt.name, hs);
         }
 
         if (stmt.has_command) {
             // Commands that don't need a MatchSet
             if (stmt.command.type == CommandType::DROP) {
-                if (stmt.command.query_name == "all") {
-                    S.named_results.clear();
-                    S.named_name_maps.clear();
-                    S.named_target_name_maps.clear();
-                }  else {
-                    S.named_results.erase(stmt.command.query_name);
-                    S.named_name_maps.erase(stmt.command.query_name);
-                    S.named_target_name_maps.erase(stmt.command.query_name);
-                }
+                if (stmt.command.query_name == "all") S.sets.clear();
+                else S.sets.erase(stmt.command.query_name);
                 out.str(""); out.clear();
                 out << "{\"ok\": true, \"operation\": \"drop\"}\n";
                 continue;
             }
             if (stmt.command.type == CommandType::SHOW_NAMED) {
-                out.str(""); out.clear(); emit_show_named_json(out, S); continue;
+                out.str(""); out.clear(); emit_show_named_json(out, ps); continue;
             }
             if (stmt.command.type == CommandType::SHOW_ATTRS) {
                 out.str(""); out.clear(); emit_show_attrs_json(out, corpus); continue;
@@ -1481,102 +1864,125 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                 out << "}}\n";
                 continue;
             }
-            if (stmt.command.type == CommandType::SIZE && stmt.command.query_name.empty() && !S.has_last) {
+            if (stmt.command.type == CommandType::SIZE && stmt.command.query_name.empty() && !S.find("Last")) {
                 out.str(""); out.clear(); emit_show_info_json(out, corpus); continue;
             }
 
-            // Commands that need a MatchSet
-            MatchSet* ms_to_use = nullptr;
-            const NameIndexMap* nm_to_use = nullptr;
-            if (!stmt.command.query_name.empty()) {
-                auto it = S.named_results.find(stmt.command.query_name);
-                if (it != S.named_results.end()) {
-                    ms_to_use = &it->second;
-                    auto nm_it = S.named_name_maps.find(stmt.command.query_name);
-                    nm_to_use = (nm_it != S.named_name_maps.end()) ? &nm_it->second : &S.last_name_map;
-                } else if (S.has_last) {
-                    ms_to_use = &S.last_ms; nm_to_use = &S.last_name_map;
-                }
-            } else if (S.has_last) {
-                ms_to_use = &S.last_ms; nm_to_use = &S.last_name_map;
-            }
-
-            if (!ms_to_use) {
+            // Commands on a hit set: the aggregated result of the query just before
+            // (built for this command), else the named set (unknown name → Last).
+            const bool use_immediate = immediate && immediate_si + 1 == si;
+            const std::string& qn = stmt.command.query_name;
+            HitSetPtr hs = qn.empty() ? nullptr : S.find(qn);
+            std::string set_name = qn;
+            if (!hs) { hs = S.find("Last"); set_name = "Last"; }
+            if (!hs) {
                 out.str(""); out.clear();
                 out << "{\"ok\": false, \"error\": \"No query to operate on\"}\n";
                 continue;
             }
-
-            const NameIndexMap* nm_tgt_parallel = nullptr;
-            if (!ms_to_use->parallel_matches.empty()) {
-                if (!stmt.command.query_name.empty()) {
-                    auto tit = S.named_target_name_maps.find(stmt.command.query_name);
-                    nm_tgt_parallel =
-                            (tit != S.named_target_name_maps.end()) ? &tit->second : nullptr;
-                } else {
-                    nm_tgt_parallel = &S.last_target_name_map;
-                }
-            }
+            hs->touch();
+            std::optional<MatchSet> expanded;   // a compact set's hits as Match objects, for this command
+            auto full = [&]() -> const MatchSet& {
+                materialise(corpus, *hs, set_name, S, threads, opts.progress);
+                return hs->full_view(expanded);
+            };
+            // what `count / freq … by` counts over: the immediate aggregation, the
+            // materialised hits, or an aggregation run now
+            std::optional<MatchSet> agg_now;
+            // (the sink also for a materialised set: it runs partitioned (P4.1) and
+            // reads ids, faster than grouping a million Match objects; order-free)
+            auto counting = [&]() -> const MatchSet& {
+                if (use_immediate) return *immediate;
+                if (hs->parallel() || stmt.command.fields.empty()) return full();
+                agg_now = aggregate(corpus, *hs, stmt.command.fields, threads, opts.progress);
+                return *agg_now;
+            };
+            const NameIndexMap& nm_to_use = hs->nm;
+            const NameIndexMap* nm_tgt_parallel = hs->parallel() ? &hs->tnm : nullptr;
 
             out.str(""); out.clear();
             switch (stmt.command.type) {
                 case CommandType::COUNT:
                 case CommandType::GROUP:
-                    emit_count_json(out, corpus, *ms_to_use, stmt.command, *nm_to_use, opts.group_limit);
+                    emit_count_json(out, corpus, counting(), stmt.command, nm_to_use, opts.group_limit);
                     break;
                 case CommandType::STATS:
-                    emit_stats_json(out, corpus, *ms_to_use, stmt.command, *nm_to_use);
+                    emit_stats_json(out, corpus, full(), stmt.command, nm_to_use);
                     break;
                 case CommandType::FREQ:
                     if (stmt.command.freq_query_names.size() >= 2) {
-                        emit_freq_compare_json(out, corpus, ps, stmt.command, opts);
+                        std::vector<FreqSrc> srcs;
+                        std::vector<HitSetPtr> keep;
+                        std::vector<std::unique_ptr<std::optional<MatchSet>>> tmps;
+                        std::string missing;
+                        for (const std::string& fqn : stmt.command.freq_query_names) {
+                            HitSetPtr f = S.find(fqn);
+                            if (!f) { missing = fqn; break; }
+                            materialise(corpus, *f, fqn, S, threads, opts.progress);
+                            keep.push_back(f);
+                            tmps.push_back(std::make_unique<std::optional<MatchSet>>());
+                            srcs.push_back({fqn, &f->full_view(*tmps.back()), &f->nm});
+                        }
+                        if (!missing.empty())
+                            out << "{\"ok\": false, \"error\": " << jstr("Unknown named query: " + missing) << "}\n";
+                        else
+                            emit_freq_compare_json(out, corpus, srcs, stmt.command, opts);
                     } else {
-                        const std::string source_query_name =
-                            !stmt.command.query_name.empty() ? stmt.command.query_name : "Last";
-                        emit_freq_json(out, corpus, *ms_to_use, stmt.command, opts, *nm_to_use, source_query_name);
+                        const std::string source_query_name = !qn.empty() ? qn : "Last";
+                        emit_freq_json(out, corpus, counting(), stmt.command, opts, nm_to_use, source_query_name);
                     }
                     break;
-                case CommandType::SIZE:
-                    emit_size_json(out, *ms_to_use);
+                case CommandType::SIZE: {
+                    size_t n = 0;
+                    if (use_immediate && immediate->aggregate_buckets) n = immediate->aggregate_buckets->total_hits;
+                    else n = set_total_count(corpus, *hs, threads, opts.progress);
+                    out << "{\"ok\": true, \"operation\": \"size\", \"last_command\": \"size\", \"result\": "
+                        << n << "}\n";
                     break;
+                }
                 case CommandType::TABULATE:
-                    emit_tabulate_json(out, corpus, *ms_to_use, stmt.command, *nm_to_use);
+                    emit_tabulate_json(out, corpus, full(), stmt.command, nm_to_use);
                     break;
                 case CommandType::DESCRIBE:
-                    emit_describe_json(out, corpus, *ms_to_use, stmt.command, *nm_to_use);
+                    emit_describe_json(out, corpus, full(), stmt.command, nm_to_use);
                     break;
                 case CommandType::RAW:
-                    emit_raw_json(out, corpus, *ms_to_use);
+                    emit_raw_json(out, corpus, full());
                     break;
                 case CommandType::COLL:
-                    emit_coll_json(out, corpus, *ms_to_use, stmt.command, opts, *nm_to_use,
-                                   nm_tgt_parallel);
+                    emit_coll_json(out, corpus, full(), stmt.command, opts, nm_to_use, nm_tgt_parallel);
                     break;
                 case CommandType::DCOLL:
-                    emit_dcoll_json(out, corpus, *ms_to_use, stmt.command, *nm_to_use,
-                                    nm_tgt_parallel, opts);
+                    emit_dcoll_json(out, corpus, full(), stmt.command, nm_to_use, nm_tgt_parallel, opts);
                     break;
                 case CommandType::KEYNESS: {
                     const MatchSet* ref_ms = nullptr;
+                    HitSetPtr ref;
+                    std::optional<MatchSet> ref_tmp;
                     if (!stmt.command.ref_query_name.empty()) {
-                        auto rit = S.named_results.find(stmt.command.ref_query_name);
-                        if (rit == S.named_results.end()) {
-                            out.str(""); out.clear();
+                        ref = S.find(stmt.command.ref_query_name);
+                        if (!ref) {
                             out << "{\"ok\": false, \"error\": \"Unknown reference query: "
                                 << stmt.command.ref_query_name << "\"}\n";
                             break;
                         }
-                        ref_ms = &rit->second;
+                        materialise(corpus, *ref, stmt.command.ref_query_name, S, threads, opts.progress);
+                        ref_ms = &ref->full_view(ref_tmp);
                     }
-                    emit_keyness_json(out, corpus, *ms_to_use, stmt.command, opts, ref_ms);
+                    emit_keyness_json(out, corpus, full(), stmt.command, opts, ref_ms);
                     break;
                 }
                 case CommandType::SORT: {
+                    materialise(corpus, *hs, set_name, S, threads, opts.progress);
                     try {
-                        if (!stmt.command.fields.empty())   // P7.7: one key per hit
-                            sort_matches_by_key(corpus, ms_to_use->matches, *nm_to_use,
-                                                stmt.command.fields);
-                        emit_query_json(out, corpus, "(sorted)", *ms_to_use, opts, 0);
+                        if (!stmt.command.fields.empty()) {   // P7.7: one key per hit
+                            hs->sort_by(corpus, stmt.command.fields);
+                            hs->sorts.push_back(stmt.command.fields);
+                        }
+                        const std::string saved = hs->display;
+                        hs->display = "(sorted)";
+                        out << hs->page(corpus, query_options_of(opts), {});
+                        hs->display = saved;
                     } catch (const std::exception& e) {
                         out << "{\"ok\": false, \"error\": " << jstr(e.what()) << "}\n";
                     }
@@ -1586,6 +1992,7 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                     out << "{\"ok\": true, \"operation\": \"unknown\"}\n";
                     break;
             }
+            if (use_immediate) immediate.reset();
         }
     }
 

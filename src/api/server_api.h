@@ -8,8 +8,9 @@
 // call the same code, so every transport answers with the same JSON.
 //
 // Thread safety: handle() may be called from any number of threads at once.
-// Queries run concurrently on the shared Corpus; /run is serialised (the
-// named-query session is shared state).
+// Queries run concurrently on the shared Corpus. /run without a session_id is
+// serialised (one shared named-query session); requests on one client session
+// (P6.1, sessions.h) are serialised per session, different sessions run at once.
 //
 // Lifetime: the Corpus must outlive the ServerApi. Destroying a ServerApi
 // cancels its background counts and joins their workers; it must not race with
@@ -17,6 +18,7 @@
 
 #include "api/query_jobs.h"
 #include "api/query_json.h"
+#include "api/sessions.h"
 #include "corpus/corpus.h"
 
 #include <atomic>
@@ -42,6 +44,8 @@ struct ServerConfig {
     /// Default per-request time limit for /query in ms (0 = none); a request can
     /// set its own with "timeout_ms". An expired query answers 408.
     size_t query_timeout_ms = 0;
+    /// P6.1 client sessions (POST /session, "session_id" on /run and /query).
+    SessionConfig sessions;
     /// Raw JSON members added to /health, /version and /info "server" (no braces,
     /// no leading comma), e.g. `"embedded_in": "fqs 0.4"`.
     std::string extra_server_fields;
@@ -94,6 +98,12 @@ private:
     ServerResponse context(const std::map<std::string, std::string>& params);
     ServerResponse run(const std::string& body);
     ServerResponse query(const std::string& body);
+    ServerResponse query_from(const QueryOptions& opts, bool total_async, size_t timeout_ms, ExecProgress* progress,
+                              const std::string& from, SessionManager::Lease& lease);
+    ServerResponse session_create(const std::string& body);
+    ServerResponse session_info(const std::map<std::string, std::string>& params, const std::string& body);
+    ServerResponse session_close(const std::map<std::string, std::string>& params, const std::string& body);
+    ServerResponse list_sessions();
     ServerResponse status(const std::map<std::string, std::string>& params);
     ServerResponse cancel(const std::map<std::string, std::string>& params, const std::string& body);
     ServerResponse list_jobs();
@@ -109,7 +119,8 @@ private:
     ServerConfig cfg_;
     QueryJobManager jobs_;
     std::mutex program_mu_;
-    ProgramSession program_session_;
+    ProgramSession program_session_;       // /run without a session_id (shared, unlimited)
+    SessionManager sessions_;
     std::atomic<size_t> in_flight_{0};
     std::atomic<int64_t> last_request_ns_;
     std::chrono::system_clock::time_point started_;

@@ -44,7 +44,12 @@ int main(int argc, char* argv[]) {
                   << "    --debug-total-delay MS  testing: reveal every total gradually over MS\n"
                   << "  --query-timeout MS          default /query time limit (0 = none; per request \"timeout_ms\")\n"
                   << "  --query-threads N           count a total / count by over N position ranges in parallel\n"
-                  << "                              (default 1: one thread per query)\n";
+                  << "                              (default 1: one thread per query)\n"
+                  << "  Client sessions (POST /session, \"session_id\" on /run and /query):\n"
+                  << "    --session-ttl SEC       close a session unused for SEC (default 1800)\n"
+                  << "    --max-sessions N        open sessions (default 256; the least recently used idle one makes room)\n"
+                  << "    --session-memory MB     materialised hits over all sessions (default 2048; 0 = no limit)\n"
+                  << "    --session-max-hits N    hits one stored set may materialise (default 5000000; 0 = no limit)\n";
         return 1;
     }
     std::string corpus_dir = argv[1];
@@ -55,6 +60,7 @@ int main(int argc, char* argv[]) {
     QueryJobConfig job_cfg;
     size_t query_timeout_ms = 0;
     unsigned query_threads = 1;
+    SessionConfig sess_cfg;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
         auto num_arg = [&](long long& out) -> bool {
@@ -68,7 +74,8 @@ int main(int argc, char* argv[]) {
         long long v = 0;
         if (a == "--total-workers" || a == "--result-cache" || a == "--result-ttl"
             || a == "--abandon-after" || a == "--debug-total-delay" || a == "--query-timeout"
-            || a == "--query-threads") {
+            || a == "--query-threads" || a == "--session-ttl" || a == "--max-sessions"
+            || a == "--session-memory" || a == "--session-memory-bytes" || a == "--session-max-hits") {
             if (!num_arg(v) || v < 0) return 1;
             if (a == "--total-workers") job_cfg.workers = static_cast<unsigned>(std::max(1LL, v));
             else if (a == "--result-cache") job_cfg.max_entries = static_cast<size_t>(std::max(1LL, v));
@@ -76,6 +83,11 @@ int main(int argc, char* argv[]) {
             else if (a == "--abandon-after") job_cfg.abandon = std::chrono::seconds(v);
             else if (a == "--query-timeout") query_timeout_ms = static_cast<size_t>(v);
             else if (a == "--query-threads") query_threads = static_cast<unsigned>(std::max(1LL, v));
+            else if (a == "--session-ttl") sess_cfg.ttl = std::chrono::seconds(std::max(1LL, v));
+            else if (a == "--max-sessions") sess_cfg.max_sessions = static_cast<size_t>(std::max(1LL, v));
+            else if (a == "--session-memory") sess_cfg.memory_budget = static_cast<size_t>(v) << 20;
+            else if (a == "--session-memory-bytes") sess_cfg.memory_budget = static_cast<size_t>(v);   // tests
+            else if (a == "--session-max-hits") sess_cfg.max_hits = static_cast<size_t>(v);
             else job_cfg.debug_delay = std::chrono::milliseconds(v);
             continue;
         }
@@ -117,6 +129,7 @@ int main(int argc, char* argv[]) {
     cfg.preload = preload;
     cfg.query_timeout_ms = query_timeout_ms;
     cfg.query_threads = query_threads;
+    cfg.sessions = sess_cfg;
     ServerApi api(corpus, cfg);
 
     httplib::Server svr;

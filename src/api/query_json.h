@@ -5,7 +5,10 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <functional>
 #include <memory>
+#include <optional>
+#include <stdexcept>
 
 namespace pando {
 
@@ -41,12 +44,15 @@ std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
 
 // Build JSON string for query result (same format as pando --json).
 // `extra_result_fields`: raw JSON members appended inside "result" (e.g. `"job": {...}`).
+// `matches_offset`: ms.matches[0] is hit number matches_offset (a page slice of a
+// larger set); the page is [opts.offset, +opts.limit) of the whole set.
 std::string to_query_result_json(const Corpus& corpus,
                                  const std::string& query_text,
                                  const MatchSet& ms,
                                  const QueryOptions& opts,
                                  double elapsed_ms,
-                                 std::string_view extra_result_fields = {});
+                                 std::string_view extra_result_fields = {},
+                                 size_t matches_offset = 0);
 
 // Build JSON string for corpus info (CLI `show info`, /info, FFI). `operation` is the JSON
 // "operation" field ("info" vs "show_info" for CLI).
@@ -87,6 +93,47 @@ std::string to_regions_json(const Corpus& corpus, const std::string& type_name, 
 // Maintains session state (named queries, named tokens) across calls on the same
 // ProgramSession object, enabling cross-query workflows.
 
+//
+// P6.1 hit sets: every stored result (`Name = …;`, `Last`, a /query deposited in
+// a server session) is a *recipe* — the parsed query plus the `sort` steps applied
+// to it — and a *cache*: the materialised hits, built the first time a command
+// needs every hit (sort, coll, tabulate, a page of a sorted set, …) and kept until
+// dropped (drop_caches, memory pressure). Plain hits (no named regions / subtrees
+// / token groups) are kept compact: the token positions only, 8-16 bytes per token
+// instead of ~350 bytes per Match. `count / group / freq … by` on a set
+// that is not materialised runs the aggregation sink instead (no hits stored), and
+// a known total is kept apart from the hits, so `size` does not re-count.
+// `Last` and the name of the same query share one hit set.
+//
+// Not thread-safe: one call at a time per session (the server locks per session).
+
+/// A command needed the hits of a set larger than the session's max_hits.
+struct HitSetTooLarge : std::runtime_error {
+    size_t hits = 0;
+    size_t limit = 0;
+    HitSetTooLarge(const std::string& name, size_t h, size_t lim);
+};
+
+/// A command or page named a hit set the session does not have.
+struct UnknownHitSet : std::runtime_error {
+    explicit UnknownHitSet(const std::string& name) : std::runtime_error("unknown hit set: " + name) {}
+};
+
+struct HitSetInfo {
+    std::string name;
+    std::string query;            // the query text (a /run program shows its statement's program)
+    bool parallel = false;
+    bool materialised = false;    // the hits are in memory
+    size_t hits = 0;              // materialised hits (0 when not materialised)
+    bool total_known = false;
+    size_t total = 0;
+    bool total_exact = false;
+    size_t bytes = 0;             // estimated memory of the materialised hits
+    std::vector<std::vector<std::string>> sorts;   // `sort … by` steps, in order
+    std::vector<std::string> aliases;              // other names of the same set ("Last")
+    double idle_s = 0;            // seconds since last use
+};
+
 struct ProgramSession {
     struct Impl;
     std::unique_ptr<Impl> impl_;
@@ -94,6 +141,47 @@ struct ProgramSession {
     ~ProgramSession();
     ProgramSession(ProgramSession&&) noexcept;
     ProgramSession& operator=(ProgramSession&&) noexcept;
+
+    /// Store a /query result as the hit set `name` (empty = only `Last`) and as
+    /// `Last`. `query_text` is parsed again (ParserOptions from `opts`) and kept for
+    /// re-execution; `result`'s hits are kept only when they are all of them, its
+    /// total when it was counted exactly. Throws on a parse error.
+    void store_query(const Corpus& corpus, const std::string& name, const std::string& query_text,
+                     const QueryOptions& opts, const MatchSet& result);
+    bool has(const std::string& name) const;
+    std::optional<HitSetInfo> info(const std::string& name) const;
+    /// Every name, sorted (a set with two names is listed under each).
+    std::vector<HitSetInfo> list() const;
+    /// The /query text a stored set was deposited with (empty for /run programs:
+    /// no single query text to hand to a background count).
+    std::string query_text(const std::string& name) const;
+    /// Record a total counted elsewhere (a background job over the same query).
+    void set_total(const std::string& name, size_t total, bool exact);
+    /// /query JSON for the page [opts.offset, +opts.limit) of stored set `name`:
+    /// from the materialised hits when there are any or the set is sorted
+    /// (materialising it), otherwise the query runs again for just that page.
+    /// With opts.total and no known total, the total is counted (and kept).
+    /// `shown_total`: when the set's total is not known, show this (count so far,
+    /// exact?) instead — a background count still running; nothing is counted.
+    /// Throws UnknownHitSet, HitSetTooLarge, QueryCancelled.
+    std::string page_json(const Corpus& corpus, const std::string& name, const QueryOptions& opts,
+                          ExecProgress* progress = nullptr, std::string_view extra_result_fields = {},
+                          std::optional<std::pair<size_t, bool>> shown_total = std::nullopt);
+    /// Materialised bytes over all sets (estimate).
+    size_t cache_bytes() const;
+    /// Drop the materialised hits of every set (they are rebuilt on demand);
+    /// returns the bytes freed. Totals and sort steps are kept.
+    size_t drop_caches();
+    /// Refuse to materialise more than this many hits for one set (0 = no limit).
+    void set_max_hits(size_t n);
+    /// Admission for a materialisation: called with the estimated bytes the hits
+    /// take while they are built (as Match objects, before they are compacted);
+    /// the returned token is held until then. May block; may throw (QueryCancelled)
+    /// to refuse. Unset = no admission control.
+    using AdmitFn = std::function<std::shared_ptr<void>(size_t bytes, ExecProgress* progress)>;
+    void set_admission(AdmitFn admit);
+    size_t size() const;          // number of names
+    void clear();
 };
 
 struct ProgramOptions {
@@ -115,6 +203,9 @@ struct ProgramOptions {
     std::vector<std::string> coll_measures;
     /// P4.1: totals and `count by` over this many position ranges in parallel.
     unsigned threads = 1;
+    /// Progress / cancel block for every query the program runs (nullptr = none);
+    /// a set `cancel` stops the program with QueryCancelled.
+    ExecProgress* progress = nullptr;
 };
 
 // Run a full CQL program and return the JSON output.

@@ -16,11 +16,13 @@ which keep corpora open, route requests to them and add their own protocols on t
 ## Routes
 
 These are the same as for `pando-server`: `GET /health`, `/version`, `/info`, `/values/<attr>`,
-`/regions/<struct>`, `/context`, `/status`, `/jobs`, and `POST /query`, `/run`,
-`/cancel`. An unknown path answers 404 and a known path with the wrong method answers 405. Both are
-JSON `{"ok": false, "error": …}`. `/query` accepts `"timeout_ms"`. When it expires the
+`/regions/<struct>`, `/context`, `/status`, `/jobs`, `/session`, `/sessions`, and `POST /query`,
+`/run`, `/cancel`, `/session`, `/session/close` (client sessions: see "Sessions" in the CLI
+reference). An unknown path answers 404 and a known path with the wrong method answers 405. Both are
+JSON `{"ok": false, "error": …}`. `/query` and `/run` accept `"timeout_ms"`. When it expires the
 answer is 408 `{"ok": false, "timed_out": true}`. The time limit covers the page and a
-synchronous count, not background totals.
+synchronous count (for `/run`, the whole program, including the wait for its session), not
+background totals.
 
 ## C ABI
 
@@ -48,7 +50,8 @@ pando_server_close(s);
 Open options (JSON, all optional): `preload`, `total_workers`, `result_cache`,
 `result_ttl`, `abandon_after`, `query_timeout_ms`, `query_threads` (position ranges
 counted in parallel per counting query, default 1 — see the CLI reference),
-`threads` (reported only),
+`threads` (reported only), `session_ttl`, `max_sessions`, `session_memory_mb`,
+`session_max_hits` (client sessions, defaults 1800 s, 256, 2048 MB, 5000000),
 `embedded_in` (reported in `/health`, `/version` and `/info` `server`), and
 `debug_total_delay_ms` (for testing).
 
@@ -58,8 +61,9 @@ features. A host can report it for each engine without opening a corpus.
 ## Contract for hosts
 
 **Threads.** A handle can serve any number of threads at once. Queries run
-concurrently on the shared corpus. `/run` is serialised inside the handle, because the named-query
-session is shared state. With `query_threads` > 1 a counting request also runs
+concurrently on the shared corpus. `/run` without a `session_id` is serialised inside the handle,
+because that named-query session is shared state; requests on one client session are serialised
+per session, different sessions run concurrently. With `query_threads` > 1 a counting request also runs
 that many worker threads of its own while it lasts. `pando_server_request` blocks, so call it from a blocking pool
 (in tokio, use `spawn_blocking`).
 
@@ -72,7 +76,11 @@ counts that are queued or running. `pando_server_idle_seconds(s)` is the time si
 request. Keep a reference count per handle, and close a handle only when no request holds it
 and `busy() == 0`. `close` cancels running counts and joins their workers. Job ids
 belong to a handle, so a host that serves several corpora must include the corpus in
-the job id or in the `/status` route.
+the job id or in the `/status` route. The same holds for client sessions: they live in
+the handle (one corpus), and closing an idle handle closes its sessions — clients then
+get 404 `unknown_session` and start again, which the session contract allows. A host
+that evicts idle corpora may want to keep a handle whose `GET /sessions` still lists
+recently used sessions.
 
 **What "warm" means for pando.** Opening is cheap: the index is `mmap`ed lazily, and
 on ud_demo (38 M tokens) a whole CLI run with a warm page cache takes about 4 ms. The

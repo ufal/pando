@@ -76,6 +76,11 @@ PANDO_API const char* pando_server_build_json(void);
  *     "abandon_after": SEC      cancel a count nobody polled for SEC (default 120; 0 = never)
  *     "query_timeout_ms": MS    default /query time limit (0 = none; per request "timeout_ms")
  *     "threads": N              reported in /health ("threads")
+ *     "query_threads": N        count a total / count by over N position ranges in parallel (default 1)
+ *     "session_ttl": SEC        close a client session unused for SEC (default 1800)
+ *     "max_sessions": N         open client sessions (default 256)
+ *     "session_memory_mb": MB   materialised hits over all sessions (default 2048; 0 = no limit)
+ *     "session_max_hits": N     hits one stored set may materialise (default 5000000; 0 = no limit)
  *     "embedded_in": "name"     reported in /health, /version, /info server ("embedded_in")
  *     "debug_total_delay_ms": MS  testing: reveal every background total gradually over MS
  *   error_out: NULL or where to store a malloc'd error message on failure

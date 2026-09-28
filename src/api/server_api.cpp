@@ -63,6 +63,77 @@ std::string url_decode(std::string_view s) {
     return out;
 }
 
+// A top-level member first in a JSON object body ("{…" → "{"k": v, …").
+std::string with_member(std::string body, const std::string& member) {
+    const size_t brace = body.find('{');
+    if (brace == std::string::npos) return body;
+    body.insert(brace + 1, member + ", ");
+    return body;
+}
+
+std::string session_member(const std::string& id, const std::string& set) {
+    std::string m = "\"session_id\": " + jstr(id);
+    if (!set.empty()) m += ", \"hitset\": " + jstr(set);
+    return m;
+}
+
+ServerResponse unknown_session(const std::string& id) {
+    return json_error(404, "unknown session (expired, closed or never created): " + id,
+                      "\"unknown_session\":true,\"session_id\":" + jstr(id));
+}
+
+ServerResponse unknown_hitset(const std::string& id, const std::string& name) {
+    return json_error(404, "unknown hit set " + name + " in session " + id,
+                      "\"unknown_hitset\":true,\"session_id\":" + jstr(id) + ",\"hitset\":" + jstr(name));
+}
+
+ServerResponse too_large(const HitSetTooLarge& e) {
+    return json_error(413, e.what(), "\"too_large\":true,\"hits\":" + std::to_string(e.hits)
+                      + ",\"max_hits\":" + std::to_string(e.limit));
+}
+
+bool valid_set_name(const std::string& n) {   // a CQL query name
+    if (n.empty() || !(std::isalpha(static_cast<unsigned char>(n[0])) || n[0] == '_')) return false;
+    for (char c : n)
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) return false;
+    return true;
+}
+
+std::string json_str_array(const std::vector<std::string>& v) {
+    std::string o = "[";
+    for (size_t i = 0; i < v.size(); ++i) o += (i ? ", " : "") + jstr(v[i]);
+    return o + "]";
+}
+
+std::string fmt_s(double v) {
+    char b[32];
+    std::snprintf(b, sizeof b, "%.1f", v);
+    return b;
+}
+
+std::string hitset_json(const HitSetInfo& i) {
+    std::string sorts = "[";
+    for (size_t k = 0; k < i.sorts.size(); ++k) sorts += (k ? ", " : "") + json_str_array(i.sorts[k]);
+    sorts += "]";
+    return "{\"name\": " + jstr(i.name) + ", \"query\": " + jstr(i.query)
+        + ", \"materialised\": " + (i.materialised ? "true" : "false")
+        + ", \"hits\": " + std::to_string(i.hits)
+        + ", \"total\": " + (i.total_known ? std::to_string(i.total) : std::string("null"))
+        + ", \"total_exact\": " + (i.total_known && i.total_exact ? "true" : "false")
+        + ", \"bytes\": " + std::to_string(i.bytes)
+        + ", \"sorts\": " + sorts + ", \"aliases\": " + json_str_array(i.aliases)
+        + ", \"parallel\": " + (i.parallel ? "true" : "false")
+        + ", \"idle_s\": " + fmt_s(i.idle_s) + "}";
+}
+
+std::string session_summary_json(const SessionManager::Summary& su) {
+    return "{\"session_id\": " + jstr(su.id) + ", \"sets\": " + std::to_string(su.sets)
+        + ", \"bytes\": " + std::to_string(su.bytes) + ", \"age_s\": " + fmt_s(su.age_s)
+        + ", \"idle_s\": " + fmt_s(su.idle_s) + ", \"ttl_s\": " + std::to_string(su.ttl_s)
+        + ", \"requests\": " + std::to_string(su.requests)
+        + ", \"in_use\": " + (su.in_use ? "true" : "false") + "}";
+}
+
 bool is_word_segment(std::string_view s) {   // httplib's (\w+)
     if (s.empty()) return false;
     for (char c : s) {
@@ -110,6 +181,7 @@ ServerApi::ServerApi(Corpus& corpus, ServerConfig cfg)
           j.count_threads = std::max({1u, j.count_threads, cfg_.query_threads});
           return j;
       }()),
+      sessions_(cfg_.sessions),
       started_(std::chrono::system_clock::now()), started_steady_(std::chrono::steady_clock::now()) {
     last_request_ns_.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                started_steady_.time_since_epoch()).count());
@@ -135,6 +207,7 @@ const std::vector<ServerApi::Route>& ServerApi::routes() {
         {"GET", "/health"},  {"GET", "/version"}, {"GET", "/info"},    {"GET", "/values/*"},
         {"GET", "/regions/*"}, {"GET", "/context"}, {"POST", "/run"}, {"POST", "/query"},
         {"GET", "/status"},  {"POST", "/cancel"}, {"GET", "/jobs"},
+        {"POST", "/session"}, {"GET", "/session"}, {"POST", "/session/close"}, {"GET", "/sessions"},
     };
     return r;
 }
@@ -151,7 +224,8 @@ const std::vector<std::string>& ServerApi::features() {
         "fold_index",       // %c / %d via <attr>.fold_*.perm (P1.6)
         "sentence_context", // /query "sentence": true
         "version",          // GET /version, version fields in /health and /info
-        "query_timeout",    // /query "timeout_ms" (and a server default) → 408
+        "query_timeout",    // /query and /run "timeout_ms" (and a server default) → 408
+        "sessions",         // POST /session; "session_id" on /run, /query ("name", "from") (P6.1)
     };
     return f;
 }
@@ -182,7 +256,13 @@ std::string ServerApi::server_fields() const {
         + ", \"uptime_s\": " + ups + ", \"corpus\": " + jstr(corpus_.dir())
         + ", \"threads\": " + std::to_string(cfg_.threads)
         + ", \"query_threads\": " + std::to_string(std::max(1u, cfg_.query_threads))
-        + ", \"total_workers\": " + std::to_string(cfg_.jobs.workers);
+        + ", \"total_workers\": " + std::to_string(cfg_.jobs.workers)
+        + ", \"sessions\": {\"open\": " + std::to_string(sessions_.count())
+        + ", \"bytes\": " + std::to_string(sessions_.bytes())
+        + ", \"ttl_s\": " + std::to_string(cfg_.sessions.ttl.count())
+        + ", \"max_sessions\": " + std::to_string(cfg_.sessions.max_sessions)
+        + ", \"memory_budget\": " + std::to_string(cfg_.sessions.memory_budget)
+        + ", \"max_hits\": " + std::to_string(cfg_.sessions.max_hits) + "}";
     if (!cfg_.extra_server_fields.empty()) s += ", " + cfg_.extra_server_fields;
     return s;
 }
@@ -220,6 +300,13 @@ ServerResponse ServerApi::handle(std::string_view method_in, std::string_view pa
         else if ((r = route_is("GET", "/status"))) { if (r > 0) return status(params); }
         else if ((r = route_is("POST", "/cancel"))) { if (r > 0) return cancel(params, body); }
         else if ((r = route_is("GET", "/jobs"))) { if (r > 0) return list_jobs(); }
+        else if (path == "/session") {
+            if (post) return session_create(body);
+            if (get) return session_info(params, body);
+            r = -1;
+        }
+        else if ((r = route_is("POST", "/session/close"))) { if (r > 0) return session_close(params, body); }
+        else if ((r = route_is("GET", "/sessions"))) { if (r > 0) return list_sessions(); }
         else {
             for (const char* prefix : {"/values/", "/regions/"}) {
                 const std::string_view pre(prefix);
@@ -237,6 +324,8 @@ ServerResponse ServerApi::handle(std::string_view method_in, std::string_view pa
         return json_error(404, "unknown route: " + std::string(method) + " " + std::string(path));
     } catch (const QueryCancelled&) {
         return json_error(408, "query cancelled", "\"timed_out\":true");
+    } catch (const HitSetTooLarge& e) {
+        return too_large(e);
     } catch (const std::exception& e) {
         return json_error(500, std::string("internal error: ") + e.what());
     } catch (...) {
@@ -315,8 +404,9 @@ ServerResponse ServerApi::context(const std::map<std::string, std::string>& para
 }
 
 // POST /run — run a full CQL program (queries + commands), session-aware.
-// Body: {"cql": "...", "limit": 20, "offset": 0, ...}. The named-query session is
-// shared by all requests, so programs run one at a time.
+// Body: {"cql": "...", "limit": 20, "offset": 0, "session_id": …, "timeout_ms": …}.
+// Without "session_id" the program runs in the one shared session (requests one
+// at a time); with it, in that client session (P6.1: its named sets and Last).
 ServerResponse ServerApi::run(const std::string& body) {
     std::string cql = json_extract_str(body, "cql");
     if (cql.empty()) cql = json_extract_str(body, "query");
@@ -331,26 +421,72 @@ ServerResponse ServerApi::run(const std::string& body) {
     opts.group_limit = json_extract_num(body, "group_limit", 1000);
     opts.strict_quoted_strings = json_extract_bool(body, "strict_quoted_strings", false);
     opts.threads = std::max(1u, cfg_.query_threads);
+    const std::string sid = json_extract_str(body, "session_id");
+    const size_t timeout_ms = json_extract_num(body, "timeout_ms", cfg_.query_timeout_ms);
 
-    std::lock_guard<std::mutex> lock(program_mu_);
-    try {
-        return json_ok(run_program_json(corpus_, program_session_, cql, opts));
-    } catch (const QueryCancelled&) {
-        throw;
-    } catch (const std::exception& e) {
-        // a parse error in the program (pando-server used to drop the connection: 500, empty body)
-        return json_error(400, e.what());
+    ExecProgress prog;
+    Deadline deadline;
+    struct Disarm {
+        ServerApi* api; Deadline* d;
+        ~Disarm() { if (d) api->disarm(*d); }
+    } disarm_guard{this, nullptr};
+    if (timeout_ms > 0) {
+        opts.progress = &prog;
+        deadline.prog = &prog;
+        deadline.when = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        arm(deadline);
+        disarm_guard.d = &deadline;
     }
+    auto exec = [&](ProgramSession& ps) -> ServerResponse {
+        try {
+            return json_ok(run_program_json(corpus_, ps, cql, opts));
+        } catch (const QueryCancelled&) {
+            return json_error(408, "program timed out after " + std::to_string(timeout_ms) + " ms",
+                              "\"timed_out\":true");
+        } catch (const HitSetTooLarge& e) {
+            return too_large(e);
+        } catch (const std::exception& e) {
+            // a parse error in the program (pando-server used to drop the connection: 500, empty body)
+            return json_error(400, e.what());
+        }
+    };
+    if (sid.empty()) {
+        std::lock_guard<std::mutex> lock(program_mu_);
+        return exec(program_session_);
+    }
+    SessionManager::Lease lease = sessions_.acquire(sid);
+    if (!lease) return unknown_session(sid);
+    lease.lock();
+    ServerResponse r = exec(lease.ps());
+    if (r.status == 200) r.body = with_member(std::move(r.body), session_member(sid, ""));
+    return r;
 }
 
 // POST /query — body: query, limit, offset, total, max_total, context, sentence,
-// attrs, debug, strict_quoted_strings, timeout_ms.
+// attrs, debug, strict_quoted_strings, timeout_ms; session_id, name, from (P6.1).
 //   "total": false    page only (page.total = hits on the page, total_exact false)
 //   "total": true     page + exact total (reuses a cached total for the same query)
 //   "total": "async"  page now; the exact total is counted in the background:
 //                     result.job = {id, state, finished, total, counted, progress,
 //                     estimate, …}; poll GET /status?job=<id>.
+// With "session_id": the result is stored in that session as hit set "name"
+// (default: only Last) for later /run commands and pages. With "from": <set>
+// (and "session_id"), no query runs: the page comes from the stored set (sorted
+// sets in their sorted order); "query" is ignored.
 ServerResponse ServerApi::query(const std::string& body) {
+    const std::string sid = json_extract_str(body, "session_id");
+    const std::string set_name = json_extract_str(body, "name");
+    const std::string from = json_extract_str(body, "from");
+    SessionManager::Lease lease;
+    if (!sid.empty()) {
+        lease = sessions_.acquire(sid);
+        if (!lease) return unknown_session(sid);
+    } else if (!set_name.empty() || !from.empty()) {
+        return json_error(400, "'name' and 'from' need a 'session_id' (POST /session)");
+    }
+    if (!set_name.empty() && !valid_set_name(set_name))
+        return json_error(400, "bad hit set name (letters, digits, '_'): " + set_name);
+
     // Whitespace-tolerant (Python json.dumps emits spaces after ':' / ',').
     QueryOptions opts;
     std::string q = json_extract_str(body, "query");
@@ -395,9 +531,17 @@ ServerResponse ServerApi::query(const std::string& body) {
         arm(deadline);
         disarm_guard.d = &deadline;
     }
+    if (!from.empty()) return query_from(opts, total_async, timeout_ms, progress, from, lease);
+
     auto run_q = [&](const QueryOptions& o) { return run_single_query(corpus_, query_text, o, progress); };
     auto ok = [&](const MatchSet& ms, double elapsed, std::string_view extra = {}) {
-        return json_ok(to_query_result_json(corpus_, query_text, ms, opts, elapsed, extra));
+        std::string js = to_query_result_json(corpus_, query_text, ms, opts, elapsed, extra);
+        if (lease) {
+            lease.lock();
+            lease.ps().store_query(corpus_, set_name, query_text, opts, ms);
+            js = with_member(std::move(js), session_member(sid, set_name.empty() ? "Last" : set_name));
+        }
+        return json_ok(std::move(js));
     };
 
     try {
@@ -473,6 +617,122 @@ ServerResponse ServerApi::query(const std::string& body) {
     } catch (const std::exception& e) {
         return json_error(400, e.what());
     }
+}
+
+// /query "from": a page of a stored hit set. A set deposited by /query with
+// "total": "async" takes its total from that background count once it is done
+// (or shows the count so far); other sets count their total when asked.
+ServerResponse ServerApi::query_from(const QueryOptions& opts, bool total_async, size_t timeout_ms,
+                                     ExecProgress* progress, const std::string& from,
+                                     SessionManager::Lease& lease) {
+    lease.lock();
+    ProgramSession& ps = lease.ps();
+    const std::string& sid = lease.id();
+    std::optional<HitSetInfo> info = ps.info(from);
+    if (!info) return unknown_hitset(sid, from);
+    std::string extra;
+    std::optional<std::pair<size_t, bool>> shown;
+    const std::string text = ps.query_text(from);
+    if (opts.total && !(info->total_known && info->total_exact) && !info->materialised
+        && info->sorts.empty() && !text.empty()) {
+        std::optional<QueryJobStatus> st = jobs_.lookup(text, opts);
+        if (st && st->finished()) {
+            ps.set_total(from, st->total, st->total_exact);
+            extra = job_fields(*st);
+        } else if (total_async) {
+            QueryJobStatus js = jobs_.ensure(text, opts);
+            if (js.finished()) ps.set_total(from, js.total, js.total_exact);
+            else shown = std::make_pair(js.counted, false);
+            extra = job_fields(js);
+        }
+    }
+    try {
+        std::string js = ps.page_json(corpus_, from, opts, progress, extra, shown);
+        return json_ok(with_member(std::move(js), session_member(sid, from)));
+    } catch (const QueryCancelled&) {
+        return json_error(408, "query timed out after " + std::to_string(timeout_ms) + " ms",
+                          "\"timed_out\":true");
+    } catch (const HitSetTooLarge& e) {
+        return too_large(e);
+    } catch (const UnknownHitSet&) {
+        return unknown_hitset(sid, from);
+    } catch (const std::exception& e) {
+        return json_error(400, e.what());
+    }
+}
+
+// POST /session — body {"session_id": optional (reuse / choose one), "ttl_s": optional}.
+ServerResponse ServerApi::session_create(const std::string& body) {
+    const std::string want = json_extract_str(body, "session_id");
+    const auto ttl = std::chrono::seconds(json_extract_num(body, "ttl_s", 0));
+    std::string id;
+    const auto res = sessions_.create(want, ttl, &id);
+    if (res == SessionManager::CreateResult::BadId)
+        return json_error(400, "bad session_id (1-128 of A-Z a-z 0-9 _ - . :): " + want);
+    if (res == SessionManager::CreateResult::Full)
+        return json_error(503, "too many sessions in use (max_sessions "
+                          + std::to_string(cfg_.sessions.max_sessions) + ")");
+    auto su = sessions_.summary(id);
+    return json_ok("{\"ok\":true,\"session_id\":" + jstr(id) + ",\"created\":"
+                   + (res == SessionManager::CreateResult::Created ? "true" : "false")
+                   + ",\"ttl_s\":" + std::to_string(su ? su->ttl_s : 0) + "}\n");
+}
+
+// GET /session?session_id= — the session's hit sets.
+ServerResponse ServerApi::session_info(const std::map<std::string, std::string>& params, const std::string& body) {
+    const std::string* idp = param(params, "session_id");
+    const std::string id = idp ? *idp : json_extract_str(body, "session_id");
+    if (id.empty()) return json_error(400, "missing 'session_id'");
+    SessionManager::Lease lease = sessions_.acquire(id);
+    if (!lease) return unknown_session(id);
+    lease.lock();
+    ProgramSession& ps = lease.ps();
+    std::string sets = "[";
+    bool first = true;
+    for (HitSetInfo& i : ps.list()) {
+        const std::string text = ps.query_text(i.name);
+        if (!i.total_known && !text.empty()) {   // a background count finished since
+            if (auto st = jobs_.lookup(text, QueryOptions{}); st && st->finished()) {
+                ps.set_total(i.name, st->total, st->total_exact);
+                i.total_known = true;
+                i.total = st->total;
+                i.total_exact = st->total_exact;
+            }
+        }
+        sets += std::string(first ? "\n  " : ",\n  ") + hitset_json(i);
+        first = false;
+    }
+    sets += "]";
+    auto su = sessions_.summary(id);
+    std::string out = "{\"ok\":true,\"session_id\":" + jstr(id);
+    if (su) out += ",\"ttl_s\":" + std::to_string(su->ttl_s) + ",\"age_s\":" + fmt_s(su->age_s)
+                   + ",\"requests\":" + std::to_string(su->requests);
+    out += ",\"bytes\":" + std::to_string(ps.cache_bytes()) + ",\"sets\":" + sets + "}\n";
+    return json_ok(std::move(out));
+}
+
+// POST /session/close?session_id= (or body) — forget the session and its sets.
+ServerResponse ServerApi::session_close(const std::map<std::string, std::string>& params, const std::string& body) {
+    const std::string* idp = param(params, "session_id");
+    const std::string id = idp ? *idp : json_extract_str(body, "session_id");
+    if (id.empty()) return json_error(400, "missing 'session_id'");
+    const bool closed = sessions_.close(id);
+    return json_ok("{\"ok\":true,\"session_id\":" + jstr(id) + ",\"closed\":"
+                   + (closed ? "true" : "false") + "}\n");
+}
+
+// GET /sessions — every open session (monitoring).
+ServerResponse ServerApi::list_sessions() {
+    std::string out = "{\"ok\":true,\"sessions\":[";
+    bool first = true;
+    for (const auto& su : sessions_.list()) {
+        out += std::string(first ? "\n  " : ",\n  ") + session_summary_json(su);
+        first = false;
+    }
+    out += "],\"open\":" + std::to_string(sessions_.count()) + ",\"bytes\":" + std::to_string(sessions_.bytes())
+           + ",\"memory_budget\":" + std::to_string(cfg_.sessions.memory_budget)
+           + ",\"materialising_bytes\":" + std::to_string(sessions_.materialising_bytes()) + "}\n";
+    return json_ok(std::move(out));
 }
 
 // GET /status?job=<id> — background total: state, count so far, progress, estimate.

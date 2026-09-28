@@ -94,6 +94,11 @@ pando-server <corpus_dir> [port] [threads] [--preload] [options]
 | `--abandon-after SEC` | Cancel a background count nobody polled for SEC (default 120; 0 = never) |
 | `--debug-total-delay MS` | Testing: reveal every total gradually over MS, so a client can be tested against a "slow" count on a small corpus |
 | `--query-threads N` | Split every counting query — a `/query` total, a background (`"async"`) total, a `/run` `count by` — over N position ranges counted in parallel (default 1: one thread per query). `/health` reports it as `query_threads` |
+| `--query-timeout MS` | Default time limit of a `/query` or `/run` (0 = none; per request `"timeout_ms"`): 408 `timed_out` |
+| `--session-ttl SEC` | Close a client session nobody used for SEC (default 1800) |
+| `--max-sessions N` | Open client sessions (default 256; a new one closes the least recently used idle one) |
+| `--session-memory MB` | Materialised hits over all sessions (default 2048; 0 = no limit). Above it, the hits of the least recently used sessions are dropped — their sets stay and are rebuilt on demand |
+| `--session-max-hits N` | Hits one stored set may materialise (default 5000000; 0 = no limit): above it `sort` / `coll` / … answer 413 `too_large` |
 
 ### Parallel counting (`--threads`)
 
@@ -130,8 +135,69 @@ made (`PANDO_PARTITION_MIN` overrides, for tests on small corpora).
 | `POST /cancel?job=ID` | Stop a queued / running count (send a body, even `{}`, or `Content-Length: 0`) |
 | `GET /jobs` | All cached results and running counts |
 | `GET /version` | The pando build answering, its `features` and the served corpus (also in `/health`) |
-| `POST /run` | A full CQL program (named queries, `count`, `coll`, …) |
+| `POST /run` | A full CQL program (named queries, `count`, `coll`, …); `session_id`, `timeout_ms` |
+| `POST /session` | Create a client session (`{"session_id": optional, "ttl_s": optional}`; an existing id is reused: `created: false`) |
+| `GET /session?session_id=` | The session's hit sets (query, materialised, hits, total, bytes, sort steps, aliases) |
+| `POST /session/close` | Close a session (`session_id` in the body or the query string) |
+| `GET /sessions` | Open sessions, their memory, the budget |
 | `GET /info`, `/values/ATTR`, `/regions/TYPE`, `/context?pos=`, `/health` | Corpus description, values, regions, KWIC context |
+
+### Sessions: stored hit sets (P6.1)
+
+Without a session every request runs its query again. A client session keeps
+results — *hit sets* — so that sorting, counting and paging work on the stored
+set instead:
+
+```text
+POST /session                                   → {"session_id": "s1f…", "created": true, "ttl_s": 1800}
+POST /query {"session_id": "s1f…", "name": "Q1", "query": "[upos=\"ADJ\"] [upos=\"NOUN\"]",
+             "limit": 20, "total": "async"}      → page 1 (+ job); stored as Q1 (and Last)
+POST /run   {"session_id": "s1f…", "cql": "sort Q1 by lemma", "limit": 20}   → page 1, sorted
+POST /query {"session_id": "s1f…", "from": "Q1", "offset": 5000, "limit": 20} → a page of the sorted set
+POST /run   {"session_id": "s1f…", "cql": "count Q1 by lemma"}              → counts (no re-run of the page)
+```
+
+* **A hit set is a recipe plus a cache.** The recipe is the parsed query and
+  the `sort … by` steps applied to it; the cache is the materialised hits,
+  built the first time a command needs every hit (`sort`, `coll`, `tabulate`,
+  a page of a sorted set, a page beyond offset 10000) and kept. A set whose
+  cache was dropped (memory budget) is rebuilt from the recipe, sorted as
+  before, so answers never depend on what was cached.
+* **Memory**: plain hits are kept as token positions only (≈ 8 bytes per
+  token per hit: 1.3M two-token hits ≈ 41 MB); hits with named regions,
+  subtrees or token groups, and parallel sets, as full match objects. While a
+  set is being built its hits exist as match objects (≈ 350 bytes each); these
+  builds share `--session-memory` and wait for each other (one always runs), so
+  concurrent sorts cannot exhaust the machine. The total is counted before a
+  build, so `--session-max-hits` refuses a set before anything is built.
+* **`count / group / freq … by`** on a set use the aggregation sink (the query
+  again, partitioned with `--query-threads`, no hits stored) — faster than
+  grouping stored hits, and the order does not matter.
+* **Pages**: `"from": "<set>"` pages a stored set — sorted sets in their sorted
+  order, unsorted ones by running the query to the page (or slicing the cache).
+  `"total"` works as on a query; a set stored with `"total": "async"` takes its
+  total from that background count (`job` in the result) once it is done.
+* **Names**: `/query` `"name"` (letters, digits, `_`) stores the set under that
+  name *and* as `Last`; without a name only as `Last`. In `/run`, `Q = …;`,
+  `Last`, `sort Q by …`, `drop Q`, `show named` are the CQL session commands
+  (see PANDO-CQL); `Last` and the name of the same query are one set (sorting
+  one sorts the other).
+* **Concurrency**: requests on one session run one at a time; different
+  sessions run in parallel. `/run` without a `session_id` uses the one shared
+  session as before.
+* **Soft state**: a session expires after `--session-ttl` without a request;
+  `--max-sessions` closes the least recently used idle one; unknown or expired
+  sessions answer **404** with `"unknown_session": true` (an unknown set:
+  `"unknown_hitset": true`). The client then creates a session and sends its
+  query again. A set that would materialise more than `--session-max-hits`
+  hits answers **413** `"too_large"` for `sort` / `coll` / …; counts and pages
+  still work.
+* A client may choose its id (`POST /session {"session_id": "kontext-u42"}`,
+  1–128 of `A–Z a–z 0–9 _ - . :`), so several front-end workers can share a
+  session without passing ids around.
+
+Responses on a session carry `"session_id"` (and `"hitset"` on `/query`) as
+top-level members.
 
 ### Versions
 

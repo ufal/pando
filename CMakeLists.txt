@@ -159,7 +159,7 @@ target_link_libraries(cwb-import PRIVATE pando_core)
 
 # API layer: query execution + JSON (used by CLI and server)
 add_library(pando_api STATIC src/api/query_json.cpp src/api/program_api.cpp src/api/query_jobs.cpp src/api/group_counts.cpp
-    src/api/server_api.cpp src/api/server_capi.cpp)
+    src/api/server_api.cpp src/api/server_capi.cpp src/api/sessions.cpp)
 target_include_directories(pando_api PUBLIC src)
 find_package(Threads REQUIRED)
 target_link_libraries(pando_api PUBLIC pando_core Threads::Threads)
@@ -299,6 +299,11 @@ if(BUILD_TESTING)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/server_jobs_test.py
                 --server $<TARGET_FILE:pando-server> --pando $<TARGET_FILE:pando>
                 --pando-index $<TARGET_FILE:pando-index>
+                --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu)
+        # P6.1: client sessions (stored hit sets, sort / count / pages without re-running)
+        add_test(NAME server_sessions
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/server_sessions_test.py
+                --server $<TARGET_FILE:pando-server> --pando-index $<TARGET_FILE:pando-index>
                 --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu)
     endif()
 endif()

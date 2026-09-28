@@ -133,10 +133,11 @@ std::string to_query_result_json(const Corpus& corpus,
                                  const MatchSet& ms,
                                  const QueryOptions& opts,
                                  double elapsed_ms,
-                                 std::string_view extra_result_fields) {
+                                 std::string_view extra_result_fields,
+                                 size_t matches_offset) {
     std::ostringstream out;
-    size_t stored = ms.matches.size();
-    size_t start = std::min(opts.offset, stored);
+    size_t stored = matches_offset + ms.matches.size();
+    size_t start = std::max(matches_offset, std::min(opts.offset, stored));
     size_t end   = std::min(start + opts.limit, stored);
     size_t returned = end - start;
 
@@ -153,7 +154,7 @@ std::string to_query_result_json(const Corpus& corpus,
     out << "    \"hits\": [\n";
 
     for (size_t i = start; i < end; ++i) {
-        const auto& m = ms.matches[i];
+        const auto& m = ms.matches[i - matches_offset];
         CorpusPos match_start = m.first_pos();
         CorpusPos match_end   = m.last_pos();
         auto doc_id = lookup_doc_id(corpus, match_start);
