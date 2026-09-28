@@ -624,6 +624,11 @@ public:
     explicit QueryExecutor(const Corpus& corpus);
     /// Report progress to `p` (nullptr = off) during execute(); see ExecProgress.
     void set_progress(ExecProgress* p) { progress_ = p; }
+    /// Throw QueryCancelled when the progress block asks to stop (long loops outside
+    /// the per-hit checkpoints: operand unions, lexicon scans).
+    void check_cancelled() const {
+        if (progress_ && progress_->cancel.load(std::memory_order_relaxed)) throw QueryCancelled();
+    }
     /// Alignment filters (`:: a.attr = b.attr`): by default, missing values
     /// (empty string or `_`) do not match. Set true to restore legacy behavior.
     void set_include_empty_alignment_values(bool v) { include_empty_alignment_values_ = v; }

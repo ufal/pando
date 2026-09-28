@@ -52,6 +52,9 @@ Open options (JSON, all optional): `preload`, `total_workers`, `result_cache`,
 counted in parallel per counting query, default 1 — see the CLI reference),
 `threads` (reported only), `session_ttl`, `max_sessions`, `session_memory_mb`,
 `session_max_hits` (client sessions, defaults 1800 s, 256, 2048 MB, 5000000),
+`tiers`, `default_tier`, `trust_tier` (limits by tier: see the CLI reference; an
+embedding host that builds the request bodies itself — FQS — sets `trust_tier`
+and puts its own `"tier"` in every body, dropping any a client sent),
 `embedded_in` (reported in `/health`, `/version` and `/info` `server`), and
 `debug_total_delay_ms` (for testing).
 

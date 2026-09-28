@@ -81,6 +81,9 @@ PANDO_API const char* pando_server_build_json(void);
  *     "max_sessions": N         open client sessions (default 256)
  *     "session_memory_mb": MB   materialised hits over all sessions (default 2048; 0 = no limit)
  *     "session_max_hits": N     hits one stored set may materialise (default 5000000; 0 = no limit)
+ *     "tiers": {"<name>": {"timeout_ms", "total_timeout_ms", "max_count_hits", "max_hits",
+ *               "threads", "deny": [...]}, ...}, "default_tier": "name", "trust_tier": bool
+ *                               limits by tier (limits.h); a request's "tier" only with trust_tier
  *     "embedded_in": "name"     reported in /health, /version, /info server ("embedded_in")
  *     "debug_total_delay_ms": MS  testing: reveal every background total gradually over MS
  *   error_out: NULL or where to store a malloc'd error message on failure

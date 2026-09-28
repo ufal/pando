@@ -2,6 +2,7 @@
 
 #include "core/build_info.h"
 #include "core/json_utils.h"
+#include "query/parser.h"
 
 #include <algorithm>
 #include <cctype>
@@ -87,9 +88,12 @@ ServerResponse unknown_hitset(const std::string& id, const std::string& name) {
                       "\"unknown_hitset\":true,\"session_id\":" + jstr(id) + ",\"hitset\":" + jstr(name));
 }
 
-ServerResponse too_large(const HitSetTooLarge& e) {
-    return json_error(413, e.what(), "\"too_large\":true,\"hits\":" + std::to_string(e.hits)
-                      + ",\"max_hits\":" + std::to_string(e.limit));
+ServerResponse too_large(const HitSetTooLarge& e, const std::string& tier = {}) {
+    std::string extra = "\"too_large\":true,\"limit\":" + jstr(e.limit_name) + ",\"hits\":"
+                        + std::to_string(e.hits) + ",\"hits_at_least\":" + (e.at_least ? "true" : "false")
+                        + ",\"" + e.limit_name + "\":" + std::to_string(e.limit);
+    if (!tier.empty()) extra += ",\"tier\":" + jstr(tier);
+    return json_error(413, e.what(), extra);
 }
 
 bool valid_set_name(const std::string& n) {   // a CQL query name
@@ -144,6 +148,40 @@ bool is_word_segment(std::string_view s) {   // httplib's (\w+)
 }
 
 }  // namespace
+
+ServerConfig parse_server_options(const std::string& json_in, ServerConfig cfg) {
+    // tier objects repeat top-level names ("threads", "timeout_ms"): take them out
+    // before the flat lookups
+    const std::string tiers_raw = json_extract_raw(json_in, "tiers");
+    const std::string opts = json_without_member(json_in, "tiers");
+    auto has = [&](const char* k) { return json_value_pos(opts, k) != std::string::npos; };
+    if (has("preload")) cfg.preload = json_extract_bool(opts, "preload", false);
+    if (has("total_workers"))
+        cfg.jobs.workers = static_cast<unsigned>(std::max<size_t>(1, json_extract_num(opts, "total_workers", 2)));
+    if (has("result_cache")) cfg.jobs.max_entries = std::max<size_t>(1, json_extract_num(opts, "result_cache", 512));
+    if (has("result_ttl")) cfg.jobs.ttl = std::chrono::seconds(json_extract_num(opts, "result_ttl", 3600));
+    if (has("abandon_after")) cfg.jobs.abandon = std::chrono::seconds(json_extract_num(opts, "abandon_after", 120));
+    if (has("query_timeout_ms")) cfg.query_timeout_ms = json_extract_num(opts, "query_timeout_ms", 0);
+    if (has("debug_total_delay_ms"))
+        cfg.jobs.debug_delay = std::chrono::milliseconds(json_extract_num(opts, "debug_total_delay_ms", 0));
+    if (has("threads")) cfg.threads = static_cast<unsigned>(json_extract_num(opts, "threads", 0));
+    if (has("query_threads"))
+        cfg.query_threads = static_cast<unsigned>(std::max<size_t>(1, json_extract_num(opts, "query_threads", 1)));
+    if (has("session_ttl"))
+        cfg.sessions.ttl = std::chrono::seconds(std::max<size_t>(1, json_extract_num(opts, "session_ttl", 1800)));
+    if (has("max_sessions")) cfg.sessions.max_sessions = std::max<size_t>(1, json_extract_num(opts, "max_sessions", 256));
+    if (has("session_memory_mb")) cfg.sessions.memory_budget = json_extract_num(opts, "session_memory_mb", 2048) << 20;
+    if (has("session_max_hits")) cfg.sessions.max_hits = json_extract_num(opts, "session_max_hits", 5000000);
+    const std::string emb = json_extract_str(opts, "embedded_in");
+    if (!emb.empty()) cfg.extra_server_fields = "\"embedded_in\": " + jstr(emb);
+    if (has("default_tier")) cfg.default_tier = json_extract_str(opts, "default_tier");
+    if (has("trust_tier")) cfg.trust_tier = json_extract_bool(opts, "trust_tier", false);
+    if (!tiers_raw.empty()) {
+        cfg.tiers.clear();
+        for (const auto& [name, obj] : json_object_members(tiers_raw)) cfg.tiers[name] = parse_query_limits(obj);
+    }
+    return cfg;
+}
 
 std::map<std::string, std::string> parse_query_string(std::string_view qs) {
     std::map<std::string, std::string> out;
@@ -226,6 +264,7 @@ const std::vector<std::string>& ServerApi::features() {
         "version",          // GET /version, version fields in /health and /info
         "query_timeout",    // /query and /run "timeout_ms" (and a server default) → 408
         "sessions",         // POST /session; "session_id" on /run, /query ("name", "from") (P6.1)
+        "tiers",            // "tier" per request: timeouts, hit limits, denied features (limits.h)
     };
     return f;
 }
@@ -263,8 +302,56 @@ std::string ServerApi::server_fields() const {
         + ", \"max_sessions\": " + std::to_string(cfg_.sessions.max_sessions)
         + ", \"memory_budget\": " + std::to_string(cfg_.sessions.memory_budget)
         + ", \"max_hits\": " + std::to_string(cfg_.sessions.max_hits) + "}";
+    if (!cfg_.tiers.empty()) {
+        s += ", \"tiers\": {";
+        bool first = true;
+        for (const auto& [name, lim] : cfg_.tiers) {
+            s += std::string(first ? "" : ", ") + jstr(name) + ": " + query_limits_json(lim);
+            first = false;
+        }
+        s += "}, \"default_tier\": " + jstr(cfg_.default_tier) + ", \"trust_tier\": "
+             + (cfg_.trust_tier ? "true" : "false");
+    }
     if (!cfg_.extra_server_fields.empty()) s += ", " + cfg_.extra_server_fields;
     return s;
+}
+
+// ── tiers ────────────────────────────────────────────────────────────────
+
+ServerApi::RequestLimits ServerApi::request_limits(const std::string& body) const {
+    RequestLimits rl;
+    if (!cfg_.tiers.empty()) {
+        std::string tier = cfg_.trust_tier ? json_extract_str(body, "tier") : std::string();
+        auto it = cfg_.tiers.find(tier);
+        if (it == cfg_.tiers.end()) {
+            tier = cfg_.default_tier;
+            it = cfg_.tiers.find(tier);
+        }
+        if (it != cfg_.tiers.end()) {
+            rl.tier = tier;
+            rl.lim = it->second;
+        }
+    }
+    rl.timeout_ms = capped_timeout(rl.lim.timeout_ms, cfg_.query_timeout_ms, json_extract_num(body, "timeout_ms", 0));
+    rl.threads = rl.lim.threads ? rl.lim.threads : std::max(1u, cfg_.query_threads);
+    return rl;
+}
+
+std::optional<ServerResponse> ServerApi::check_denied(const std::string& text, bool strict,
+                                                      const RequestLimits& rl) const {
+    if (rl.lim.deny.empty()) return std::nullopt;
+    Program prog;
+    try {
+        Parser parser(text, ParserOptions{strict});
+        prog = parser.parse();
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+    const std::string f = denied_feature(prog, rl.lim.deny);
+    if (f.empty()) return std::nullopt;
+    return json_error(403, "this query uses '" + f + "', which is not available"
+                               + (rl.tier.empty() ? std::string() : " for " + rl.tier + " users"),
+                      "\"denied\":" + jstr(f) + ",\"tier\":" + jstr(rl.tier));
 }
 
 // ── dispatch ─────────────────────────────────────────────────────────────
@@ -420,9 +507,12 @@ ServerResponse ServerApi::run(const std::string& body) {
     opts.total      = json_extract_bool(body, "total", false);
     opts.group_limit = json_extract_num(body, "group_limit", 1000);
     opts.strict_quoted_strings = json_extract_bool(body, "strict_quoted_strings", false);
-    opts.threads = std::max(1u, cfg_.query_threads);
+    const RequestLimits rl = request_limits(body);
+    opts.threads = rl.threads;
+    opts.max_count_hits = rl.lim.max_count_hits;
     const std::string sid = json_extract_str(body, "session_id");
-    const size_t timeout_ms = json_extract_num(body, "timeout_ms", cfg_.query_timeout_ms);
+    const size_t timeout_ms = rl.timeout_ms;
+    if (auto denied = check_denied(cql, opts.strict_quoted_strings, rl)) return *denied;
 
     ExecProgress prog;
     Deadline deadline;
@@ -444,7 +534,7 @@ ServerResponse ServerApi::run(const std::string& body) {
             return json_error(408, "program timed out after " + std::to_string(timeout_ms) + " ms",
                               "\"timed_out\":true");
         } catch (const HitSetTooLarge& e) {
-            return too_large(e);
+            return too_large(e, rl.tier);
         } catch (const std::exception& e) {
             // a parse error in the program (pando-server used to drop the connection: 500, empty body)
             return json_error(400, e.what());
@@ -452,11 +542,13 @@ ServerResponse ServerApi::run(const std::string& body) {
     };
     if (sid.empty()) {
         std::lock_guard<std::mutex> lock(program_mu_);
+        program_session_.set_max_hits(rl.lim.max_hits);   // 0 = unlimited, as before tiers
         return exec(program_session_);
     }
     SessionManager::Lease lease = sessions_.acquire(sid);
     if (!lease) return unknown_session(sid);
     lease.lock();
+    lease.ps().set_max_hits(rl.lim.max_hits ? rl.lim.max_hits : cfg_.sessions.max_hits);
     ServerResponse r = exec(lease.ps());
     if (r.status == 200) r.body = with_member(std::move(r.body), session_member(sid, ""));
     return r;
@@ -500,8 +592,12 @@ ServerResponse ServerApi::query(const std::string& body) {
     opts.debug     = json_extract_bool(body, "debug", false);
     opts.sentence  = json_extract_bool(body, "sentence", false);
     opts.strict_quoted_strings = json_extract_bool(body, "strict_quoted_strings", false);
-    opts.threads = std::max(1u, cfg_.query_threads);
-    const size_t timeout_ms = json_extract_num(body, "timeout_ms", cfg_.query_timeout_ms);
+    const RequestLimits rl = request_limits(body);
+    opts.threads = rl.threads;
+    const size_t timeout_ms = rl.timeout_ms;
+    const auto job_limit = std::chrono::milliseconds(rl.lim.total_timeout_ms);
+    if (from.empty())
+        if (auto denied = check_denied(query_text, opts.strict_quoted_strings, rl)) return *denied;
     std::string attrs_str = json_extract_str(body, "attrs");
     opts.attrs.clear();
     if (!attrs_str.empty()) {
@@ -531,7 +627,11 @@ ServerResponse ServerApi::query(const std::string& body) {
         arm(deadline);
         disarm_guard.d = &deadline;
     }
-    if (!from.empty()) return query_from(opts, total_async, timeout_ms, progress, from, lease);
+    if (!from.empty()) {
+        lease.lock();
+        lease.ps().set_max_hits(rl.lim.max_hits ? rl.lim.max_hits : cfg_.sessions.max_hits);
+        return query_from(opts, total_async, timeout_ms, progress, from, lease, rl.tier, job_limit);
+    }
 
     auto run_q = [&](const QueryOptions& o) { return run_single_query(corpus_, query_text, o, progress); };
     auto ok = [&](const MatchSet& ms, double elapsed, std::string_view extra = {}) {
@@ -558,7 +658,7 @@ ServerResponse ServerApi::query(const std::string& body) {
             if (have && have->finished()) {
                 st = *have;
             } else if (total_async) {
-                st = jobs_.ensure(query_text, opts);
+                st = jobs_.ensure(query_text, opts, job_limit);
             } else {
                 QueryOptions count_opts = opts;
                 count_opts.limit = 1;
@@ -575,7 +675,7 @@ ServerResponse ServerApi::query(const std::string& body) {
         std::optional<QueryJobStatus> known = jobs_.lookup(query_text, opts);
         if (known && !known->finished()) {
             if (total_async) {
-                known = jobs_.ensure(query_text, opts);    // restarts a cancelled / failed one
+                known = jobs_.ensure(query_text, opts, job_limit);   // restarts a cancelled / failed one
             } else {
                 known.reset();                             // synchronous: count here
             }
@@ -601,7 +701,7 @@ ServerResponse ServerApi::query(const std::string& body) {
         if (ms.total_exact) {
             st = jobs_.record_finished(query_text, opts, ms.total_count, true);
         } else {
-            st = known ? *known : jobs_.ensure(query_text, opts);
+            st = known ? *known : jobs_.ensure(query_text, opts, job_limit);
             if (st.finished()) {
                 ms.total_count = st.total;
                 ms.total_exact = st.total_exact;
@@ -624,7 +724,8 @@ ServerResponse ServerApi::query(const std::string& body) {
 // (or shows the count so far); other sets count their total when asked.
 ServerResponse ServerApi::query_from(const QueryOptions& opts, bool total_async, size_t timeout_ms,
                                      ExecProgress* progress, const std::string& from,
-                                     SessionManager::Lease& lease) {
+                                     SessionManager::Lease& lease, const std::string& tier,
+                                     std::chrono::milliseconds job_limit) {
     lease.lock();
     ProgramSession& ps = lease.ps();
     const std::string& sid = lease.id();
@@ -640,7 +741,7 @@ ServerResponse ServerApi::query_from(const QueryOptions& opts, bool total_async,
             ps.set_total(from, st->total, st->total_exact);
             extra = job_fields(*st);
         } else if (total_async) {
-            QueryJobStatus js = jobs_.ensure(text, opts);
+            QueryJobStatus js = jobs_.ensure(text, opts, job_limit);
             if (js.finished()) ps.set_total(from, js.total, js.total_exact);
             else shown = std::make_pair(js.counted, false);
             extra = job_fields(js);
@@ -653,7 +754,7 @@ ServerResponse ServerApi::query_from(const QueryOptions& opts, bool total_async,
         return json_error(408, "query timed out after " + std::to_string(timeout_ms) + " ms",
                           "\"timed_out\":true");
     } catch (const HitSetTooLarge& e) {
-        return too_large(e);
+        return too_large(e, tier);
     } catch (const UnknownHitSet&) {
         return unknown_hitset(sid, from);
     } catch (const std::exception& e) {

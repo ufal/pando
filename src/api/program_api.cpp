@@ -225,10 +225,16 @@ using HitSetPtr = std::shared_ptr<HitSet>;
 
 }  // namespace
 
-HitSetTooLarge::HitSetTooLarge(const std::string& name, size_t h, size_t lim)
-    : std::runtime_error("hit set " + name + " has " + std::to_string(h)
-                         + " hits, more than this session materialises (" + std::to_string(lim) + ")"),
-      hits(h), limit(lim) {}
+HitSetTooLarge::HitSetTooLarge(const std::string& name, size_t h, size_t lim, std::string which,
+                               bool lower_bound)
+    : std::runtime_error(which == "max_count_hits"
+          ? "query " + name + " has " + (lower_bound ? "more than " + std::to_string(lim)
+                                                     : std::to_string(h))
+                + " hits; counting, sorting and collocations are limited to "
+                + std::to_string(lim) + " hits"
+          : "hit set " + name + " has " + std::to_string(h)
+                + " hits, more than this session materialises (" + std::to_string(lim) + ")"),
+      hits(h), limit(lim), limit_name(std::move(which)), at_least(lower_bound) {}
 
 struct ProgramSession::Impl {
     std::map<std::string, HitSetPtr> sets;   // "Last" and the named sets
@@ -286,6 +292,26 @@ size_t set_total_count(const Corpus& corpus, HitSet& hs, unsigned threads, ExecP
                                  : ex.execute(st.query, 1, true, 0, 0, 0, std::max(1u, threads));
     hs.know_total(ms.total_count, ms.total_exact);
     return hs.total;
+}
+
+// ProgramOptions::max_count_hits: refuse a set with more hits, counting at most
+// limit + 1 of them (a capped count stops early on the paths that count one by one).
+void check_count_limit(const Corpus& corpus, HitSet& hs, const std::string& name, size_t limit,
+                       unsigned threads, ExecProgress* progress) {
+    if (limit == 0) return;
+    if (hs.materialised) hs.know_total(hs.hit_count(), true);
+    if (hs.total_known && hs.total_exact) {
+        if (hs.total > limit) throw HitSetTooLarge(name, hs.total, limit, "max_count_hits");
+        return;
+    }
+    QueryExecutor ex(corpus);
+    setup_executor(ex, hs, progress);
+    const Statement& st = hs.st();
+    MatchSet ms = st.is_parallel ? ex.execute_parallel(st.query, st.target_query, 1, true)
+                                 : ex.execute(st.query, 1, true, limit + 1, 0, 0, std::max(1u, threads));
+    if (ms.total_exact) hs.know_total(ms.total_count, true);
+    if (ms.total_count > limit)
+        throw HitSetTooLarge(name, ms.total_count, limit, "max_count_hits", !ms.total_exact);
 }
 
 // Every hit of `hs` in memory (the query again, then its sort steps). The total
@@ -1740,6 +1766,8 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
 
             if (aggregate_by) {
                 // counted while the query runs; no hits kept
+                check_count_limit(corpus, *hs, stmt.name.empty() ? "Last" : stmt.name, opts.max_count_hits,
+                                  threads, opts.progress);
                 MatchSet res = executor.execute(stmt.query, 0, true, 0, 0, 0, threads, aggregate_by);
                 if (res.aggregate_buckets) hs->know_total(res.aggregate_buckets->total_hits, true);
                 else if (res.total_exact) hs->know_total(res.total_count, true);
@@ -1899,6 +1927,16 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
             };
             const NameIndexMap& nm_to_use = hs->nm;
             const NameIndexMap* nm_tgt_parallel = hs->parallel() ? &hs->tnm : nullptr;
+            if (opts.max_count_hits && !use_immediate && stmt.command.type != CommandType::SIZE) {
+                check_count_limit(corpus, *hs, set_name, opts.max_count_hits, threads, opts.progress);
+                for (const std::string& fqn : stmt.command.freq_query_names)
+                    if (HitSetPtr f = S.find(fqn))
+                        check_count_limit(corpus, *f, fqn, opts.max_count_hits, threads, opts.progress);
+                if (!stmt.command.ref_query_name.empty())
+                    if (HitSetPtr r = S.find(stmt.command.ref_query_name))
+                        check_count_limit(corpus, *r, stmt.command.ref_query_name, opts.max_count_hits,
+                                          threads, opts.progress);
+            }
 
             out.str(""); out.clear();
             switch (stmt.command.type) {

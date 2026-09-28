@@ -93,6 +93,120 @@ inline bool json_extract_bool(const std::string& body, const char* key, bool def
     return default_val;
 }
 
+/// End of the JSON value starting at `pos` (one past it): strings, objects and
+/// arrays are matched (quotes and escapes respected), other values end at `,`
+/// `}` `]` or whitespace. npos when unterminated.
+inline size_t json_value_end(const std::string& s, size_t pos) {
+    if (pos >= s.size()) return std::string::npos;
+    if (s[pos] == '"') {
+        for (size_t i = pos + 1; i < s.size(); ++i) {
+            if (s[i] == '\\') { ++i; continue; }
+            if (s[i] == '"') return i + 1;
+        }
+        return std::string::npos;
+    }
+    if (s[pos] == '{' || s[pos] == '[') {
+        int depth = 0;
+        for (size_t i = pos; i < s.size(); ++i) {
+            const char c = s[i];
+            if (c == '"') {
+                const size_t e = json_value_end(s, i);
+                if (e == std::string::npos) return e;
+                i = e - 1;
+            } else if (c == '{' || c == '[') {
+                ++depth;
+            } else if (c == '}' || c == ']') {
+                if (--depth == 0) return i + 1;
+            }
+        }
+        return std::string::npos;
+    }
+    size_t i = pos;
+    while (i < s.size() && s[i] != ',' && s[i] != '}' && s[i] != ']' && s[i] != ' ' && s[i] != '\n'
+           && s[i] != '\t' && s[i] != '\r')
+        ++i;
+    return i;
+}
+
+/// The raw JSON text of `key`'s value (first occurrence, as json_value_pos). Empty if missing.
+inline std::string json_extract_raw(const std::string& body, const char* key) {
+    const size_t pos = json_value_pos(body, key);
+    if (pos == std::string::npos) return {};
+    const size_t end = json_value_end(body, pos);
+    if (end == std::string::npos) return {};
+    return body.substr(pos, end - pos);
+}
+
+/// `body` without `key` and its value (first occurrence), so that flat lookups
+/// of the remaining top-level keys cannot hit members nested inside it.
+inline std::string json_without_member(const std::string& body, const char* key) {
+    const std::string needle = std::string("\"") + key + "\"";
+    const size_t k = body.find(needle);
+    const size_t v = json_value_pos(body, key);
+    if (k == std::string::npos || v == std::string::npos) return body;
+    const size_t end = json_value_end(body, v);
+    if (end == std::string::npos) return body;
+    return body.substr(0, k) + "\"_\":0" + body.substr(end);
+}
+
+/// Members of a JSON object text `{"a": 1, "b": {...}}` → (key, raw value), in order.
+inline std::vector<std::pair<std::string, std::string>> json_object_members(const std::string& obj) {
+    std::vector<std::pair<std::string, std::string>> out;
+    size_t i = 0;
+    json_skip_ws(obj, i);
+    if (i >= obj.size() || obj[i] != '{') return out;
+    ++i;
+    for (;;) {
+        json_skip_ws(obj, i);
+        if (i >= obj.size() || obj[i] == '}') break;
+        if (obj[i] != '"') break;
+        const size_t kend = json_value_end(obj, i);
+        if (kend == std::string::npos) break;
+        std::string key;
+        for (size_t j = i + 1; j + 1 < kend; ++j) {
+            if (obj[j] == '\\' && j + 2 < kend) ++j;
+            key += obj[j];
+        }
+        i = kend;
+        json_skip_ws(obj, i);
+        if (i >= obj.size() || obj[i] != ':') break;
+        ++i;
+        json_skip_ws(obj, i);
+        const size_t vend = json_value_end(obj, i);
+        if (vend == std::string::npos) break;
+        out.emplace_back(std::move(key), obj.substr(i, vend - i));
+        i = vend;
+        json_skip_ws(obj, i);
+        if (i < obj.size() && obj[i] == ',') ++i;
+    }
+    return out;
+}
+
+/// A JSON array of strings for `key` (`["a", "b"]`); a single string counts as one.
+inline std::vector<std::string> json_extract_str_array(const std::string& body, const char* key) {
+    std::vector<std::string> out;
+    const std::string raw = json_extract_raw(body, key);
+    if (raw.empty()) return out;
+    if (raw[0] == '"') { out.push_back(json_extract_str(body, key)); return out; }
+    if (raw[0] != '[') return out;
+    for (size_t i = 1; i < raw.size();) {
+        if (raw[i] == '"') {
+            const size_t e = json_value_end(raw, i);
+            if (e == std::string::npos) break;
+            std::string v;
+            for (size_t j = i + 1; j + 1 < e; ++j) {
+                if (raw[j] == '\\' && j + 2 < e) ++j;
+                v += raw[j];
+            }
+            out.push_back(std::move(v));
+            i = e;
+        } else {
+            ++i;
+        }
+    }
+    return out;
+}
+
 /// `describe` output: omit `""` always; omit `_` except on `form`/`lemma` (may be `_`).
 inline bool describe_emit_attr(std::string_view attr_name, std::string_view val) {
     if (val.empty()) return false;

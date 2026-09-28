@@ -98,6 +98,8 @@ pando-server <corpus_dir> [port] [threads] [--preload] [options]
 | `--session-ttl SEC` | Close a client session nobody used for SEC (default 1800) |
 | `--max-sessions N` | Open client sessions (default 256; a new one closes the least recently used idle one) |
 | `--session-memory MB` | Materialised hits over all sessions (default 2048; 0 = no limit). Above it, the hits of the least recently used sessions are dropped — their sets stay and are rebuilt on demand |
+| `--limits FILE` | Server options as JSON, above all limits by tier (see "Limits by tier" below): `{"tiers": {…}, "default_tier": "visitor", "trust_tier": true}`. Also takes the other options of the C ABI (`query_timeout_ms`, `session_max_hits`, …); flags given before it are the defaults |
+| `--trust-tier` | Honour the request's `"tier"`. Only for a server that clients cannot reach directly (behind KonText / FQS, which set the tier) |
 | `--session-max-hits N` | Hits one stored set may materialise (default 5000000; 0 = no limit): above it `sort` / `coll` / … answer 413 `too_large` |
 
 ### Parallel counting (`--threads`)
@@ -198,6 +200,41 @@ POST /run   {"session_id": "s1f…", "cql": "count Q1 by lemma"}              �
 
 Responses on a session carry `"session_id"` (and `"hitset"` on `/query`) as
 top-level members.
+
+### Limits by tier
+
+A front-end that knows who is asking (FQS; KonText or TEITOK in front of
+pando-server) sends `"tier": "<name>"` with `/query` and `/run` — typically
+`visitor` (not logged in), `user`, `admin` (a corpus administrator). The
+server takes the tier from the request only with `--trust-tier` (C ABI
+`trust_tier`); otherwise, and for a request without a known tier,
+`default_tier` applies. Every limit is optional (0 / missing = no limit from
+the tier):
+
+```json
+{"tiers": {
+   "visitor": {"timeout_ms": 20000, "total_timeout_ms": 60000, "max_count_hits": 2000000,
+               "max_hits": 500000, "threads": 1, "deny": ["transitive", "regex_no_prefix"]},
+   "user":    {"timeout_ms": 60000, "total_timeout_ms": 300000, "max_count_hits": 20000000,
+               "max_hits": 5000000, "threads": 4},
+   "admin":   {"threads": 8}},
+ "default_tier": "visitor"}
+```
+
+| Limit | Effect |
+| --- | --- |
+| `timeout_ms` | A `/query` or `/run` stops with 408 after this long. A request's own `"timeout_ms"` can lower it, never raise it (without a tier cap: `--query-timeout`) |
+| `total_timeout_ms` | A background (`"async"`) count stops after this long: the job is `cancelled` with `"timed_out": true`, `total` = the count so far. The same tier does not restart it; a tier with a longer (or no) limit does |
+| `max_count_hits` | `count / group / freq / stats / coll / dcoll / keyness / tabulate / describe / sort` over a query or stored set with more hits answer 413 `{"too_large": true, "limit": "max_count_hits", "hits": …, "hits_at_least": …}`. The hits are counted first, and only up to the limit, so refusing is cheap. Totals, `size` and pages are not limited |
+| `max_hits` | Hits one stored set may materialise (sorting, sorted / deep pages in a session): 413 `"limit": "max_hits"` (default: `--session-max-hits`) |
+| `threads` | Position ranges a counting query is split over (default `--query-threads`) |
+| `deny` | Features refused with 403 `{"denied": "<feature>", "tier": …}`: `transitive` (`>>`, `<<`, descendant / ancestor conditions), `unbounded_repeat` (`+`, `*`, `{n,}`), `regex_no_prefix` (a regex without a literal start, which scans the whole lexicon), `regex` (any regex), `parallel` (aligned queries), `negated_relation` (`!>`, `!<`) |
+
+Queues, per-user limits and a global CPU budget belong to the host that sees
+every corpus (FQS); pando enforces what a request may do once it runs.
+`/health` reports the tiers. A regex scan over the lexicon honours the
+timeout too (before, `[word=".*a.*"] [word=".*e.*"] [word=".*i.*"]` ran its 11 s
+whatever the limit).
 
 ### Versions
 

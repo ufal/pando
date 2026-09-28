@@ -54,6 +54,7 @@ struct QueryJobStatus {
     size_t estimate = 0;       // extrapolated total while running; 0 = unknown
     double elapsed_ms = 0;     // since the job started running (queue time excluded)
     std::string error;
+    bool timed_out = false;    // Cancelled by its run-time limit (ensure's max_run)
     bool finished() const { return state == State::Finished; }
 };
 
@@ -74,7 +75,11 @@ public:
     static std::string id_for(const std::string& key);
 
     /// Start the background exact count for `query` unless it is cached or running.
-    QueryJobStatus ensure(const std::string& query, const QueryOptions& opts);
+    /// `max_run` > 0: stop the count after this long (a tier's total_timeout_ms);
+    /// a count that stopped at its limit is not restarted by a request whose own
+    /// limit is no longer (a longer one restarts it; 0 = none).
+    QueryJobStatus ensure(const std::string& query, const QueryOptions& opts,
+                          std::chrono::milliseconds max_run = std::chrono::milliseconds(0));
     /// Store a total computed elsewhere (synchronous /query, a page that held every hit).
     QueryJobStatus record_finished(const std::string& query, const QueryOptions& opts,
                                    size_t total, bool exact);

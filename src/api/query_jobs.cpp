@@ -18,6 +18,8 @@ struct QueryJobManager::Job {
     std::string error;
     Clock::time_point created, started, done, last_access;
     bool has_started = false, has_done = false;
+    std::chrono::milliseconds max_run{0};   // stop after this long running (0 = no limit)
+    bool timed_out = false;                 // guarded by mu_
 };
 
 const char* job_state_name(QueryJobStatus::State s) {
@@ -53,6 +55,7 @@ std::string job_status_json(const QueryJobStatus& st) {
     std::snprintf(ms, sizeof ms, "%.1f", st.elapsed_ms);
     out << ", \"elapsed_ms\": " << ms;
     if (!st.error.empty()) out << ", \"error\": " << jstr(st.error);
+    if (st.timed_out) out << ", \"timed_out\": true";
     out << "}";
     return out.str();
 }
@@ -105,6 +108,7 @@ QueryJobStatus QueryJobManager::snapshot(const Job& j) const {
     st.total = j.total;
     st.total_exact = j.exact;
     st.error = j.error;
+    st.timed_out = j.timed_out;
     const CorpusPos n = corpus_.size();
     if (j.state == QueryJobStatus::State::Finished) {
         st.counted = j.total;
@@ -126,23 +130,38 @@ QueryJobStatus QueryJobManager::snapshot(const Job& j) const {
     return st;
 }
 
-QueryJobStatus QueryJobManager::ensure(const std::string& query, const QueryOptions& opts) {
+QueryJobStatus QueryJobManager::ensure(const std::string& query, const QueryOptions& opts,
+                                       std::chrono::milliseconds max_run) {
     const std::string key = key_for(query, opts);
     const std::string id = id_for(key);
     std::lock_guard<std::mutex> lock(mu_);
     const auto now = Clock::now();
     auto it = jobs_.find(id);
-    if (it != jobs_.end() && it->second->key == key
-        && it->second->state != QueryJobStatus::State::Cancelled
-        && it->second->state != QueryJobStatus::State::Failed) {
-        it->second->last_access = now;
-        return snapshot(*it->second);
+    if (it != jobs_.end() && it->second->key == key) {
+        Job& old = *it->second;
+        const bool reusable = old.state != QueryJobStatus::State::Cancelled
+                              && old.state != QueryJobStatus::State::Failed;
+        // a count stopped by its time limit is not restarted for a request whose
+        // limit is no longer (it would only stop again); a longer limit restarts it
+        const bool would_time_out_again =
+            old.timed_out && max_run.count() > 0 && max_run <= old.max_run;
+        if (reusable || would_time_out_again) {
+            old.last_access = now;
+            if (reusable && old.state == QueryJobStatus::State::Queued && max_run.count() > 0
+                && (old.max_run.count() == 0 || max_run > old.max_run))
+                old.max_run = max_run;   // queued: the longest limit asked for applies
+            else if (reusable && old.state == QueryJobStatus::State::Running && old.max_run.count() > 0
+                     && (max_run.count() == 0 || max_run > old.max_run))
+                old.max_run = max_run;   // running: a later, more generous request extends it
+            return snapshot(old);
+        }
     }
     auto j = std::make_shared<Job>();
     j->id = id;
     j->key = key;
     j->query = query;
     j->opts = opts;
+    j->max_run = max_run;
     j->created = j->last_access = now;
     jobs_[id] = j;
     queue_.push_back(j);
@@ -297,6 +316,9 @@ void QueryJobManager::run_job(Job& j) {
         }
     } catch (const QueryCancelled&) {
         final_state = QueryJobStatus::State::Cancelled;
+        std::lock_guard<std::mutex> lock(mu_);
+        if (j.timed_out)
+            error = "time limit: stopped after " + std::to_string(j.max_run.count()) + " ms";
     } catch (const std::exception& e) {
         final_state = QueryJobStatus::State::Failed;
         error = e.what();
@@ -316,6 +338,13 @@ void QueryJobManager::reaper_loop() {
         reaper_cv_.wait_for(lock, std::chrono::seconds(1));
         if (stop_) break;
         const auto now = Clock::now();
+        for (auto& [id, j] : jobs_) {   // run-time limits (total_timeout_ms of the tier)
+            if (j->state == QueryJobStatus::State::Running && j->max_run.count() > 0 && !j->timed_out
+                && now - j->started > j->max_run) {
+                j->timed_out = true;
+                j->prog.cancel.store(true);
+            }
+        }
         if (cfg_.abandon.count() > 0) {
             for (auto& [id, j] : jobs_) {
                 if ((j->state == QueryJobStatus::State::Running || j->state == QueryJobStatus::State::Queued)

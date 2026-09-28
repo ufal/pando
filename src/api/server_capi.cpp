@@ -39,9 +39,6 @@ char* error_body(int status, const std::string& msg, int* status_out) {
     return dup_c("{\"ok\":false,\"error\":\"" + json_escape(msg) + "\"}\n");
 }
 
-bool has_key(const std::string& json, const char* key) {
-    return json.find(std::string("\"") + key + "\"") != std::string::npos;
-}
 
 }  // namespace
 
@@ -75,30 +72,7 @@ PANDO_API pando_server_t* pando_server_open(const char* corpus_dir, const char* 
     if (!corpus_dir || !*corpus_dir) return fail("pando_server_open: no corpus directory");
     try {
         const std::string opts = options_json ? options_json : "";
-        ServerConfig cfg;
-        cfg.preload = json_extract_bool(opts, "preload", false);
-        if (has_key(opts, "total_workers"))
-            cfg.jobs.workers = static_cast<unsigned>(std::max<size_t>(1, json_extract_num(opts, "total_workers", 2)));
-        if (has_key(opts, "result_cache"))
-            cfg.jobs.max_entries = std::max<size_t>(1, json_extract_num(opts, "result_cache", 512));
-        if (has_key(opts, "result_ttl"))
-            cfg.jobs.ttl = std::chrono::seconds(json_extract_num(opts, "result_ttl", 3600));
-        if (has_key(opts, "abandon_after"))
-            cfg.jobs.abandon = std::chrono::seconds(json_extract_num(opts, "abandon_after", 120));
-        cfg.query_timeout_ms = json_extract_num(opts, "query_timeout_ms", 0);
-        cfg.jobs.debug_delay = std::chrono::milliseconds(json_extract_num(opts, "debug_total_delay_ms", 0));
-        cfg.threads = static_cast<unsigned>(json_extract_num(opts, "threads", 0));
-        cfg.query_threads = static_cast<unsigned>(std::max<size_t>(1, json_extract_num(opts, "query_threads", 1)));
-        if (has_key(opts, "session_ttl"))
-            cfg.sessions.ttl = std::chrono::seconds(std::max<size_t>(1, json_extract_num(opts, "session_ttl", 1800)));
-        if (has_key(opts, "max_sessions"))
-            cfg.sessions.max_sessions = std::max<size_t>(1, json_extract_num(opts, "max_sessions", 256));
-        if (has_key(opts, "session_memory_mb"))
-            cfg.sessions.memory_budget = json_extract_num(opts, "session_memory_mb", 2048) << 20;
-        if (has_key(opts, "session_max_hits"))
-            cfg.sessions.max_hits = json_extract_num(opts, "session_max_hits", 5000000);
-        const std::string emb = json_extract_str(opts, "embedded_in");
-        if (!emb.empty()) cfg.extra_server_fields = "\"embedded_in\": " + jstr(emb);
+        ServerConfig cfg = parse_server_options(opts);
 
         auto s = std::make_unique<pando_server>();
         s->dir = corpus_dir;

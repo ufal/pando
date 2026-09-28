@@ -107,11 +107,15 @@ std::string to_regions_json(const Corpus& corpus, const std::string& type_name, 
 //
 // Not thread-safe: one call at a time per session (the server locks per session).
 
-/// A command needed the hits of a set larger than the session's max_hits.
+/// A command needed the hits of a set larger than a limit: the session's max_hits
+/// (materialising) or ProgramOptions::max_count_hits (anything over all hits).
 struct HitSetTooLarge : std::runtime_error {
-    size_t hits = 0;
+    size_t hits = 0;              // the set's hits (a lower bound when at_least)
     size_t limit = 0;
-    HitSetTooLarge(const std::string& name, size_t h, size_t lim);
+    std::string limit_name;       // "max_hits" / "max_count_hits"
+    bool at_least = false;        // counting stopped at the limit
+    HitSetTooLarge(const std::string& name, size_t h, size_t lim, std::string which = "max_hits",
+                   bool lower_bound = false);
 };
 
 /// A command or page named a hit set the session does not have.
@@ -206,6 +210,10 @@ struct ProgramOptions {
     /// Progress / cancel block for every query the program runs (nullptr = none);
     /// a set `cancel` stops the program with QueryCancelled.
     ExecProgress* progress = nullptr;
+    /// Commands over all hits (count / group / freq / stats / tabulate / describe /
+    /// raw / coll / dcoll / keyness / sort) refuse a set with more hits: the hits are
+    /// counted up to this bound first; HitSetTooLarge (0 = no limit).
+    size_t max_count_hits = 0;
 };
 
 // Run a full CQL program and return the JSON output.

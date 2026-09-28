@@ -17,6 +17,7 @@
 // a handle() still running (see busy()).
 
 #include "api/query_jobs.h"
+#include "api/limits.h"
 #include "api/query_json.h"
 #include "api/sessions.h"
 #include "corpus/corpus.h"
@@ -27,6 +28,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -46,6 +48,13 @@ struct ServerConfig {
     size_t query_timeout_ms = 0;
     /// P6.1 client sessions (POST /session, "session_id" on /run and /query).
     SessionConfig sessions;
+    /// Resource limits by tier (limits.h). A request's "tier" is honoured only
+    /// with trust_tier (the host sets it; clients must not reach the server
+    /// directly); otherwise, and for an unknown tier, default_tier applies. No
+    /// tiers = no per-request limits beyond query_timeout_ms / sessions.
+    std::map<std::string, QueryLimits> tiers;
+    std::string default_tier;
+    bool trust_tier = false;
     /// Raw JSON members added to /health, /version and /info "server" (no braces,
     /// no leading comma), e.g. `"embedded_in": "fqs 0.4"`.
     std::string extra_server_fields;
@@ -56,6 +65,14 @@ struct ServerResponse {
     std::string body;                 // JSON, newline-terminated
     std::string content_type = "application/json";
 };
+
+/// Server options as JSON (the C ABI's options_json, pando-server --limits FILE):
+/// preload, total_workers, result_cache, result_ttl, abandon_after, query_timeout_ms,
+/// threads, query_threads, session_ttl, max_sessions, session_memory_mb,
+/// session_max_hits, embedded_in, debug_total_delay_ms, and
+/// "tiers": {"<name>": {limits.h members}, …}, "default_tier", "trust_tier".
+/// Members that are absent keep the values of `base`.
+ServerConfig parse_server_options(const std::string& json, ServerConfig base = {});
 
 /// URL query string ("a=1&b=x%20y") → first value per key, percent-decoded, '+' = space.
 std::map<std::string, std::string> parse_query_string(std::string_view qs);
@@ -99,7 +116,8 @@ private:
     ServerResponse run(const std::string& body);
     ServerResponse query(const std::string& body);
     ServerResponse query_from(const QueryOptions& opts, bool total_async, size_t timeout_ms, ExecProgress* progress,
-                              const std::string& from, SessionManager::Lease& lease);
+                              const std::string& from, SessionManager::Lease& lease, const std::string& tier,
+                              std::chrono::milliseconds job_limit);
     ServerResponse session_create(const std::string& body);
     ServerResponse session_info(const std::map<std::string, std::string>& params, const std::string& body);
     ServerResponse session_close(const std::map<std::string, std::string>& params, const std::string& body);
@@ -108,6 +126,19 @@ private:
     ServerResponse cancel(const std::map<std::string, std::string>& params, const std::string& body);
     ServerResponse list_jobs();
     std::string server_fields() const;
+
+    /// The tier of a request and what it may do (ServerConfig::tiers).
+    struct RequestLimits {
+        std::string tier;          // "" when no tiers are configured
+        QueryLimits lim;
+        size_t timeout_ms = 0;     // effective: the tier cap lowered by the request's own
+        unsigned threads = 1;
+    };
+    RequestLimits request_limits(const std::string& body) const;
+    /// 403 when the query / program uses a feature the tier denies (nullopt = allowed
+    /// or unparsable: the normal path reports parse errors).
+    std::optional<ServerResponse> check_denied(const std::string& text, bool strict,
+                                               const RequestLimits& rl) const;
 
     // per-request deadlines (query_timeout_ms / "timeout_ms"): one watchdog thread
     struct Deadline;

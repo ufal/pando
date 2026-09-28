@@ -1731,6 +1731,7 @@ void QueryExecutor::compile_conditions(const ConditionPtr& cond) const {
                 // regex is a lookup, and a literal prefix narrows the scan to the
                 // matching id range (the lexicon is sorted).
                 const auto& lex = corpus_.attr(name).lexicon();
+                ac.id_set.clear();   // a scan cancelled half-way (QueryCancelled) left a partial set
                 LexiconId lex_lo = 0, nlex = lex.size();
                 bool exact = false;
                 const std::string prefix = (ac.case_insensitive || ac.diacritics_insensitive)
@@ -1755,6 +1756,9 @@ void QueryExecutor::compile_conditions(const ConditionPtr& cond) const {
                     compiled = it->second.get();
                 }
                 for (LexiconId id = lex_lo; id < nlex; ++id) {
+                    // a scan over a large lexicon can take seconds: honour cancel / timeouts
+                    if ((id & 0xFFFF) == 0 && progress_ && progress_->cancel.load(std::memory_order_relaxed))
+                        throw QueryCancelled();
                     const std::string_view v = lex.get(id);
                     if (!req.empty() && v.find(req) == std::string_view::npos) continue;
                     if (regex_eval_sv(v, *compiled, ac.regex_full_match))
@@ -1766,6 +1770,9 @@ void QueryExecutor::compile_conditions(const ConditionPtr& cond) const {
                 if (it == regex_cache_.end())
                     it = regex_cache_.emplace(ac.value, std::regex(ac.value)).first;
                 for (LexiconId id = lex_lo; id < nlex; ++id) {
+                    // a scan over a large lexicon can take seconds: honour cancel / timeouts
+                    if ((id & 0xFFF) == 0 && progress_ && progress_->cancel.load(std::memory_order_relaxed))
+                        throw QueryCancelled();
                     const std::string_view v = lex.get(id);
                     if (!req.empty() && v.find(req) == std::string_view::npos) continue;
                     if (regex_eval_sv(v, it->second, ac.regex_full_match))
@@ -2666,10 +2673,13 @@ std::vector<CorpusPos> QueryExecutor::resolve_leaf(
         if (ids.size() == 1) return pa.positions_of_id(ids[0]);
         // Union posting lists of all matching lex IDs
         std::vector<CorpusPos> result;
+        size_t k = 0;
         for (LexiconId id : ids) {
+            if ((++k & 0x3FF) == 0) check_cancelled();
             auto pos = pa.positions_of_id(id);
             result.insert(result.end(), pos.begin(), pos.end());
         }
+        check_cancelled();
         std::sort(result.begin(), result.end());
         return result;
     }
@@ -2681,12 +2691,18 @@ std::vector<CorpusPos> QueryExecutor::resolve_leaf(
             return pa.positions_not(ac.value, corpus_.size());
         case CompOp::REGEX: {
             if (ac.id_set_resolved) {
+                // a regex over a large lexicon can match millions of types: the
+                // union (and its sort) takes seconds, so honour cancel / timeouts
                 std::vector<CorpusPos> result;
+                size_t k = 0;
                 for (int32_t id : ac.id_set) {
+                    if ((++k & 0x3FF) == 0) check_cancelled();
                     RevSpan sp = pa.rev_span_of_id(static_cast<LexiconId>(id));
                     for (size_t i = 0; i < sp.count; ++i) result.push_back(sp.at(i));
                 }
+                check_cancelled();
                 std::sort(result.begin(), result.end());
+                check_cancelled();
                 return result;
             }
 #ifdef PANDO_USE_RE2
@@ -4136,6 +4152,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                     const CorpusPos N = corpus_.size();
                     const size_t nch = static_cast<size_t>((N + BitmapIndex::kChunk - 1) >> BitmapIndex::kChunkShift);
                     for (size_t ch = 0; ch < nch; ++ch) {
+                        if ((ch & 0xFF) == 0) check_cancelled();
                         const BmChunk v = e->load(ch);
                         if (v.zero) continue;
                         const CorpusPos base = static_cast<CorpusPos>(ch) << BitmapIndex::kChunkShift;

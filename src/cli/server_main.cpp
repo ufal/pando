@@ -8,6 +8,7 @@
 #include "core/json_utils.h"
 #include "corpus/corpus.h"
 #include <httplib.h>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -49,7 +50,12 @@ int main(int argc, char* argv[]) {
                   << "    --session-ttl SEC       close a session unused for SEC (default 1800)\n"
                   << "    --max-sessions N        open sessions (default 256; the least recently used idle one makes room)\n"
                   << "    --session-memory MB     materialised hits over all sessions (default 2048; 0 = no limit)\n"
-                  << "    --session-max-hits N    hits one stored set may materialise (default 5000000; 0 = no limit)\n";
+                  << "    --session-max-hits N    hits one stored set may materialise (default 5000000; 0 = no limit)\n"
+                  << "  Limits by tier (\"tier\" per request: visitor / user / admin, …):\n"
+                  << "    --limits FILE           JSON server options: {\"tiers\": {\"visitor\": {\"timeout_ms\": …,\n"
+                  << "                            \"max_count_hits\": …, \"deny\": [\"transitive\"]}, …},\n"
+                  << "                            \"default_tier\": \"visitor\", \"trust_tier\": true} (wiki: CLI reference)\n"
+                  << "    --trust-tier            honour the request's \"tier\" (only behind a front-end that sets it)\n";
         return 1;
     }
     std::string corpus_dir = argv[1];
@@ -61,6 +67,8 @@ int main(int argc, char* argv[]) {
     size_t query_timeout_ms = 0;
     unsigned query_threads = 1;
     SessionConfig sess_cfg;
+    std::string limits_file;
+    bool trust_tier = false;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
         auto num_arg = [&](long long& out) -> bool {
@@ -93,6 +101,15 @@ int main(int argc, char* argv[]) {
         }
         if (a == "--preload") {
             preload = true;
+            continue;
+        }
+        if (a == "--limits") {
+            if (i + 1 >= argc) { std::cerr << "--limits needs a file\n"; return 1; }
+            limits_file = argv[++i];
+            continue;
+        }
+        if (a == "--trust-tier") {
+            trust_tier = true;
             continue;
         }
         if (a == "--no-preload") {
@@ -130,6 +147,21 @@ int main(int argc, char* argv[]) {
     cfg.query_timeout_ms = query_timeout_ms;
     cfg.query_threads = query_threads;
     cfg.sessions = sess_cfg;
+    if (!limits_file.empty()) {
+        std::ifstream in(limits_file);
+        if (!in) {
+            std::cerr << "cannot read " << limits_file << "\n";
+            return 1;
+        }
+        std::stringstream buf;
+        buf << in.rdbuf();
+        cfg = parse_server_options(buf.str(), cfg);
+    }
+    if (trust_tier) cfg.trust_tier = true;
+    for (const auto& [name, lim] : cfg.tiers)
+        for (const auto& f : lim.deny)
+            if (std::find(limit_features().begin(), limit_features().end(), f) == limit_features().end())
+                std::cerr << "warning: tier " << name << ": unknown deny feature '" << f << "'\n";
     ServerApi api(corpus, cfg);
 
     httplib::Server svr;
