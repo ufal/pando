@@ -30,6 +30,8 @@ enum class CompOp {
     LTE,      // <=
     GTE,      // >=
     REGEX,    // = /pattern/
+    IN,       // internal: the token is one of AttrCondition::in_positions (a cross-statement
+              // alignment `:: eng.s_tuid = nld.s_tuid` with `eng` bound by an earlier statement)
 };
 
 // ── Structural relation types for nested conditions ───────────────────────
@@ -80,6 +82,10 @@ struct AttrCondition {
     // if false, substring match (RE2::PartialMatch / std::regex_search). Quoted-string CWB-style
     // heuristics set this instead of wrapping the pattern in ^$.
     bool regex_full_match = false;
+
+    /// op == IN: the sorted token positions that satisfy the condition (set by
+    /// QueryExecutor::bind_external_alignment; `value` then only describes it).
+    std::shared_ptr<const std::vector<CorpusPos>> in_positions;
 };
 
 // ── Boolean combination of conditions ───────────────────────────────────

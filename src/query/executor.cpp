@@ -845,7 +845,8 @@ static void expect_alignment_operand_label(const std::string& name, const std::s
                                            const std::unordered_set<std::string>& region_labels) {
     if (name.empty()) return;
     if (token_labels.count(name) || region_labels.count(name)) return;
-    throw std::runtime_error(ctx + ": unknown name '" + name + "'");
+    throw std::runtime_error(ctx + ": unknown name '" + name + "' (neither this query nor an earlier "
+                             "statement of the program / session binds it)");
 }
 
 static const char* struct_rel_keyword(StructRelType t) {
@@ -1712,7 +1713,7 @@ void QueryExecutor::compile_conditions(const ConditionPtr& cond) const {
     if (!cond) return;
     if (cond->is_leaf) {
         AttrCondition& ac = const_cast<AttrCondition&>(cond->leaf);
-        if (ac.is_nvals) return;
+        if (ac.is_nvals || ac.op == CompOp::IN) return;
         if ((ac.op == CompOp::EQ || ac.op == CompOp::NEQ)
             && !ac.case_insensitive && !ac.diacritics_insensitive) {
             std::string name = normalize_attr(ac.attr);
@@ -1820,6 +1821,146 @@ void QueryExecutor::compile_query(const TokenQuery& query) const {
         compile_conditions(cc.subtree_cond);
 }
 
+std::vector<std::string> QueryExecutor::query_labels(const TokenQuery& query) {
+    std::unordered_set<std::string> t, r;
+    collect_token_and_region_labels(query, &t, &r);
+    std::vector<std::string> out(t.begin(), t.end());
+    out.insert(out.end(), r.begin(), r.end());
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+size_t QueryExecutor::bind_external_alignment(TokenQuery& query, const LabelLookup& lookup) const {
+    if (query.global_alignment_filters.empty()) return 0;
+    std::unordered_set<std::string> token_labels, region_labels;
+    collect_token_and_region_labels(query, &token_labels, &region_labels);
+    auto local = [&](const std::string& n) { return token_labels.count(n) || region_labels.count(n); };
+
+    auto split_into = [](std::string_view v, std::unordered_set<std::string>& out) {
+        size_t start = 0;
+        while (start <= v.size()) {
+            const size_t p = v.find('|', start);
+            const size_t end = p == std::string_view::npos ? v.size() : p;
+            if (end > start) out.insert(std::string(v.substr(start, end - start)));
+            if (p == std::string_view::npos) break;
+            start = p + 1;
+        }
+    };
+    const bool with_empty = include_empty_alignment_values_;
+    // does a value on the local side share a component with the earlier values?
+    auto hits = [&](std::string_view v, const std::unordered_set<std::string>& vals) {
+        if (!with_empty && alignment_value_is_missing(v)) return false;
+        if (v.find('|') == std::string_view::npos) return vals.count(std::string(v)) > 0;
+        std::unordered_set<std::string> comps;
+        split_into(v, comps);
+        for (const auto& c : comps)
+            if (vals.count(c)) return true;
+        return false;
+    };
+
+    size_t bound = 0;
+    std::vector<GlobalAlignmentFilter> keep;
+    for (const auto& af : query.global_alignment_filters) {
+        const bool l1 = local(af.name1), l2 = local(af.name2);
+        if (l1 == l2) {   // both in this query (or neither: validation says so)
+            keep.push_back(af);
+            continue;
+        }
+        const std::string& ext = l1 ? af.name2 : af.name1;
+        const std::string& ext_attr = l1 ? af.attr2 : af.attr1;
+        const std::string& loc = l1 ? af.name1 : af.name2;
+        const std::string& loc_attr = l1 ? af.attr1 : af.attr2;
+        std::optional<LabelBinding> b = lookup ? lookup(ext) : std::nullopt;
+        if (!b || !b->ms) {
+            keep.push_back(af);
+            continue;
+        }
+        if (!token_labels.count(loc))
+            throw std::runtime_error(":: " + ext + "." + ext_attr + " = " + loc + "." + loc_attr + ": '" + loc
+                                     + "' is a region binding; aligning with the earlier statement's '" + ext
+                                     + "' needs a token label here (e.g. " + loc + ":[])");
+        const std::string ext_an = normalize_attr(ext_attr), loc_an = normalize_attr(loc_attr);
+        for (const std::string* an : {&ext_an, &loc_an})
+            if (!alignment_attr_is_supported(corpus_, *an))
+                throw std::runtime_error(":: alignment filter: no attribute '" + *an + "' in this corpus");
+
+        // the earlier statement's values (components of multivalues)
+        std::unordered_set<std::string> vals;
+        for (const auto& m : b->ms->matches) {
+            auto v = resolve_alignment_operand_value(corpus_, m, b->nm, ext, ext_an);
+            if (!v) continue;
+            if (!with_empty && alignment_value_is_missing(*v)) continue;
+            if (corpus_.is_multivalue(ext_an) || v->find('|') != std::string_view::npos) split_into(*v, vals);
+            else vals.insert(std::string(*v));
+        }
+
+        // the local tokens that carry one of them
+        std::vector<CorpusPos> pos;
+        if (!vals.empty()) {
+            if (corpus_.has_attr(loc_an)) {
+                const PositionalAttr& pa = corpus_.attr(loc_an);
+                const bool mv = corpus_.is_multivalue(loc_an) && pa.has_mv();
+                for (const auto& v : vals) {
+                    if (mv) {
+                        const LexiconId id = pa.mv_lookup(v);
+                        if (id != UNKNOWN_LEX)
+                            pa.for_each_position_mv(id, [&](CorpusPos p) { pos.push_back(p); return true; });
+                    } else {
+                        const LexiconId id = pa.lexicon().lookup(v);
+                        if (id != UNKNOWN_LEX)
+                            pa.for_each_position_id(id, [&](CorpusPos p) { pos.push_back(p); return true; });
+                    }
+                }
+            } else {
+                RegionAttrParts parts;
+                split_region_attr_name(loc_an, parts);
+                const StructuralAttr& sa = corpus_.structure(parts.struct_name);
+                const std::string key = *resolve_region_attr_key(sa, parts.struct_name, parts.attr_name);
+                const CorpusPos ntok = corpus_.size();
+                auto add_region = [&](size_t ri) {
+                    if (ri >= sa.region_count()) return;
+                    const Region r = sa.get(ri);
+                    for (CorpusPos p = std::max<CorpusPos>(r.start, 0); p <= r.end && p < ntok; ++p) pos.push_back(p);
+                };
+                if (sa.has_region_value_reverse(key)) {
+                    // over the distinct values, then their regions
+                    const LexiconId K = sa.region_attr_lex_size(key);
+                    for (LexiconId id = 0; id < K; ++id) {
+                        if ((id & 0xFFFF) == 0) check_cancelled();
+                        const std::string_view v = sa.region_attr_lex_get(key, id);
+                        if (!hits(v, vals)) continue;
+                        const int64_t* regs = nullptr;
+                        size_t nreg = 0;
+                        if (sa.regions_for_value(key, std::string(v), regs, nreg))
+                            for (size_t i = 0; i < nreg; ++i) add_region(static_cast<size_t>(regs[i]));
+                    }
+                } else {
+                    for (size_t ri = 0; ri < sa.region_count(); ++ri) {
+                        if ((ri & 0xFFFF) == 0) check_cancelled();
+                        if (hits(sa.region_value(key, ri), vals)) add_region(ri);
+                    }
+                }
+            }
+            std::sort(pos.begin(), pos.end());
+            pos.erase(std::unique(pos.begin(), pos.end()), pos.end());
+        }
+
+        AttrCondition ac;
+        ac.attr = loc_attr;
+        ac.op = CompOp::IN;
+        ac.value = ext + "." + ext_attr;
+        ac.in_positions = std::make_shared<const std::vector<CorpusPos>>(std::move(pos));
+        ConditionPtr leaf = ConditionNode::make_leaf(std::move(ac));
+        for (auto& t : query.tokens) {
+            if (t.is_anchor() || t.name != loc) continue;
+            t.conditions = t.conditions ? ConditionNode::make_branch(BoolOp::AND, t.conditions, leaf) : leaf;
+        }
+        ++bound;
+    }
+    query.global_alignment_filters = std::move(keep);
+    return bound;
+}
+
 void QueryExecutor::validate_query_name_bindings(const TokenQuery& query,
                                                  const TokenQuery* merge_labels_from) const {
     std::unordered_set<std::string> token_labels;
@@ -1895,6 +2036,7 @@ void QueryExecutor::validate_query_name_bindings(const TokenQuery& query,
 // bound that's free to compute.
 
 size_t QueryExecutor::estimate_leaf(const AttrCondition& ac) const {
+    if (ac.op == CompOp::IN) return ac.in_positions ? ac.in_positions->size() : 0;
     std::string name = normalize_attr(ac.attr);
     if (ac.is_nvals)
         return static_cast<size_t>(corpus_.size());
@@ -2123,6 +2265,8 @@ std::optional<int64_t> QueryExecutor::nvals_cardinality_at(
 }
 
 bool QueryExecutor::check_leaf(CorpusPos pos, const AttrCondition& ac) const {
+    if (ac.op == CompOp::IN)
+        return ac.in_positions && std::binary_search(ac.in_positions->begin(), ac.in_positions->end(), pos);
     if (ac.is_nvals) {
         auto n = nvals_cardinality_at(pos, ac.attr);
         if (!n) return false;
@@ -2653,6 +2797,14 @@ static std::vector<CorpusPos> union_id_postings(const PositionalAttr& pa, const 
 
 std::vector<CorpusPos> QueryExecutor::resolve_leaf(
         const AttrCondition& ac) const {
+    if (ac.op == CompOp::IN) {
+        if (!ac.in_positions) return {};
+        const auto& v = *ac.in_positions;
+        if (!windowed()) return v;
+        auto a = std::lower_bound(v.begin(), v.end(), operand_window_.lo);
+        auto b = std::lower_bound(a, v.end(), operand_window_.hi);
+        return std::vector<CorpusPos>(a, b);
+    }
     std::string name = normalize_attr(ac.attr);
 
     if (ac.is_nvals) {
@@ -4158,6 +4310,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
         if (!c) return false;
         if (c->is_leaf) {
             const AttrCondition& ac = c->leaf;
+            if (ac.op == CompOp::IN) return true;   // a position list already
             if (ac.is_nvals) return false;
             if (ac.op != CompOp::EQ && ac.op != CompOp::NEQ && ac.op != CompOp::REGEX)
                 return false;

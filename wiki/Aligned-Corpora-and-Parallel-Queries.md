@@ -77,6 +77,12 @@ nld:[upos="NOUN"] :: match.text_lang = "Dutch" & eng.s_tuid = nld.s_tuid
 
 Here `eng` / `nld` are **named tokens**; `s_tuid` is the sentence-level attribute (region naming: struct `s`, attribute `tuid` → `s_tuid` in queries).
 
+The two statements can also be one program: `eng:[lemma="property"] :: eng.text_lang = "English"; nld:[upos="NOUN"] :: match.text_lang = "Dutch" & eng.s_tuid = nld.s_tuid; count by nld.lemma`. How a name from an earlier statement is used:
+
+- the values of `eng.s_tuid` are collected over **all** of the earlier statement's hits (not only the page it showed), and `nld` must carry one of them; with multivalues, sharing one component is enough, and `_` / empty values never align (unless `--allow-empty-alignment`);
+- the latest statement that binds a name is the one used; a chain works too (`…; nld:[…] :: eng.s_tuid = nld.s_tuid; back:[…] :: nld.s_tuid = back.s_tuid`);
+- this holds in CLI programs and the interactive session, and in pando-server `/run` programs, where a session (`session_id`) keeps the names of earlier requests too (including a `/query` stored with `name`). A single `/query` cannot refer to another request's names: send such a query as `/run`.
+
 ### 3.2 Word-level alignment (token `tuid`)
 
 MISC / indexer copies **token** `tuid` (possibly overriding sentence default). Use when you need **word-aligned** bitext:

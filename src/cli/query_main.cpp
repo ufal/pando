@@ -893,6 +893,9 @@ struct Session {
     NameIndexMap last_name_map;
     NameIndexMap last_target_name_map;
     bool has_last = false;
+    /// Persistent names: token / region label → the (latest) query that bound it,
+    /// re-run in full when a later statement aligns with it (`:: eng.s_tuid = nld.s_tuid`).
+    std::map<std::string, TokenQuery> label_queries;
 };
 
 static void emit_count(const Corpus& corpus, const MatchSet& ms,
@@ -2580,6 +2583,21 @@ static void run_query(const Corpus& corpus, const std::string& input,
                 }
             }
 
+            // Persistent names: `:: eng.s_tuid = nld.s_tuid` with `eng` from an earlier
+            // statement becomes a condition on `nld` (the values over all of eng's hits).
+            if (!stmt.is_parallel && !stmt.query.global_alignment_filters.empty()) {
+                executor.set_include_empty_alignment_values(opts.allow_empty_alignment);
+                executor.bind_external_alignment(stmt.query, [&](const std::string& label)
+                        -> std::optional<QueryExecutor::LabelBinding> {
+                    auto it = session.label_queries.find(label);
+                    if (it == session.label_queries.end()) return std::nullopt;
+                    auto ms = std::make_shared<MatchSet>(
+                            executor.execute(it->second, 0, true, 0, 0, 0, opts.threads, nullptr, true));
+                    return QueryExecutor::LabelBinding{
+                            ms, QueryExecutor::build_name_map_for_stripped_query(it->second)};
+                });
+            }
+
             // Refresh anchor-binding mode in case `set anchor-binding = …` was used.
             executor.set_anchor_binding_mode(opts.anchor_binding == "innermost"
                                              ? QueryExecutor::AnchorBindingMode::Innermost
@@ -2621,6 +2639,10 @@ static void run_query(const Corpus& corpus, const std::string& input,
                                           aggregate_by);
             }
             session.has_last = true;
+            if (!stmt.is_parallel
+                && !(stmt.query.tokens.size() == 1 && stmt.query.tokens[0].is_dep_subtree))
+                for (const auto& label : QueryExecutor::query_labels(stmt.query))
+                    session.label_queries[label] = stmt.query;
             session.last_name_map = stmt.is_parallel
                 ? build_name_map(stmt.query)
                 : QueryExecutor::build_name_map_for_stripped_query(stmt.query);
@@ -2649,11 +2671,13 @@ static void run_query(const Corpus& corpus, const std::string& input,
             }
 
             if (!next_is_command) {
-                if (opts.count_only) {
+                // (a program's earlier query statements only feed later ones)
+                const bool final_query = si + 1 == prog.size();
+                if (opts.count_only && final_query) {
                     std::cout << session.last_ms.total_count << "\n";
                     return;
                 }
-                if (opts.dump_matches || opts.dump_page) {
+                if ((opts.dump_matches || opts.dump_page) && final_query) {
                     const auto& ms = session.last_ms;
                     std::cout << "total=" << ms.total_count
                               << " exact=" << (ms.total_exact ? 1 : 0) << "\n";

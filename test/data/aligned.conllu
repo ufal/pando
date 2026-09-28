@@ -1,0 +1,81 @@
+# newregion text
+# text_lang = English
+# newregion s
+# sent_id = En-0
+# tuid = u1
+# text = The library is old .
+1	The	the	DET	_	_	2	dep	_	tuid=u1.1
+2	library	library	NOUN	_	_	0	root	_	tuid=u1.2
+3	is	be	AUX	_	_	2	dep	_	tuid=u1.3
+4	old	old	ADJ	_	_	2	dep	_	tuid=u1.4
+5	.	.	PUNCT	_	_	2	dep	_	tuid=u1.5
+
+# newregion s
+# sent_id = En-1
+# tuid = u2
+# text = I like the park .
+1	I	I	PRON	_	_	2	dep	_	tuid=u2.1
+2	like	like	VERB	_	_	0	root	_	tuid=u2.2
+3	the	the	DET	_	_	2	dep	_	tuid=u2.3
+4	park	park	NOUN	_	_	2	dep	_	tuid=u2.4
+5	.	.	PUNCT	_	_	2	dep	_	tuid=u2.5
+
+# newregion s
+# sent_id = En-2
+# tuid = u3
+# text = The library opens .
+1	The	the	DET	_	_	2	dep	_	tuid=u3.1
+2	library	library	NOUN	_	_	0	root	_	tuid=u3.2
+3	opens	open	VERB	_	_	2	dep	_	tuid=u3.3
+4	.	.	PUNCT	_	_	2	dep	_	tuid=u3.4
+
+# newregion s
+# sent_id = En-3
+# tuid = _
+# text = No library here .
+1	No	no	DET	_	_	2	dep	_	_
+2	library	library	NOUN	_	_	0	root	_	_
+3	here	here	ADV	_	_	2	dep	_	_
+4	.	.	PUNCT	_	_	2	dep	_	_
+
+# newregion text
+# text_lang = Dutch
+# newregion s
+# sent_id = Du-0
+# tuid = u1
+# text = De bibliotheek is oud .
+1	De	de	DET	_	_	2	dep	_	tuid=u1.1
+2	bibliotheek	bibliotheek	NOUN	_	_	0	root	_	tuid=u1.2
+3	is	zijn	AUX	_	_	2	dep	_	tuid=u1.3
+4	oud	oud	ADJ	_	_	2	dep	_	tuid=u1.4
+5	.	.	PUNCT	_	_	2	dep	_	tuid=u1.5
+
+# newregion s
+# sent_id = Du-1
+# tuid = u2
+# text = Ik hou van het park .
+1	Ik	ik	PRON	_	_	2	dep	_	tuid=u2.1
+2	hou	houden	VERB	_	_	0	root	_	tuid=u2.2
+3	van	van	ADP	_	_	2	dep	_	tuid=u2.3
+4	het	het	DET	_	_	2	dep	_	tuid=u2.4
+5	park	park	NOUN	_	_	2	dep	_	tuid=u2.5
+6	.	.	PUNCT	_	_	2	dep	_	tuid=u2.6
+
+# newregion s
+# sent_id = Du-2
+# tuid = u3|u9
+# text = De bibliotheek gaat open .
+1	De	de	DET	_	_	2	dep	_	tuid=u3.1
+2	bibliotheek	bibliotheek	NOUN	_	_	0	root	_	tuid=u3.2
+3	gaat	gaan	VERB	_	_	2	dep	_	tuid=u3.3
+4	open	open	ADV	_	_	2	dep	_	tuid=u3.4
+5	.	.	PUNCT	_	_	2	dep	_	tuid=u3.5
+
+# newregion s
+# sent_id = Du-3
+# tuid = _
+# text = Geen bibliotheek .
+1	Geen	geen	DET	_	_	2	dep	_	_
+2	bibliotheek	bibliotheek	NOUN	_	_	0	root	_	_
+3	.	.	PUNCT	_	_	2	dep	_	_
+

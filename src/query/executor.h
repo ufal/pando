@@ -678,6 +678,25 @@ public:
     void set_anchor_binding_mode(AnchorBindingMode m) { anchor_binding_mode_ = m; }
     AnchorBindingMode anchor_binding_mode() const { return anchor_binding_mode_; }
 
+    // ── Persistent names: alignment with an earlier statement ──────────────
+    /// The hits of an earlier statement that bound a label, and its name map.
+    struct LabelBinding {
+        std::shared_ptr<const MatchSet> ms;
+        NameIndexMap nm;
+    };
+    /// label → the earlier result that bound it (nullopt: no such label).
+    using LabelLookup = std::function<std::optional<LabelBinding>(const std::string& label)>;
+    /// Token and region labels a query binds.
+    static std::vector<std::string> query_labels(const TokenQuery& query);
+    /// `:: eng.s_tuid = nld.s_tuid` where `nld` is this query's token and `eng` a
+    /// label of an earlier statement (names persist across statements): the values
+    /// of `eng.s_tuid` over that statement's hits become a condition on `nld` (its
+    /// token must carry one of them; multivalues: any shared component), and the
+    /// filter is removed. Filters whose names are both local are left alone, as are
+    /// names `lookup` does not know (validation reports them). Returns the number
+    /// of filters bound.
+    size_t bind_external_alignment(TokenQuery& query, const LabelLookup& lookup) const;
+
     /// P6.5e: the operand window of a progressive-page range worker (see below).
     bool windowed() const { return operand_window_.hi > operand_window_.lo; }
     const PosRange& operand_window() const { return operand_window_; }

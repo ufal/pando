@@ -264,6 +264,12 @@ if(BUILD_TESTING)
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
                 --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu
                 --queries ${CMAKE_CURRENT_SOURCE_DIR}/test/fastpath_queries.txt)
+        # Persistent names: alignment with a token named by an earlier statement
+        add_test(NAME persistent_names
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/persistent_names_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
+                --server $<TARGET_FILE:pando-server>
+                --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/aligned.conllu)
     endif()
 
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/index/dep_jsonl_alignment_test.cpp")

@@ -245,9 +245,29 @@ struct ProgramSession::Impl {
         auto it = sets.find(name);
         return it == sets.end() ? nullptr : it->second;
     }
+    /// Persistent names: token / region label → the latest query that bound it: its
+    /// set while the session still holds it (hits kept there are reused), else the
+    /// recipe, re-run when a later statement aligns with the label.
+    struct LabelRef {
+        std::weak_ptr<HitSet> live;
+        HitSetPtr recipe;   // prog + stmt + name map, never holds hits
+    };
+    std::map<std::string, LabelRef> labels;
+
     void bind(const std::string& name, const HitSetPtr& hs) {
         sets["Last"] = hs;
         if (!name.empty() && name != "Last") sets[name] = hs;
+        const Statement& st = hs->st();
+        if (!st.is_parallel && !(st.query.tokens.size() == 1 && st.query.tokens[0].is_dep_subtree))
+            if (auto labs = QueryExecutor::query_labels(st.query); !labs.empty()) {
+                auto recipe = std::make_shared<HitSet>();
+                recipe->prog = hs->prog;
+                recipe->stmt = hs->stmt;
+                recipe->display = hs->display;
+                recipe->allow_empty_alignment = hs->allow_empty_alignment;
+                recipe->nm = hs->nm;
+                for (const auto& label : labs) labels[label] = LabelRef{hs, recipe};
+            }
     }
     HitSetInfo describe(const std::string& name, const HitSetPtr& hs) const {
         HitSetInfo i;
@@ -1745,6 +1765,28 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
 
         if (stmt.has_query) {
             immediate.reset();
+            // Persistent names: `:: eng.s_tuid = nld.s_tuid` with `eng` bound by an
+            // earlier statement (or request of this session) → a condition on `nld`
+            if (!stmt.is_parallel && !stmt.query.global_alignment_filters.empty()) {
+                executor.bind_external_alignment(stmt.query, [&](const std::string& label)
+                        -> std::optional<QueryExecutor::LabelBinding> {
+                    auto it = S.labels.find(label);
+                    if (it == S.labels.end()) return std::nullopt;
+                    // the session's set if it still has it (its kept hits), else a
+                    // temporary one from the recipe; either way the session's size
+                    // limit and admission apply
+                    HitSetPtr live = it->second.live.lock();
+                    HitSetPtr src = live;
+                    if (!src) {
+                        src = std::make_shared<HitSet>(*it->second.recipe);
+                    }
+                    materialise(corpus, *src, label, S, threads, opts.progress);
+                    std::optional<MatchSet> tmp;
+                    const MatchSet& all = src->full_view(tmp);
+                    auto ms = tmp ? std::make_shared<MatchSet>(std::move(*tmp)) : std::make_shared<MatchSet>(all);
+                    return QueryExecutor::LabelBinding{ms, src->nm};
+                });
+            }
             auto hs = std::make_shared<HitSet>();
             hs->prog = prog;
             hs->stmt = si;
