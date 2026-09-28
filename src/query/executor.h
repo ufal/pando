@@ -678,6 +678,11 @@ public:
     void set_anchor_binding_mode(AnchorBindingMode m) { anchor_binding_mode_ = m; }
     AnchorBindingMode anchor_binding_mode() const { return anchor_binding_mode_; }
 
+    /// P6.5e: the operand window of a progressive-page range worker (see below).
+    bool windowed() const { return operand_window_.hi > operand_window_.lo; }
+    const PosRange& operand_window() const { return operand_window_; }
+    std::unordered_map<const void*, std::vector<uint64_t>>* window_id_bits() const { return window_id_bits_; }
+
 private:
     bool include_empty_alignment_values_ = false;
     AnchorBindingMode anchor_binding_mode_ = AnchorBindingMode::Fanout;
@@ -911,6 +916,18 @@ private:
     /// Workers run on a query the driver already compiled (compile_conditions
     /// writes into the shared AST, so it must not run concurrently).
     bool skip_compile_ = false;
+    /// P6.5e: materialised operands (id-set unions, `!=`, AND / OR lists) only
+    /// cover these positions (hi == 0: the whole corpus). Set by the progressive
+    /// page driver on its range workers: the range ± the longest match.
+    PosRange operand_window_{};
+    /// The progressive driver's id bitmaps (a regex's id set as a bitmap over the
+    /// lexicon), shared by its range workers, which run one after the other.
+    std::unordered_map<const void*, std::vector<uint64_t>>* window_id_bits_ = nullptr;
+    /// P6.5e: a page (no total) whose operands would be huge unions is found
+    /// range by range, growing, until the page is full — each range builds only
+    /// its part of the operands. nullopt = not applicable.
+    std::optional<MatchSet> execute_progressive_page(const TokenQuery& query, size_t max_matches,
+                                                     uint32_t random_seed, bool skip_name_validation);
 
     MatchSet execute_impl(const TokenQuery& query,
                           size_t max_matches,

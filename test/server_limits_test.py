@@ -15,8 +15,9 @@ short background counts), user (more hits, a 0.8 s cap), admin (no limits) — a
   * total_timeout_ms: a background count stops at the tier's limit (timed_out),
     a request of the same tier does not restart it, an admin request does and it finishes;
   * without --trust-tier the request's "tier" is ignored (default tier);
-  * with --big (a UD-sized --corpus): a regex scan over the word lexicon stops at
-    the tier's timeout_ms, which a request's own "timeout_ms" cannot raise.
+  * with --big (a UD-sized --corpus): a total over four huge regex operands stops
+    at the tier's timeout_ms, which a request's own "timeout_ms" cannot raise (a
+    page of it is found range by range in a few ms, P6.5e).
 
   test/server_limits_test.py --server build/pando-server --pando-index build/pando-index \\
       --conllu test/data/sample.conllu
@@ -165,11 +166,11 @@ def main():
             if opts.big:
                 slow = '[word=".*a.*"] [word=".*e.*"] [word=".*i.*"] [word=".*o.*"]'
                 t0 = time.monotonic()
-                st, r = q("admin", slow, timeout_ms=300)
+                st, r = q("admin", slow, timeout_ms=300, total=True)
                 dt = time.monotonic() - t0
                 check(st == 408 and dt < 2.0, f"regex scan stops at the timeout: {st} after {dt:.2f} s")
                 t0 = time.monotonic()
-                st, r = q("user", slow, timeout_ms=999999)
+                st, r = q("user", slow, timeout_ms=999999, total=True)
                 dt = time.monotonic() - t0
                 check(st == 408 and 0.7 < dt < 2.5, f"user timeout (0.8 s) cannot be raised: {st} after {dt:.2f} s")
         finally:

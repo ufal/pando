@@ -128,6 +128,19 @@ queries at once, more request threads may be the better use of the cores
 (`--query-threads` defaults to 1). Ranges smaller than 2^20 tokens are not
 made (`PANDO_PARTITION_MIN` overrides, for tests on small corpora).
 
+**Progressive pages.** A page without a total of a token sequence with a huge
+complex operand and no rare token (`[word=".*a.*"] [word=".*e.*"]`: two regexes
+matching millions of tokens each) is found range by range, in sentence-aligned
+ranges of 64K, 256K, 1M, … tokens, each building only its part of the operands,
+until the page is full: 20 hits in ~20 ms instead of ~0.5 s once the regexes'
+lexicon scans are cached (the first time, the scan itself still costs 0.1–1 s).
+The page is the plain page, in the same order. Not for dependency relations,
+an optional first token, unbounded repeats or post-filters (`containing`,
+`not within`, `:: a < b`, …): those run as before. `PANDO_PROGRESSIVE_WINDOW`
+(first range) and `PANDO_PROGRESSIVE_MIN` (the operand size that triggers it,
+default 2^20 tokens) override, for tests. `--timing` reports the ranges as
+`parts=`.
+
 ### Endpoints
 
 | Endpoint | Role |

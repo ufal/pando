@@ -67,6 +67,9 @@ struct AttrCondition {
     // position; estimates and resolution use the ids' `.rev` counts and postings.
     std::vector<int32_t> id_set;
     bool id_set_resolved = false;
+    /// Σ .rev counts of id_set (set with it by compile_conditions; -1 = not known):
+    /// the planner asks for a token's cardinality many times per query.
+    int64_t id_set_total = -1;
 
     // nvals(attr) op N — cardinality of explicit pipe-separated MV values (and region overlap).
     // When true, `op` compares the computed count to `nvals_compare` (integer RHS).

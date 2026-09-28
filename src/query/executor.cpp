@@ -1702,6 +1702,12 @@ static bool feats_entry_matches(std::string_view feats,
 // check_leaf can then compare id_at(pos) == resolved_id instead of
 // value_at(pos) == string, avoiding a lexicon lookup per position.
 
+static int64_t id_set_count(const PositionalAttr& pa, const std::vector<int32_t>& ids) {
+    int64_t total = 0;
+    for (int32_t id : ids) total += static_cast<int64_t>(pa.count_of_id(static_cast<LexiconId>(id)));
+    return total;
+}
+
 void QueryExecutor::compile_conditions(const ConditionPtr& cond) const {
     if (!cond) return;
     if (cond->is_leaf) {
@@ -1727,6 +1733,7 @@ void QueryExecutor::compile_conditions(const ConditionPtr& cond) const {
                 // matching id range (the lexicon is sorted).
                 const auto& lex = corpus_.attr(name).lexicon();
                 ac.id_set.clear();   // a scan cancelled half-way (QueryCancelled) left a partial set
+                ac.id_set_total = -1;
                 LexiconId lex_lo = 0, nlex = lex.size();
                 bool exact = false;
                 const std::string prefix = (ac.case_insensitive || ac.diacritics_insensitive)
@@ -1765,6 +1772,7 @@ void QueryExecutor::compile_conditions(const ConditionPtr& cond) const {
                 if (!ac.id_set_resolved && !cache_key.empty())
                     corpus_.cache_id_set(cache_key, std::make_shared<const Corpus::IdSet>(ac.id_set));
                 ac.id_set_resolved = true;
+                ac.id_set_total = id_set_count(corpus_.attr(name), ac.id_set);
             }
         }
         if ((ac.op == CompOp::EQ || ac.op == CompOp::NEQ)
@@ -1778,6 +1786,7 @@ void QueryExecutor::compile_conditions(const ConditionPtr& cond) const {
                 ac.id_set.assign(ids.begin(), ids.end());
                 std::sort(ac.id_set.begin(), ac.id_set.end());
                 ac.id_set_resolved = true;
+                ac.id_set_total = id_set_count(corpus_.attr(name), ac.id_set);
             }
         }
         if (ac.op == CompOp::EQ && !ac.case_insensitive && !ac.diacritics_insensitive) {
@@ -1929,6 +1938,11 @@ size_t QueryExecutor::estimate_leaf(const AttrCondition& ac) const {
         return 0;
     }
     const auto& pa = corpus_.attr(name);
+
+    if (ac.id_set_resolved && ac.id_set_total >= 0
+        && (ac.op == CompOp::REGEX
+            || ((ac.case_insensitive || ac.diacritics_insensitive) && ac.op == CompOp::EQ)))
+        return static_cast<size_t>(ac.id_set_total);
 
     // Fold-aware cardinality estimation
     if ((ac.case_insensitive || ac.diacritics_insensitive) && ac.op == CompOp::EQ) {
@@ -2523,11 +2537,88 @@ void QueryExecutor::for_each_seed_position_impl(const ConditionPtr& cond,
 // covering a fifth of the corpus — go through a bitmap of the corpus (N/8 bytes,
 // less than the result itself) instead of concatenating and sorting millions of
 // positions; sparse ones concatenate and sort. Honours cancellation throughout.
+// First index of a sorted posting span with a position >= x.
+static size_t span_lower_bound(const RevSpan& sp, CorpusPos x) {
+    size_t lo = 0, hi = sp.count;
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        if (sp.at(mid) < x) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+}
+
+// The postings of `sp` within [lo, hi).
+static std::vector<CorpusPos> span_window(const RevSpan& sp, CorpusPos lo, CorpusPos hi) {
+    std::vector<CorpusPos> out;
+    for (size_t i = span_lower_bound(sp, lo); i < sp.count; ++i) {
+        const CorpusPos p = sp.at(i);
+        if (p >= hi) break;
+        out.push_back(p);
+    }
+    return out;
+}
+
+// P6.5e: the union restricted to [lo, hi) — a binary search per id, then only
+// the positions inside; a bitmap over the window when dense.
+template <class Ids>
+static std::vector<CorpusPos> union_id_postings_window(const PositionalAttr& pa, const Ids& ids,
+                                                       CorpusPos lo, CorpusPos hi, const QueryExecutor& ex,
+                                                       const void* key) {
+    std::vector<CorpusPos> out;
+    const size_t w = static_cast<size_t>(hi - lo);
+    if (ids.size() > w / 16) {
+        // many types for a small window (a regex matching half the lexicon):
+        // scan the window's ids against an id bitmap instead of seeking each list
+        const size_t L = static_cast<size_t>(pa.lexicon().size());
+        std::vector<uint64_t> local;
+        std::vector<uint64_t>* wp = &local;
+        if (auto* cache = ex.window_id_bits(); cache && key) wp = &(*cache)[key];
+        std::vector<uint64_t>& want = *wp;
+        if (want.size() != (L + 63) / 64) {   // (built once for the ranges of one page)
+            want.assign((L + 63) / 64, 0);
+            for (auto id : ids)
+                if (id >= 0 && static_cast<size_t>(id) < L)
+                    want[static_cast<size_t>(id) >> 6] |= uint64_t{1} << (static_cast<size_t>(id) & 63);
+        }
+        out.reserve(w / 4);
+        for (CorpusPos p = lo; p < hi; ++p) {
+            if (((p - lo) & 0xFFFF) == 0) ex.check_cancelled();
+            const LexiconId id = pa.id_at(p);
+            if (id >= 0 && static_cast<size_t>(id) < L
+                && (want[static_cast<size_t>(id) >> 6] >> (static_cast<size_t>(id) & 63) & 1))
+                out.push_back(p);
+        }
+        return out;
+    }
+    std::vector<uint64_t> bits((w + 63) / 64, 0);
+    size_t k = 0, n = 0;
+    for (auto id : ids) {
+        if ((++k & 0x3FF) == 0) ex.check_cancelled();
+        const RevSpan sp = pa.rev_span_of_id(static_cast<LexiconId>(id));
+        for (size_t i = span_lower_bound(sp, lo); i < sp.count; ++i) {
+            const CorpusPos p = sp.at(i);
+            if (p >= hi) break;
+            const size_t off = static_cast<size_t>(p - lo);
+            bits[off >> 6] |= uint64_t{1} << (off & 63);
+            ++n;
+        }
+    }
+    ex.check_cancelled();
+    out.reserve(n);
+    for (size_t b = 0; b < bits.size(); ++b)
+        for (uint64_t x = bits[b]; x; x &= x - 1)
+            out.push_back(lo + static_cast<CorpusPos>(b * 64 + static_cast<size_t>(__builtin_ctzll(x))));
+    return out;
+}
+
 template <class Ids>
 static std::vector<CorpusPos> union_id_postings(const PositionalAttr& pa, const Ids& ids, CorpusPos n_tokens,
-                                                const QueryExecutor& ex) {
+                                                const QueryExecutor& ex, const void* key = nullptr) {
     std::vector<CorpusPos> out;
     if (ids.empty()) return out;
+    if (ex.windowed())
+        return union_id_postings_window(pa, ids, ex.operand_window().lo,
+                                        std::min(ex.operand_window().hi, n_tokens), ex, key);
     if (ids.size() == 1) return pa.positions_of_id(static_cast<LexiconId>(ids[0]));
     size_t total = 0;
     for (auto id : ids) total += pa.count_of_id(static_cast<LexiconId>(id));
@@ -2646,9 +2737,25 @@ std::vector<CorpusPos> QueryExecutor::resolve_leaf(
         const std::vector<LexiconId> ids = ac.id_set_resolved
             ? std::vector<LexiconId>(ac.id_set.begin(), ac.id_set.end())
             : fold_lookup_ids(name, ac.case_insensitive, ac.diacritics_insensitive, ac.value);
-        return union_id_postings(pa, ids, corpus_.size(), *this);
+        return union_id_postings(pa, ids, corpus_.size(), *this, ac.id_set_resolved ? &ac : nullptr);
     }
 
+    if (windowed() && (ac.op == CompOp::EQ || ac.op == CompOp::NEQ)) {
+        // P6.5e: only the operand window (a page found range by range)
+        const CorpusPos lo = operand_window_.lo, hi = std::min(operand_window_.hi, corpus_.size());
+        const LexiconId id = pa.lexicon().lookup(ac.value);
+        std::vector<CorpusPos> in = id == UNKNOWN_LEX ? std::vector<CorpusPos>{}
+                                                      : span_window(pa.rev_span_of_id(id), lo, hi);
+        if (ac.op == CompOp::EQ) return in;
+        std::vector<CorpusPos> out;
+        out.reserve(static_cast<size_t>(hi - lo) - in.size());
+        size_t j = 0;
+        for (CorpusPos p = lo; p < hi; ++p) {
+            if (j < in.size() && in[j] == p) { ++j; continue; }
+            out.push_back(p);
+        }
+        return out;
+    }
     switch (ac.op) {
         case CompOp::EQ:
             return pa.positions_of(ac.value);
@@ -2656,7 +2763,7 @@ std::vector<CorpusPos> QueryExecutor::resolve_leaf(
             return pa.positions_not(ac.value, corpus_.size());
         case CompOp::REGEX: {
             if (ac.id_set_resolved)   // a regex can match millions of types: bitmap union
-                return union_id_postings(pa, ac.id_set, corpus_.size(), *this);
+                return union_id_postings(pa, ac.id_set, corpus_.size(), *this, &ac);
             const Regex& compiled = regex_for(ac.value);
             return pa.positions_matching(compiled, ac.regex_full_match);
         }
@@ -2668,9 +2775,11 @@ std::vector<CorpusPos> QueryExecutor::resolve_leaf(
 std::vector<CorpusPos> QueryExecutor::resolve_conditions(
         const ConditionPtr& cond) const {
     if (!cond) {
-        std::vector<CorpusPos> all(static_cast<size_t>(corpus_.size()));
-        for (CorpusPos i = 0; i < corpus_.size(); ++i)
-            all[static_cast<size_t>(i)] = i;
+        const CorpusPos lo = windowed() ? operand_window_.lo : 0;
+        const CorpusPos hi = windowed() ? std::min(operand_window_.hi, corpus_.size()) : corpus_.size();
+        std::vector<CorpusPos> all(static_cast<size_t>(hi - lo));
+        for (CorpusPos i = lo; i < hi; ++i)
+            all[static_cast<size_t>(i - lo)] = i;
         return all;
     }
     if (cond->is_leaf) return resolve_leaf(cond->leaf);
@@ -4072,7 +4181,14 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
         if (o.kind != SeqMergeTok::Complex || fastpath_mode() != FastPathMode::On) return o;
         if (!plain_condition(c)) return o;
         const size_t est = estimate_cardinality(c);
-        if (est > static_cast<size_t>(corpus_.size()) / 2 || est > materialize_max()) return o;
+        if (est > static_cast<size_t>(corpus_.size()) / 2) return o;
+        if (windowed()) {   // P6.5e: only the window's share is built
+            const double f = static_cast<double>(operand_window_.hi - operand_window_.lo)
+                             / static_cast<double>(std::max<CorpusPos>(corpus_.size(), 1));
+            if (static_cast<double>(est) * f > static_cast<double>(materialize_max())) return o;
+        } else if (est > materialize_max()) {
+            return o;
+        }
         auto materialize = [&]() -> SeqMergeOperand {
             // P3.6: a combination over bitmap attributes / region intervals
             // (`[upos="VERB" & text_langcode="en"]`) is evaluated chunk by chunk
@@ -4085,9 +4201,10 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                 if (e && dense) {
                     std::vector<CorpusPos> pos;
                     pos.reserve(std::min(est, e->estimate));
-                    const CorpusPos N = corpus_.size();
+                    const CorpusPos N = windowed() ? std::min(operand_window_.hi, corpus_.size()) : corpus_.size();
+                    const CorpusPos W0 = windowed() ? operand_window_.lo : 0;
                     const size_t nch = static_cast<size_t>((N + BitmapIndex::kChunk - 1) >> BitmapIndex::kChunkShift);
-                    for (size_t ch = 0; ch < nch; ++ch) {
+                    for (size_t ch = static_cast<size_t>(W0 >> BitmapIndex::kChunkShift); ch < nch; ++ch) {
                         if ((ch & 0xFF) == 0) check_cancelled();
                         const BmChunk v = e->load(ch);
                         if (v.zero) continue;
@@ -4095,18 +4212,26 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                         for (size_t w = 0; w < BitmapIndex::kWords; ++w)
                             for (uint64_t x = v.w[w]; x; x &= x - 1) {
                                 const CorpusPos p = base + static_cast<CorpusPos>(w * 64) + __builtin_ctzll(x);
-                                if (p < N) pos.push_back(p);
+                                if (p < N && p >= W0) pos.push_back(p);
                             }
                     }
                     return owned_postings(pos, corpus_rev_width);
                 }
             }
-            return owned_postings(resolve_conditions(c), corpus_rev_width);
+            std::vector<CorpusPos> pos = resolve_conditions(c);
+            if (windowed()) {   // leaves resolved without the window (regions, feats, …)
+                const CorpusPos lo = operand_window_.lo, hi = operand_window_.hi;
+                pos.erase(std::remove_if(pos.begin(), pos.end(),
+                                         [&](CorpusPos p) { return p < lo || p >= hi; }),
+                          pos.end());
+            }
+            return owned_postings(pos, corpus_rev_width);
         };
         // P4.1: the ranges of one partitioned query share the materialised list
-        // (the probe range builds it, the others reuse it)
+        // (the probe range builds it, the others reuse it); a windowed operand
+        // (P6.5e) is only this range's part
         Caches& cc = *caches_;
-        if (!cc.share_operands) return materialize();
+        if (!cc.share_operands || windowed()) return materialize();
         {
             std::lock_guard<std::mutex> lk(cc.operands_mu);
             auto it = cc.operands.find(c.get());
@@ -4170,9 +4295,11 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
         const PositionalAttr& pa = corpus_.attr(name);
         std::shared_ptr<BitmapIndex> bi = bitmap_index(name);
         auto id_count = [&](int64_t id) { return pa.rev_span_of_id(static_cast<LexiconId>(id)).count; };
-        auto set_expr = [&](const std::vector<int64_t>& ids) -> std::unique_ptr<BmExpr> {
+        auto set_expr = [&](const std::vector<int64_t>& ids, int64_t known = -1) -> std::unique_ptr<BmExpr> {
+            if (!bi && ids.size() > 64) return nullptr;   // (before counting: ids can be millions)
             size_t cnt = 0;
-            for (int64_t id : ids) cnt += id_count(id);
+            if (known >= 0) cnt = static_cast<size_t>(known);
+            else for (int64_t id : ids) cnt += id_count(id);
             if (bi) {
                 *dense = true;
                 if (ids.size() == 1) return std::make_unique<BmValue>(*bi, ids[0], cnt);
@@ -4195,8 +4322,9 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
         };
         if (ac.id_set_resolved
             && (ac.op == CompOp::EQ || ac.op == CompOp::NEQ || ac.op == CompOp::REGEX)) {
+            if (!bi && ac.id_set.size() > 64) return from_merge_operand();
             std::vector<int64_t> ids(ac.id_set.begin(), ac.id_set.end());
-            auto e = set_expr(ids);
+            auto e = set_expr(ids, ac.id_set_total);
             if (!e) return from_merge_operand();
             return ac.op == CompOp::NEQ ? negate(std::move(e)) : std::move(e);
         }
@@ -6507,6 +6635,11 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             c->operands.clear();
         }
     } operand_scope(*caches_, !range_);
+    if (!range_ && !windowed() && max_matches > 0 && !count_total && sample_size == 0
+        && !(aggregate_by_fields && !aggregate_by_fields->empty())) {
+        if (auto r = execute_progressive_page(query, max_matches, random_seed, skip_name_validation))
+            return std::move(*r);
+    }
     if (num_threads > 1 && !range_ && sample_size == 0) {
         if (auto r = execute_partitioned(query, max_matches, count_total, max_total_cap,
                                          random_seed, num_threads, aggregate_by_fields,
@@ -6679,6 +6812,137 @@ std::optional<MatchSet> QueryExecutor::execute_partitioned(
         result.total_exact = false;
     }
     result.partitions = static_cast<unsigned>(ranges.size());
+    result.range_ok = false;
+    return result;
+}
+
+// ── P6.5e: a page found range by range ──────────────────────────────────
+
+namespace {
+
+CorpusPos env_tokens(const char* name, CorpusPos dflt) {
+    if (const char* e = std::getenv(name)) {
+        const long long x = std::atoll(e);
+        if (x > 0) return static_cast<CorpusPos>(x);
+    }
+    return dflt;
+}
+
+}  // namespace
+
+/// A page (first hits, no total) of a query with a huge complex operand — a
+/// regex matching millions of tokens, `[word=".*a.*"] [word=".*e.*"]` — would
+/// otherwise build that operand for the whole corpus before the first hit. Here
+/// the corpus is searched in growing sentence-aligned ranges (64K tokens, then
+/// 256K, 1M, …), each range materialising only its own part of the operands
+/// (the operand window: the range plus the longest match), until the page is
+/// full. The hits of one range are those starting in it, in corpus order, so
+/// the concatenation is the page of a plain run. A path that does not honour
+/// ranges (range_ok unset) → nullopt: the plain run.
+std::optional<MatchSet> QueryExecutor::execute_progressive_page(
+        const TokenQuery& query, size_t max_matches, uint32_t random_seed, bool skip_name_validation) {
+    if (fastpath_mode() != FastPathMode::On) return std::nullopt;
+    const CorpusPos N = corpus_.size();
+    static const CorpusPos first = env_tokens("PANDO_PROGRESSIVE_WINDOW", static_cast<CorpusPos>(1) << 16);
+    static const CorpusPos min_card = env_tokens("PANDO_PROGRESSIVE_MIN", static_cast<CorpusPos>(1) << 20);
+    if (N < 4 * first) return std::nullopt;
+    // post-filters and cross-hit constraints see all hits: the plain run
+    if (query.within_having || query.not_within || !query.containing_clauses.empty()
+        || !query.position_orders.empty() || !query.global_alignment_filters.empty()
+        || !query.global_function_filters.empty() || query.tokens.empty())
+        return std::nullopt;
+    if (!query.within.empty() && corpus_.is_token_group(query.within)) return std::nullopt;
+
+    // Sequences only: the dependency paths order their hits by the seed token
+    // (dep_bitset by the dependent, dep_probe by the head) and a range picks its
+    // path by the range's cardinalities, so the ranges' pages would not add up to
+    // the plain run's page (nor its later pages).
+    for (const auto& r : query.relations)
+        if (r.type != RelationType::SEQUENCE) return std::nullopt;
+    // An optional first token: some paths order by the first mandatory token
+    // (seq_gap), others by the match start (seq_gap_bitmap).
+    for (const auto& t : query.tokens) {
+        if (t.is_anchor()) continue;
+        if (t.min_repeat < 1) return std::nullopt;
+        break;
+    }
+    // the longest match: the window padding
+    const bool sents = corpus_.has_structure("s");
+    CorpusPos span = 1;
+    for (const auto& t : query.tokens) {
+        if (t.max_repeat >= REPEAT_UNBOUNDED || t.is_dep_subtree) return std::nullopt;
+        span += std::max(1, t.max_repeat);
+    }
+    const CorpusPos pad = span;
+
+    if (!skip_name_validation) validate_query_name_bindings(query);
+    // once: workers skip it (it writes into the shared nodes); a fallback to the
+    // plain run finds the id sets resolved
+    compile_query(query);
+
+    // Worth it when some operand is a huge complex list (a regex over millions of
+    // tokens) and no token is rare: a rare token seeds the plain run, which is
+    // then fast, while the ranges would scan the corpus for a page that never fills.
+    bool huge = false;
+    size_t rarest = std::numeric_limits<size_t>::max();
+    for (const auto& t : query.tokens) {
+        if (t.is_anchor() || !t.conditions) continue;
+        const size_t est = estimate_cardinality(t.conditions);
+        if (t.min_repeat >= 1) rarest = std::min(rarest, est);
+        if (est >= static_cast<size_t>(min_card)
+            && seq_merge_operand(corpus_, t.conditions).kind == SeqMergeTok::Complex)
+            huge = true;
+    }
+    if (!huge || rarest < static_cast<size_t>(N / 64)) return std::nullopt;
+
+    const StructuralAttr* sa = sents ? &corpus_.structure("s") : nullptr;
+    auto align = [&](CorpusPos x) -> CorpusPos {
+        if (x >= N) return N;
+        if (sa) {
+            const int64_t r = sa->find_region(x);
+            if (r >= 0) {
+                const Region reg = sa->get(static_cast<size_t>(r));
+                if (reg.start < x) x = reg.end + 1;
+            }
+        }
+        return std::min(x, N);
+    };
+
+    MatchSet result;
+    bool filled = false;
+    unsigned nranges = 0;
+    std::unordered_map<const void*, std::vector<uint64_t>> id_bits;
+    CorpusPos lo = 0, size = first;
+    while (lo < N) {
+        CorpusPos hi = (N - lo < 2 * size) ? N : align(lo + size);
+        if (hi <= lo) hi = N;
+        const PosRange r{lo, hi};
+        QueryExecutor w(*this, &r, progress_);
+        w.operand_window_ = {lo > pad ? lo - pad : 0, std::min(N, hi + pad)};
+        w.window_id_bits_ = &id_bits;
+        MatchSet part = w.execute_impl(query, max_matches - result.matches.size(), false, 0, 0,
+                                       random_seed, 1, nullptr, true);
+        if (!part.range_ok) return std::nullopt;   // the path ignored the range
+        if (nranges++ == 0) {
+            result.num_tokens = part.num_tokens;
+            result.seed_token = part.seed_token;
+            result.cardinalities = part.cardinalities;
+            result.plan_path = part.plan_path;
+        }
+        for (auto& m : part.matches) {
+            if (result.matches.size() >= max_matches) break;
+            result.matches.push_back(std::move(m));
+        }
+        if (result.matches.size() >= max_matches) {
+            filled = true;
+            break;
+        }
+        lo = hi;
+        size *= 4;
+    }
+    result.total_count = result.matches.size();
+    result.total_exact = !filled;
+    result.partitions = nranges;
     result.range_ok = false;
     return result;
 }

@@ -36,7 +36,7 @@ import sys
 import tempfile
 import time
 
-ALL_MODES = ("on", "onbits", "nobm", "bmforce", "nomerge", "off", "mt", "mtbits", "mtoff")
+ALL_MODES = ("on", "onbits", "nobm", "bmforce", "nomerge", "off", "mt", "mtbits", "mtoff", "prog")
 MODES = ALL_MODES
 REF = "off"
 # onbits  = fast paths with region filters forced to the bitset representation
@@ -52,13 +52,21 @@ REF = "off"
 MT_THREADS = 4
 MT_MODES = ("mt", "mtbits", "mtoff")
 PARTITION_MIN = "50"
+# prog    = on with P6.5e progressive pages for every complex operand
+#           (PANDO_PROGRESSIVE_MIN=1) in ranges from PROGRESSIVE_WINDOW tokens: a
+#           page without a total must be the "on" page, in order.
+PROGRESSIVE_WINDOW = "64"
 
 
 def run(pando, corpus, query, args, mode, timeout):
     env = dict(os.environ, PANDO_FASTPATH="off" if mode in ("off", "mtoff") else
                "nomerge" if mode == "nomerge" else "on")
-    for k in ("PANDO_MASK_BITS", "PANDO_BITMAPS", "PANDO_PARTITION_MIN"):
+    for k in ("PANDO_MASK_BITS", "PANDO_BITMAPS", "PANDO_PARTITION_MIN",
+              "PANDO_PROGRESSIVE_MIN", "PANDO_PROGRESSIVE_WINDOW"):
         env.pop(k, None)
+    if mode == "prog":
+        env["PANDO_PROGRESSIVE_MIN"] = "1"
+        env["PANDO_PROGRESSIVE_WINDOW"] = PROGRESSIVE_WINDOW
     if mode in MT_MODES:
         env["PANDO_PARTITION_MIN"] = PARTITION_MIN
         args = [*args, "--threads", str(MT_THREADS)]
@@ -159,6 +167,14 @@ def check_query(opts, query, max_full):
             t = total_from_timing(err)
             if t != cap:
                 problems.append(f"[{mode}] --max-total {cap} gives total {t}, expected {cap}")
+
+    # P6.5e: the progressive page is the plain page, in the same order
+    if "prog" in MODES and "on" in MODES:
+        for lim in (k, 3 * k):
+            po, _, _, _ = run(opts.pando, opts.corpus, query, ["--dump-page", "--limit", str(lim)], "on", opts.timeout)
+            pp, _, _, _ = run(opts.pando, opts.corpus, query, ["--dump-page", "--limit", str(lim)], "prog", opts.timeout)
+            if parse_dump(po)[2] != parse_dump(pp)[2]:
+                problems.append(f"[prog] --dump-page --limit {lim} differs from [on]")
 
     if ref_total <= max_full:
         sets = {}
