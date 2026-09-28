@@ -9,6 +9,14 @@
 
 Dependencies are pulled in via CMake (see root `CMakeLists.txt`); you typically only need CMake and a compiler.
 
+**Recommended: RE2** for regular expressions (`brew install re2` on macOS, `apt install libre2-dev`
+on Debian / Ubuntu). CMake uses it when it finds it (`-DPANDO_USE_RE2=AUTO`, the default; `ON`
+requires it, `OFF` uses std::regex only). With RE2, `.` is one UTF-8 character (not one byte —
+`[word="h.t"]` finds *hát*), `(?i)` works, and lexicon scans are 3-4× faster; patterns RE2 does
+not support (backreferences, lookaround) still run on std::regex. The configure step prints
+`pando regex engine: ON|OFF`. A build directory configured before 2026-09-28 keeps its old
+`PANDO_USE_RE2=OFF`: reconfigure with `-DPANDO_USE_RE2=AUTO` to switch.
+
 ## Build
 
 From the repository root:

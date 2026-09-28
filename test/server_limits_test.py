@@ -3,7 +3,7 @@
 
 Starts pando-server on an index built from a CoNLL-U file with three tiers —
 visitor (default: deny transitive + regex without a literal start, few hits,
-short background counts), user (more hits, a 5 s cap), admin (no limits) — and checks:
+short background counts), user (more hits, a 0.8 s cap), admin (no limits) — and checks:
 
   * /health reports the tiers;
   * denied features answer 403 {"denied": …, "tier": …} for /query and /run, per tier;
@@ -37,7 +37,7 @@ TIERS = {
     "tiers": {
         "visitor": {"timeout_ms": 1500, "total_timeout_ms": 1000, "max_count_hits": 40, "max_hits": 30,
                     "deny": ["transitive", "regex_no_prefix"]},
-        "user": {"timeout_ms": 5000, "max_count_hits": 100000, "max_hits": 100000, "deny": ["parallel"]},
+        "user": {"timeout_ms": 800, "max_count_hits": 100000, "max_hits": 100000, "deny": ["parallel"]},
         "admin": {},
     },
     "default_tier": "visitor",
@@ -163,7 +163,7 @@ def main():
                 check(s["job"]["state"] == "finished", f"admin count finishes: {s['job']}")
 
             if opts.big:
-                slow = '[word=".*a.*"] [word=".*e.*"] [word=".*i.*"]'
+                slow = '[word=".*a.*"] [word=".*e.*"] [word=".*i.*"] [word=".*o.*"]'
                 t0 = time.monotonic()
                 st, r = q("admin", slow, timeout_ms=300)
                 dt = time.monotonic() - t0
@@ -171,7 +171,7 @@ def main():
                 t0 = time.monotonic()
                 st, r = q("user", slow, timeout_ms=999999)
                 dt = time.monotonic() - t0
-                check(st == 408 and 4.5 < dt < 7.5, f"user timeout (5 s) cannot be raised: {st} after {dt:.2f} s")
+                check(st == 408 and 0.7 < dt < 2.5, f"user timeout (0.8 s) cannot be raised: {st} after {dt:.2f} s")
         finally:
             srv.close()
 

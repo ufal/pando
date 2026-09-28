@@ -20,10 +20,12 @@ FetchContent_Declare(httplib
 )
 FetchContent_MakeAvailable(httplib)
 
-# Optional: RE2 regex library (much faster than std::regex, thread-safe matching)
-# Enable with: cmake -DPANDO_USE_RE2=ON ..
-# Requires: libre2-dev (apt) or re2 (brew)
-option(PANDO_USE_RE2 "Use Google RE2 instead of std::regex" OFF)
+# Regex engine for attribute values. RE2 (libre2-dev / brew re2): UTF-8 aware
+# (`.` = one character), `(?i)`, 3-4x faster lexicon scans; patterns RE2 cannot
+# compile (backreferences, lookaround) still run on std::regex (core/regex_engine.h).
+#   AUTO (default): RE2 when found, else std::regex;  ON: RE2 required;  OFF: std::regex only.
+set(PANDO_USE_RE2 "AUTO" CACHE STRING "Regex engine: AUTO | ON | OFF")
+set_property(CACHE PANDO_USE_RE2 PROPERTY STRINGS AUTO ON OFF)
 
 # CWB/CQP dialect: optional static library (GPL-2+ if derived from IMS CWB sources). Can be
 # disabled for minimal builds or shipped separately; see dev/CQL-DIALECT-LICENSING.md.
@@ -32,18 +34,27 @@ option(PANDO_CWB_DIALECT "Build CWB/CQP lexer, parser, and translate_cwb_program
 # PML-TQ dialect: lexer/parser scaffold + translate_pmltq_program (see dev/PMLTQ-ROADMAP.md).
 option(PANDO_PMLTQ_DIALECT "Build PML-TQ lexer, parser stub, and translate_pmltq_program" ON)
 
-if(PANDO_USE_RE2)
+set(PANDO_WITH_RE2 OFF)
+string(TOUPPER "${PANDO_USE_RE2}" _pando_re2_mode)
+if(NOT _pando_re2_mode STREQUAL "OFF" AND NOT _pando_re2_mode STREQUAL "FALSE" AND NOT _pando_re2_mode STREQUAL "0")
     find_package(re2 QUIET)
-    if(NOT re2_FOUND)
-        # Fallback: try pkg-config (Linux with libre2-dev)
+    if(re2_FOUND)
+        set(PANDO_WITH_RE2 ON)
+    else()
+        # pkg-config (Linux with libre2-dev)
         find_package(PkgConfig QUIET)
         if(PKG_CONFIG_FOUND)
-            pkg_check_modules(RE2 REQUIRED re2)
-        else()
-            message(FATAL_ERROR "RE2 not found. Install with: brew install re2 (macOS) or apt install libre2-dev (Linux)")
+            pkg_check_modules(RE2 QUIET re2)
+            if(RE2_FOUND)
+                set(PANDO_WITH_RE2 ON)
+            endif()
         endif()
     endif()
+    if(NOT PANDO_WITH_RE2 AND NOT _pando_re2_mode STREQUAL "AUTO")
+        message(FATAL_ERROR "RE2 not found. Install with: brew install re2 (macOS) or apt install libre2-dev (Linux), or -DPANDO_USE_RE2=OFF")
+    endif()
 endif()
+message(STATUS "pando regex engine: ${PANDO_WITH_RE2} (RE2; OFF = std::regex)  [PANDO_USE_RE2=${PANDO_USE_RE2}]")
 
 if(PANDO_CWB_DIALECT)
     add_library(pando_cwb_dialect STATIC
@@ -111,6 +122,7 @@ add_library(pando_core STATIC
     ${PANDO_BUILD_INFO_CPP}
     src/core/build_info.cpp
     src/core/mmap_file.cpp
+    src/core/regex_engine.cpp
     src/core/count_hierarchy_json.cpp
     src/index/lexicon.cpp
     src/index/fold_map.cpp
@@ -136,7 +148,7 @@ target_include_directories(pando_core PUBLIC src)
 add_dependencies(pando_core pando_build_info)
 target_link_libraries(pando_core PUBLIC pando_cwb_dialect pando_pmltq_dialect)
 
-if(PANDO_USE_RE2)
+if(PANDO_WITH_RE2)
     target_compile_definitions(pando_core PUBLIC PANDO_USE_RE2)
     if(re2_FOUND)
         # Modern CMake target from find_package(re2)

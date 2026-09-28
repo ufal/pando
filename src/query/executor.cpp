@@ -1,4 +1,5 @@
 #include "query/executor.h"
+#include "core/regex_engine.h"
 #include "query/bitmap_expr.h"
 #include <tuple>
 #include <algorithm>
@@ -20,28 +21,15 @@
 #include <string>
 #include <string_view>
 
-#ifndef PANDO_USE_RE2
 #include <mutex>
-#endif
 
 namespace pando {
 
 namespace {
 
-#ifdef PANDO_USE_RE2
-static bool regex_eval_sv(std::string_view val, const re2::RE2& re, bool full_match) {
-    if (full_match)
-        return re2::RE2::FullMatch(val, re);
-    return re2::RE2::PartialMatch(val, re);
+static bool regex_eval_sv(std::string_view val, const Regex& re, bool full_match) {
+    return re.match(val, full_match);
 }
-#else
-static bool regex_eval_sv(std::string_view val, const std::regex& re, bool full_match) {
-    std::string s(val);
-    if (full_match)
-        return std::regex_match(s, re);
-    return std::regex_search(s, re);
-}
-#endif
 
 // Upper bound on positions materialised for one complex operand (memory guard
 // on multi-billion-token corpora: 256M positions = 1-2 GB). PANDO_MATERIALIZE_MAX
@@ -1653,6 +1641,13 @@ std::string normalize_query_attr_name(const Corpus& corpus, const std::string& a
     return a;
 }
 
+const Regex& QueryExecutor::regex_for(const std::string& pattern) const {
+    std::lock_guard<std::mutex> lock(regex_cache_mutex_);
+    auto it = regex_cache_.find(pattern);
+    if (it == regex_cache_.end()) it = regex_cache_.emplace(pattern, std::make_unique<Regex>(pattern)).first;
+    return *it->second;   // stable: the map owns it until the executor's caches go
+}
+
 std::string QueryExecutor::normalize_attr(const std::string& attr) const {
     return normalize_query_attr_name(corpus_, attr);
 }
@@ -1746,39 +1741,29 @@ void QueryExecutor::compile_conditions(const ConditionPtr& cond) const {
                 }
                 const std::string req = (ac.case_insensitive || ac.diacritics_insensitive)
                     ? std::string() : regex_required_literal(ac.value);
-#ifdef PANDO_USE_RE2
-                const re2::RE2* compiled;
-                {
-                    std::lock_guard<std::mutex> lock(regex_cache_mutex_);
-                    auto it = regex_cache_.find(ac.value);
-                    if (it == regex_cache_.end())
-                        it = regex_cache_.emplace(ac.value, std::make_unique<re2::RE2>(ac.value)).first;
-                    compiled = it->second.get();
+                // the corpus keeps id sets across queries (page, background total,
+                // sort, next page…: one scan)
+                std::string cache_key;
+                if (!ac.id_set_resolved) {
+                    cache_key = name + '\x1f' + ac.value + '\x1f' + (ac.regex_full_match ? '1' : '0')
+                                + (ac.case_insensitive ? '1' : '0') + (ac.diacritics_insensitive ? '1' : '0');
+                    if (auto hit = corpus_.cached_id_set(cache_key)) {
+                        ac.id_set = *hit;
+                        ac.id_set_resolved = true;
+                        lex_lo = nlex = 0;
+                    }
                 }
+                const Regex& compiled = regex_for(ac.value);
                 for (LexiconId id = lex_lo; id < nlex; ++id) {
                     // a scan over a large lexicon can take seconds: honour cancel / timeouts
-                    if ((id & 0xFFFF) == 0 && progress_ && progress_->cancel.load(std::memory_order_relaxed))
-                        throw QueryCancelled();
+                    if ((id & 0xFFF) == 0) check_cancelled();
                     const std::string_view v = lex.get(id);
                     if (!req.empty() && v.find(req) == std::string_view::npos) continue;
-                    if (regex_eval_sv(v, *compiled, ac.regex_full_match))
+                    if (regex_eval_sv(v, compiled, ac.regex_full_match))
                         ac.id_set.push_back(id);
                 }
-#else
-                std::lock_guard<std::mutex> lock(regex_cache_mutex_);
-                auto it = regex_cache_.find(ac.value);
-                if (it == regex_cache_.end())
-                    it = regex_cache_.emplace(ac.value, std::regex(ac.value)).first;
-                for (LexiconId id = lex_lo; id < nlex; ++id) {
-                    // a scan over a large lexicon can take seconds: honour cancel / timeouts
-                    if ((id & 0xFFF) == 0 && progress_ && progress_->cancel.load(std::memory_order_relaxed))
-                        throw QueryCancelled();
-                    const std::string_view v = lex.get(id);
-                    if (!req.empty() && v.find(req) == std::string_view::npos) continue;
-                    if (regex_eval_sv(v, it->second, ac.regex_full_match))
-                        ac.id_set.push_back(id);
-                }
-#endif
+                if (!ac.id_set_resolved && !cache_key.empty())
+                    corpus_.cache_id_set(cache_key, std::make_shared<const Corpus::IdSet>(ac.id_set));
                 ac.id_set_resolved = true;
             }
         }
@@ -2175,29 +2160,11 @@ bool QueryExecutor::check_leaf(CorpusPos pos, const AttrCondition& ac) const {
                                     if (!multivalue_eq(val, ac.value)) { any_match = true; return false; }
                                     break;
                                 case CompOp::REGEX: {
-#ifdef PANDO_USE_RE2
-                                    const re2::RE2* compiled;
-                                    {
-                                        std::lock_guard<std::mutex> lock(regex_cache_mutex_);
-                                        auto it = regex_cache_.find(ac.value);
-                                        if (it == regex_cache_.end())
-                                            it = regex_cache_.emplace(ac.value, std::make_unique<re2::RE2>(ac.value)).first;
-                                        compiled = it->second.get();
-                                    }
-                                    if (regex_eval_sv(val, *compiled, ac.regex_full_match)) {
+                                    const Regex& compiled = regex_for(ac.value);
+                                    if (regex_eval_sv(val, compiled, ac.regex_full_match)) {
                                         any_match = true;
                                         return false;
                                     }
-#else
-                                    std::lock_guard<std::mutex> lock(regex_cache_mutex_);
-                                    auto it = regex_cache_.find(ac.value);
-                                    if (it == regex_cache_.end())
-                                        it = regex_cache_.emplace(ac.value, std::regex(ac.value)).first;
-                                    if (regex_eval_sv(val, it->second, ac.regex_full_match)) {
-                                        any_match = true;
-                                        return false;
-                                    }
-#endif
                                     break;
                                 }
                                 case CompOp::LT:
@@ -2226,23 +2193,8 @@ bool QueryExecutor::check_leaf(CorpusPos pos, const AttrCondition& ac) const {
                             case CompOp::EQ:    return multivalue_eq(val, ac.value);
                             case CompOp::NEQ:   return !multivalue_eq(val, ac.value);
                             case CompOp::REGEX: {
-#ifdef PANDO_USE_RE2
-                                const re2::RE2* compiled;
-                                {
-                                    std::lock_guard<std::mutex> lock(regex_cache_mutex_);
-                                    auto it = regex_cache_.find(ac.value);
-                                    if (it == regex_cache_.end())
-                                        it = regex_cache_.emplace(ac.value, std::make_unique<re2::RE2>(ac.value)).first;
-                                    compiled = it->second.get();
-                                }
-                                return regex_eval_sv(val, *compiled, ac.regex_full_match);
-#else
-                                std::lock_guard<std::mutex> lock(regex_cache_mutex_);
-                                auto it = regex_cache_.find(ac.value);
-                                if (it == regex_cache_.end())
-                                    it = regex_cache_.emplace(ac.value, std::regex(ac.value)).first;
-                                return regex_eval_sv(val, it->second, ac.regex_full_match);
-#endif
+                                const Regex& compiled = regex_for(ac.value);
+                                return regex_eval_sv(val, compiled, ac.regex_full_match);
                             }
                             case CompOp::LT:    return val < ac.value;
                             case CompOp::GT:    return val > ac.value;
@@ -2312,25 +2264,8 @@ bool QueryExecutor::check_leaf(CorpusPos pos, const AttrCondition& ac) const {
         case CompOp::EQ:    return multivalue_eq(val, ac.value);
         case CompOp::NEQ:   return !multivalue_eq(val, ac.value);
         case CompOp::REGEX: {
-#ifdef PANDO_USE_RE2
-            // Look up or insert compiled RE2 under lock, then match outside lock.
-            // RE2 objects are thread-safe for matching once constructed.
-            const re2::RE2* compiled;
-            {
-                std::lock_guard<std::mutex> lock(regex_cache_mutex_);
-                auto it = regex_cache_.find(ac.value);
-                if (it == regex_cache_.end())
-                    it = regex_cache_.emplace(ac.value, std::make_unique<re2::RE2>(ac.value)).first;
-                compiled = it->second.get();
-            }
-            return regex_eval_sv(val, *compiled, ac.regex_full_match);
-#else
-            std::lock_guard<std::mutex> lock(regex_cache_mutex_);
-            auto it = regex_cache_.find(ac.value);
-            if (it == regex_cache_.end())
-                it = regex_cache_.emplace(ac.value, std::regex(ac.value)).first;
-            return regex_eval_sv(val, it->second, ac.regex_full_match);
-#endif
+            const Regex& compiled = regex_for(ac.value);
+            return regex_eval_sv(val, compiled, ac.regex_full_match);
         }
         case CompOp::LT:    return val < ac.value;
         case CompOp::GT:    return val > ac.value;
@@ -2583,6 +2518,48 @@ void QueryExecutor::for_each_seed_position_impl(const ConditionPtr& cond,
 
 // ── Seed resolution (inverted index lookup) ─────────────────────────────
 
+// Sorted union of the postings of lexicon ids (a regex / %c id set). Postings of
+// distinct ids are disjoint. Dense unions — a regex like ".*a.*" matches types
+// covering a fifth of the corpus — go through a bitmap of the corpus (N/8 bytes,
+// less than the result itself) instead of concatenating and sorting millions of
+// positions; sparse ones concatenate and sort. Honours cancellation throughout.
+template <class Ids>
+static std::vector<CorpusPos> union_id_postings(const PositionalAttr& pa, const Ids& ids, CorpusPos n_tokens,
+                                                const QueryExecutor& ex) {
+    std::vector<CorpusPos> out;
+    if (ids.empty()) return out;
+    if (ids.size() == 1) return pa.positions_of_id(static_cast<LexiconId>(ids[0]));
+    size_t total = 0;
+    for (auto id : ids) total += pa.count_of_id(static_cast<LexiconId>(id));
+    size_t k = 0;
+    if (total < static_cast<size_t>(n_tokens) / 64) {
+        out.reserve(total);
+        for (auto id : ids) {
+            if ((++k & 0x3FF) == 0) ex.check_cancelled();
+            const RevSpan sp = pa.rev_span_of_id(static_cast<LexiconId>(id));
+            for (size_t i = 0; i < sp.count; ++i) out.push_back(sp.at(i));
+        }
+        ex.check_cancelled();
+        std::sort(out.begin(), out.end());
+        return out;
+    }
+    std::vector<uint64_t> bits((static_cast<size_t>(n_tokens) + 63) / 64, 0);
+    for (auto id : ids) {
+        if ((++k & 0x3FF) == 0) ex.check_cancelled();
+        const RevSpan sp = pa.rev_span_of_id(static_cast<LexiconId>(id));
+        for (size_t i = 0; i < sp.count; ++i) {
+            const CorpusPos p = sp.at(i);
+            bits[static_cast<size_t>(p) >> 6] |= uint64_t{1} << (p & 63);
+        }
+    }
+    ex.check_cancelled();
+    out.reserve(total);
+    for (size_t w = 0; w < bits.size(); ++w)
+        for (uint64_t x = bits[w]; x; x &= x - 1)
+            out.push_back(static_cast<CorpusPos>(w * 64 + static_cast<size_t>(__builtin_ctzll(x))));
+    return out;
+}
+
 std::vector<CorpusPos> QueryExecutor::resolve_leaf(
         const AttrCondition& ac) const {
     std::string name = normalize_attr(ac.attr);
@@ -2669,19 +2646,7 @@ std::vector<CorpusPos> QueryExecutor::resolve_leaf(
         const std::vector<LexiconId> ids = ac.id_set_resolved
             ? std::vector<LexiconId>(ac.id_set.begin(), ac.id_set.end())
             : fold_lookup_ids(name, ac.case_insensitive, ac.diacritics_insensitive, ac.value);
-        if (ids.empty()) return {};
-        if (ids.size() == 1) return pa.positions_of_id(ids[0]);
-        // Union posting lists of all matching lex IDs
-        std::vector<CorpusPos> result;
-        size_t k = 0;
-        for (LexiconId id : ids) {
-            if ((++k & 0x3FF) == 0) check_cancelled();
-            auto pos = pa.positions_of_id(id);
-            result.insert(result.end(), pos.begin(), pos.end());
-        }
-        check_cancelled();
-        std::sort(result.begin(), result.end());
-        return result;
+        return union_id_postings(pa, ids, corpus_.size(), *this);
     }
 
     switch (ac.op) {
@@ -2690,39 +2655,10 @@ std::vector<CorpusPos> QueryExecutor::resolve_leaf(
         case CompOp::NEQ:
             return pa.positions_not(ac.value, corpus_.size());
         case CompOp::REGEX: {
-            if (ac.id_set_resolved) {
-                // a regex over a large lexicon can match millions of types: the
-                // union (and its sort) takes seconds, so honour cancel / timeouts
-                std::vector<CorpusPos> result;
-                size_t k = 0;
-                for (int32_t id : ac.id_set) {
-                    if ((++k & 0x3FF) == 0) check_cancelled();
-                    RevSpan sp = pa.rev_span_of_id(static_cast<LexiconId>(id));
-                    for (size_t i = 0; i < sp.count; ++i) result.push_back(sp.at(i));
-                }
-                check_cancelled();
-                std::sort(result.begin(), result.end());
-                check_cancelled();
-                return result;
-            }
-#ifdef PANDO_USE_RE2
-            // Compile RE2 under lock, then match outside lock (thread-safe).
-            const re2::RE2* compiled;
-            {
-                std::lock_guard<std::mutex> lock(regex_cache_mutex_);
-                auto it = regex_cache_.find(ac.value);
-                if (it == regex_cache_.end())
-                    it = regex_cache_.emplace(ac.value, std::make_unique<re2::RE2>(ac.value)).first;
-                compiled = it->second.get();
-            }
-            return pa.positions_matching(*compiled, ac.regex_full_match);
-#else
-            std::lock_guard<std::mutex> lock(regex_cache_mutex_);
-            auto it = regex_cache_.find(ac.value);
-            if (it == regex_cache_.end())
-                it = regex_cache_.emplace(ac.value, std::regex(ac.value)).first;
-            return pa.positions_matching(it->second, ac.regex_full_match);
-#endif
+            if (ac.id_set_resolved)   // a regex can match millions of types: bitmap union
+                return union_id_postings(pa, ac.id_set, corpus_.size(), *this);
+            const Regex& compiled = regex_for(ac.value);
+            return pa.positions_matching(compiled, ac.regex_full_match);
         }
         default:
             throw std::runtime_error("Unsupported comparison on positional attr");
@@ -6555,6 +6491,22 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                                 unsigned num_threads,
                                 const std::vector<std::string>* aggregate_by_fields,
                                 bool skip_name_validation) {
+    // Materialised merge operands (regex / %c / AND postings) are kept for the
+    // whole query: several fast paths are tried in turn and each asked for the
+    // same operands (a two-regex sequence built each list twice), and the ranges
+    // of a partitioned query share them. Cleared when the top-level query ends.
+    struct OperandScope {
+        Caches* c = nullptr;
+        explicit OperandScope(Caches& cc, bool top) {
+            if (top && !cc.share_operands) { c = &cc; c->share_operands = true; }
+        }
+        ~OperandScope() {
+            if (!c) return;
+            c->share_operands = false;
+            std::lock_guard<std::mutex> lk(c->operands_mu);
+            c->operands.clear();
+        }
+    } operand_scope(*caches_, !range_);
     if (num_threads > 1 && !range_ && sample_size == 0) {
         if (auto r = execute_partitioned(query, max_matches, count_total, max_total_cap,
                                          random_seed, num_threads, aggregate_by_fields,
@@ -6624,15 +6576,7 @@ std::optional<MatchSet> QueryExecutor::execute_partitioned(
     if (ranges.back().hi < N) ranges.back().hi = N;
 
     // materialised operands are shared by the ranges while this query runs
-    struct ShareOperands {
-        Caches& c;
-        explicit ShareOperands(Caches& cc) : c(cc) { c.share_operands = true; }
-        ~ShareOperands() {
-            c.share_operands = false;
-            std::lock_guard<std::mutex> lk(c.operands_mu);
-            c.operands.clear();
-        }
-    } share_guard(*caches_);
+    // (execute()'s OperandScope)
 
     auto run_range = [&](const PosRange& r, ExecProgress* prog) {
         QueryExecutor ex(*this, &r, prog);

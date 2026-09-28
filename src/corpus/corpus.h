@@ -119,6 +119,14 @@ public:
     const std::string& dir() const { return dir_; }
     const CorpusInfo& info() const { return info_; }
 
+    /// Regex id sets — the lexicon ids a pattern matches — shared by every query
+    /// on this corpus, so a pattern's lexicon scan runs once and not again for the
+    /// page, the background total, the sort, the next page… (LRU, bounded by
+    /// PANDO_IDSET_CACHE_IDS ids in total, default 8M = 32 MB). Thread-safe.
+    using IdSet = std::vector<int32_t>;
+    std::shared_ptr<const IdSet> cached_id_set(const std::string& key) const;
+    void cache_id_set(const std::string& key, std::shared_ptr<const IdSet> ids) const;
+
 private:
     std::string dir_;
     CorpusInfo info_;
@@ -130,6 +138,8 @@ private:
     // ServerApi), so the map is guarded (entries are never removed: references stay valid)
     mutable std::unordered_map<std::string, std::unique_ptr<GroupIndex>> group_indexes_;
     mutable std::unique_ptr<std::mutex> group_mu_ = std::make_unique<std::mutex>();
+    struct IdSetCache;
+    std::shared_ptr<IdSetCache> id_sets_;
     /// Merged overlay token-group name → path to `groups/<orig>.jsonl` in overlay dir.
     std::unordered_map<std::string, std::string> group_index_path_override_;
 };

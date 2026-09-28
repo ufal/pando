@@ -1,5 +1,7 @@
 #include "corpus/corpus.h"
 #include <algorithm>
+#include <cstdlib>
+#include <list>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -139,6 +141,7 @@ bool overlay_attr_is_kv_pipe(const CorpusInfo& oi, const std::string& name) {
 void Corpus::open(const std::string& dir, bool preload,
                   const std::vector<std::string>& overlay_dirs) {
     group_index_path_override_.clear();
+    id_sets_ = std::make_shared<IdSetCache>();   // ids are per index: a fresh cache per open
     dir_ = dir;
     info_ = read_info(dir + "/corpus.info");
 
@@ -383,6 +386,47 @@ void GroupIndex::load(const std::string& path) {
         records_.push_back(std::move(rec));
     }
     loaded_ = true;
+}
+
+struct Corpus::IdSetCache {
+    std::mutex mu;
+    std::list<std::string> lru;   // front = most recent
+    struct Entry {
+        std::shared_ptr<const IdSet> ids;
+        std::list<std::string>::iterator pos;
+    };
+    std::unordered_map<std::string, Entry> map;
+    size_t total = 0;
+    size_t budget = [] {
+        const char* e = std::getenv("PANDO_IDSET_CACHE_IDS");
+        return e && *e ? static_cast<size_t>(std::strtoull(e, nullptr, 10)) : size_t(8) << 20;
+    }();
+};
+
+std::shared_ptr<const Corpus::IdSet> Corpus::cached_id_set(const std::string& key) const {
+    if (!id_sets_) return nullptr;
+    std::lock_guard<std::mutex> lock(id_sets_->mu);
+    auto it = id_sets_->map.find(key);
+    if (it == id_sets_->map.end()) return nullptr;
+    id_sets_->lru.splice(id_sets_->lru.begin(), id_sets_->lru, it->second.pos);
+    return it->second.ids;
+}
+
+void Corpus::cache_id_set(const std::string& key, std::shared_ptr<const IdSet> ids) const {
+    if (!id_sets_ || !ids) return;
+    IdSetCache& c = *id_sets_;
+    if (c.budget == 0 || ids->size() > c.budget / 4) return;   // too large to be worth keeping
+    std::lock_guard<std::mutex> lock(c.mu);
+    if (c.map.count(key)) return;
+    c.lru.push_front(key);
+    c.total += ids->size();
+    c.map.emplace(key, IdSetCache::Entry{std::move(ids), c.lru.begin()});
+    while (c.total > c.budget && !c.lru.empty()) {
+        auto victim = c.map.find(c.lru.back());
+        c.total -= victim->second.ids->size();
+        c.map.erase(victim);
+        c.lru.pop_back();
+    }
 }
 
 const GroupIndex& Corpus::group_index(const std::string& name) const {

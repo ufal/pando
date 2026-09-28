@@ -5,11 +5,7 @@
 #include "index/lexicon.h"
 #include <string>
 
-#ifdef PANDO_USE_RE2
-#include <re2/re2.h>
-#else
-#include <regex>
-#endif
+#include "core/regex_engine.h"
 
 namespace pando {
 
@@ -86,11 +82,7 @@ public:
 
     // Regex match: returns owned vector (union of all matching lex entries).
     // full_match: whole lexicon string must match (RE2 FullMatch / std::regex_match); else substring.
-#ifdef PANDO_USE_RE2
-    std::vector<CorpusPos> positions_matching(const re2::RE2& re, bool full_match = false) const;
-#else
-    std::vector<CorpusPos> positions_matching(const std::regex& re, bool full_match = false) const;
-#endif
+    std::vector<CorpusPos> positions_matching(const Regex& re, bool full_match = false) const;
 
     // Negation: all positions where value != given value
     std::vector<CorpusPos> positions_not(const std::string& value,

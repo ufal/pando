@@ -4,6 +4,7 @@
 #include "query/ast.h"
 #include "corpus/corpus.h"
 #include <algorithm>
+#include <atomic>
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -19,13 +20,8 @@
 #include "index/dep_pair_index.h"
 #include "index/bitmap_index.h"
 
-#ifdef PANDO_USE_RE2
-#include <re2/re2.h>
-#else
-#include <regex>
 #include <mutex>
-#include <atomic>
-#endif
+#include "core/regex_engine.h"
 
 namespace pando {
 
@@ -947,17 +943,12 @@ private:
         std::unordered_map<std::string, std::shared_ptr<DepPairIndex>> dep_pair;
         std::unordered_map<std::string, std::shared_ptr<BitmapIndex>> bitmap;
         std::mutex mu;
-#ifdef PANDO_USE_RE2
-        std::unordered_map<std::string, std::unique_ptr<re2::RE2>> regex;
-#else
-        std::unordered_map<std::string, std::regex> regex;
-#endif
+        std::unordered_map<std::string, std::unique_ptr<Regex>> regex;
         std::mutex regex_mu;
-        /// P4.1: materialised merge operands (AND / regex / %c / … postings) of the
-        /// partitioned query in progress, keyed by condition node: the probe range
-        /// resolves an operand over the whole corpus once, the other ranges reuse it
-        /// (instead of K copies of the same list). Filled only while
-        /// `share_operands` is set, cleared when the partitioned query ends.
+        /// Materialised merge operands (AND / regex / %c / … postings) of the query
+        /// in progress, keyed by condition node: every fast path tried and every
+        /// P4.1 range reuse the list built once. Filled only while `share_operands`
+        /// is set (a top-level execute()), cleared when that query ends.
         bool share_operands = false;
         std::unordered_map<const void*, std::pair<std::shared_ptr<const void>, std::shared_ptr<void>>> operands;
         std::mutex operands_mu;
@@ -995,14 +986,12 @@ private:
                                            bool accent_fold, const std::string& value) const;
     std::mutex& fold_map_mutex_;
 
-#ifdef PANDO_USE_RE2
-    // RE2 objects are thread-safe for matching once constructed.
-    // Only the cache insertion needs synchronization (regex_cache_mutex_).
-    std::unordered_map<std::string, std::unique_ptr<re2::RE2>>& regex_cache_;
-#else
-    std::unordered_map<std::string, std::regex>& regex_cache_;
-#endif
+    // Compiled patterns (Regex: RE2 or std::regex); matching is thread-safe,
+    // only lookup / insertion needs regex_cache_mutex_.
+    std::unordered_map<std::string, std::unique_ptr<Regex>>& regex_cache_;
     std::mutex& regex_cache_mutex_;  // protects cache insertion only
+    /// The compiled pattern (cached per query executor tree). Throws on a bad pattern.
+    const Regex& regex_for(const std::string& pattern) const;
 };
 
 } // namespace pando
