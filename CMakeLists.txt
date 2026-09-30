@@ -1,11 +1,14 @@
 cmake_minimum_required(VERSION 3.16)
+# Minimum macOS for the binaries (must come before project(); without it the
+# toolchain targets the build host's own macOS version, which older Macs can't run).
+# Override with -DCMAKE_OSX_DEPLOYMENT_TARGET=…
+set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
 project(pando VERSION 0.1.20 LANGUAGES C CXX)
 
 include(CTest)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Optional: HTTP server (cpp-httplib, header-only)
@@ -225,7 +228,7 @@ endif()
 if(BUILD_TESTING AND PANDO_PMLTQ_DIALECT)
     add_executable(pmltq_dialect_test src/query/dialect/pmltq/pmltq_dialect_test.cpp)
     target_link_libraries(pmltq_dialect_test PRIVATE pando_pmltq_dialect)
-    add_test(NAME pmltq_dialect COMMAND pmltq_dialect_test)
+    add_test(NAME pmltq_dialect COMMAND pmltq_dialect_test WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 
 if(BUILD_TESTING)

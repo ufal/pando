@@ -1943,6 +1943,15 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
             const bool use_immediate = immediate && immediate_si + 1 == si;
             const std::string& qn = stmt.command.query_name;
             HitSetPtr hs = qn.empty() ? nullptr : S.find(qn);
+            // `dcoll obj by lemma` parses `obj` as a set name; not a set → the relation
+            // (as the CLI does)
+            std::optional<GroupCommand> dcoll_cmd;
+            if (stmt.command.type == CommandType::DCOLL && stmt.command.relations.empty()
+                && !qn.empty() && !hs) {
+                dcoll_cmd = stmt.command;
+                dcoll_cmd->relations.push_back(qn);
+                dcoll_cmd->query_name.clear();
+            }
             std::string set_name = qn;
             if (!hs) { hs = S.find("Last"); set_name = "Last"; }
             if (!hs) {
@@ -2033,7 +2042,8 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                     emit_coll_json(out, corpus, full(), stmt.command, opts, nm_to_use, nm_tgt_parallel);
                     break;
                 case CommandType::DCOLL:
-                    emit_dcoll_json(out, corpus, full(), stmt.command, nm_to_use, nm_tgt_parallel, opts);
+                    emit_dcoll_json(out, corpus, full(), dcoll_cmd ? *dcoll_cmd : stmt.command, nm_to_use,
+                                    nm_tgt_parallel, opts);
                     break;
                 case CommandType::KEYNESS: {
                     const MatchSet* ref_ms = nullptr;

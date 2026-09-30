@@ -1,6 +1,7 @@
 #include "query/dialect/cwb/cwb_parser.h"
 
 #include "query/dialect/cwb/cwb_lexer.h"
+#include "query/condition_negate.h"
 #include "query/quoted_string_pattern.h"
 
 #include <cctype>
@@ -304,8 +305,7 @@ ConditionPtr parse_bool_unary(TokStream& ts, std::ostringstream* trace) {
         throw std::runtime_error("Unexpected end inside [ ]");
     if (ts.peek().kind == CwbTok::BANG) {
         ts.bump();
-        throw std::runtime_error(
-            "Unsupported: boolean negation (!) inside [ ] (not represented in pando condition AST)");
+        return negate_condition(parse_bool_unary(ts, trace));
     }
     if (ts.peek().kind == CwbTok::LPAREN) {
         ts.bump();
@@ -566,9 +566,18 @@ TokenQuery parse_reg_wordf_expr(TokStream& ts, std::ostringstream* trace) {
     return tq;
 }
 
-void parse_search_pattern_tail(TokStream& ts) {
+void parse_search_pattern_tail(TokStream& ts, TokenQuery& tq) {
     if (ts.eof() || ts.peek().kind == CwbTok::END || ts.peek().kind == CwbTok::SEMI)
         return;
+    if (ts.peek().kind == CwbTok::WITHIN_SYM && ts.i + 1 < ts.v->size()
+        && (*ts.v)[ts.i + 1].kind == CwbTok::ID) {
+        // `within s`: the whole match inside one region (`within 10` = a window: not yet)
+        ts.bump();
+        tq.within = ts.peek().text;
+        ts.bump();
+        parse_search_pattern_tail(ts, tq);
+        return;
+    }
     if (ts.peek().kind == CwbTok::GCDEL)
         throw std::runtime_error(
             "Unsupported: global constraint (:: …) after pattern (alignment / multi-corpus)");
@@ -847,7 +856,7 @@ static Statement parse_cwb_query_statement_after_keywords(TokStream& ts, std::os
             *trace << "  statement: named query \"" << stmt.name << "\"\n";
         stmt.has_query = true;
         stmt.query = parse_reg_wordf_expr(ts, trace);
-        parse_search_pattern_tail(ts);
+        parse_search_pattern_tail(ts, stmt.query);
         return stmt;
     }
 
@@ -855,7 +864,7 @@ static Statement parse_cwb_query_statement_after_keywords(TokStream& ts, std::os
         *trace << "  statement: anonymous token query\n";
     stmt.has_query = true;
     stmt.query = parse_reg_wordf_expr(ts, trace);
-    parse_search_pattern_tail(ts);
+    parse_search_pattern_tail(ts, stmt.query);
     return stmt;
 }
 

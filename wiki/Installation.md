@@ -17,6 +17,11 @@ not support (backreferences, lookaround) still run on std::regex. The configure 
 `pando regex engine: ON|OFF`. A build directory configured before 2026-09-28 keeps its old
 `PANDO_USE_RE2=OFF`: reconfigure with `-DPANDO_USE_RE2=AUTO` to switch.
 
+**macOS deployment target:** binaries run on macOS 14 and newer by default
+(`CMAKE_OSX_DEPLOYMENT_TARGET`, set in `CMakeLists.txt`); without it the compiler targets the
+build machine's own macOS version, which older Macs cannot run. Change it with
+`-DCMAKE_OSX_DEPLOYMENT_TARGET=15.0` (a new build directory, or delete `CMakeCache.txt`).
+
 ## Build and install
 
 From the repository root:

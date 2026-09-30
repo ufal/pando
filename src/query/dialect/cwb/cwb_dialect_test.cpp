@@ -1,6 +1,9 @@
+// assert() is the check here: keep it in Release (NDEBUG) builds too
+#undef NDEBUG
 #include "query/dialect/cwb/cwb_translate.h"
 
 #include <cassert>
+#include <iostream>
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
@@ -141,5 +144,12 @@ int main() {
 
     expect_throw("group by match");
 
+    {
+        auto p = pando::translate_cwb_program(R"([!(lemma="the" | upos="NOUN")] within s)", 0, nullptr);
+        assert(p[0].query.within == "s");
+        const auto& c = p[0].query.tokens[0].conditions;
+        assert(!c->is_leaf && c->bool_op == pando::BoolOp::AND);
+    }
+    std::cerr << "PASS cwb_dialect_test\n";
     return 0;
 }

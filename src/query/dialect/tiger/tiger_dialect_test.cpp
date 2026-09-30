@@ -1,6 +1,9 @@
+// assert() is the check here: keep it in Release (NDEBUG) builds too
+#undef NDEBUG
 #include "query/dialect/tiger/tiger_translate.h"
 
 #include <cassert>
+#include <iostream>
 #include <stdexcept>
 #include <string>
 
@@ -36,5 +39,6 @@ int main() {
     expect_throw("dom NP");
     expect_throw("");
 
+    std::cerr << "PASS tiger_dialect_test\n";
     return 0;
 }

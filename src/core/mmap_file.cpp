@@ -13,46 +13,53 @@ namespace pando {
 MmapFile::~MmapFile() { close(); }
 
 MmapFile::MmapFile(MmapFile&& o) noexcept
-    : data_(o.data_), size_(o.size_), fd_(o.fd_) {
+    : data_(o.data_), size_(o.size_) {
     o.data_ = nullptr;
     o.size_ = 0;
-    o.fd_   = -1;
 }
 
 MmapFile& MmapFile::operator=(MmapFile&& o) noexcept {
     if (this != &o) {
         close();
-        data_ = o.data_;  size_ = o.size_;  fd_ = o.fd_;
-        o.data_ = nullptr; o.size_ = 0;     o.fd_ = -1;
+        data_ = o.data_;  size_ = o.size_;
+        o.data_ = nullptr; o.size_ = 0;
     }
     return *this;
 }
 
 void MmapFile::close() {
-    if (data_)   { munmap(data_, size_); data_ = nullptr; }
-    if (fd_ >= 0){ ::close(fd_);        fd_ = -1; }
+    if (data_) { munmap(data_, size_); data_ = nullptr; }
     size_ = 0;
 }
 
 MmapFile MmapFile::open(const std::string& path, bool preload) {
+    // The descriptor is closed as soon as the file is mapped (a mapping stays valid
+    // without it): an open corpus holds no file descriptors, so many handles fit
+    // under a low `ulimit -n` (macOS: 256).
     MmapFile f;
-    f.fd_ = ::open(path.c_str(), O_RDONLY);
-    if (f.fd_ < 0)
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0)
         throw std::runtime_error("Cannot open " + path + ": " + strerror(errno));
 
     struct stat st;
-    if (fstat(f.fd_, &st) < 0) {
-        ::close(f.fd_);
-        throw std::runtime_error("Cannot stat " + path);
+    if (fstat(fd, &st) < 0) {
+        const int e = errno;
+        ::close(fd);
+        throw std::runtime_error("Cannot stat " + path + ": " + strerror(e));
     }
     f.size_ = static_cast<size_t>(st.st_size);
-    if (f.size_ == 0) return f;
+    if (f.size_ == 0) {
+        ::close(fd);
+        return f;
+    }
 
-    f.data_ = mmap(nullptr, f.size_, PROT_READ, MAP_PRIVATE, f.fd_, 0);
+    f.data_ = mmap(nullptr, f.size_, PROT_READ, MAP_PRIVATE, fd, 0);
+    const int e = errno;
+    ::close(fd);
     if (f.data_ == MAP_FAILED) {
         f.data_ = nullptr;
-        ::close(f.fd_);
-        throw std::runtime_error("Cannot mmap " + path);
+        f.size_ = 0;
+        throw std::runtime_error("Cannot mmap " + path + ": " + strerror(e));
     }
     if (preload)
         f.preload();

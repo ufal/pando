@@ -465,9 +465,11 @@ bool build_aggregate_plan_impl(const Corpus& corpus, const std::vector<std::stri
                     if (resolve_region_attr_key(sa, st, attr)) { any_region = true; break; }
                 }
                 if (any_region) {
+                    // `a.attr` where some region type also has `attr` (e.g. `contr.form`):
+                    // the region's value when `a` names a region, the token's otherwise
                     col.kind = AggregateBucketData::Column::Kind::RegionFromBinding;
                     col.region_attr_name = attr;
-                    col.pa = nullptr;
+                    col.pa = &corpus.attr(attr);
                     col.sa = nullptr;
                     out.columns.push_back(std::move(col));
                     continue;
@@ -538,7 +540,17 @@ bool fill_aggregate_key_impl(AggregateBucketData& data, const Corpus& corpus, co
             }
         } else if (col.kind == AggregateBucketData::Column::Kind::RegionFromBinding) {
             auto nr = m.named_regions.find(col.named_anchor);
-            if (nr == m.named_regions.end()) return false;
+            if (nr == m.named_regions.end()) {
+                // a named token, not a region: its positional attribute
+                if (!col.pa) return false;
+                CorpusPos pos = resolve_name(m, nm, col.named_anchor);
+                if (pos == NO_HEAD) return false;
+                std::string val(col.pa->value_at(pos));
+                if (col.date_transform != AggregateBucketData::Column::DateTransform::None)
+                    val = apply_date_transform_bucket(val, col.date_transform);
+                intern_value(std::move(val));
+                continue;
+            }
             const auto& sa = corpus.structure(nr->second.struct_name);
             std::optional<std::string> val;
             if (auto rkey = resolve_region_attr_key(sa, nr->second.struct_name, col.region_attr_name)) {

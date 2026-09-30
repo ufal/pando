@@ -1,4 +1,5 @@
 #include "query/parser.h"
+#include "query/condition_negate.h"
 #include "query/quoted_string_pattern.h"
 #include <cctype>
 #include <stdexcept>
@@ -28,6 +29,19 @@ Program Parser::parse() {
         lexer_.consume();
         if (lexer_.peek().type == TokType::END) break;
         prog.push_back(parse_statement());
+    }
+    // Anything left over is an error, never silently ignored (`[a] | [b]` used to
+    // run as `[a]`).
+    const Token rest = lexer_.peek();
+    if (rest.type != TokType::END) {
+        std::string hint;
+        if (rest.type == TokType::PIPE)
+            hint = " (alternatives between sequences are not supported yet: use [a | b] inside one "
+                   "token, or run the alternatives as separate queries)";
+        else if (rest.type == TokType::LPAREN)
+            hint = " (groups of several tokens `( ... )` are not supported yet)";
+        throw std::runtime_error(std::string("Unexpected ") + toktype_name(rest.type) + " at position " +
+                                 std::to_string(rest.pos) + hint);
     }
     return prog;
 }
@@ -1017,6 +1031,11 @@ ConditionPtr Parser::parse_and_condition() {
 }
 
 ConditionPtr Parser::parse_primary_condition() {
+    // Negation: ![…] / !(… | …)
+    if (lexer_.peek().type == TokType::BANG) {
+        lexer_.consume();
+        return negate_condition(parse_primary_condition());
+    }
     // Parenthesized group
     if (lexer_.peek().type == TokType::LPAREN) {
         lexer_.consume();
@@ -1278,8 +1297,20 @@ void Parser::parse_within_clause(TokenQuery& tq) {
     //   within s
     //   within s_tuid="XXX"
     //   within s having [cond]
-    Token struct_tok = lexer_.expect(TokType::IDENT);
-    std::string full_name = struct_tok.text;
+    //   within <s/>            (Manatee / NoSketch Engine spelling)
+    std::string full_name;
+    if (lexer_.peek().type == TokType::REGION_START && !lexer_.peek().text.empty()
+        && lexer_.peek().text.back() == '/') {
+        std::string n = lexer_.next().text;
+        n.pop_back();
+        while (!n.empty() && n.back() == ' ') n.pop_back();
+        if (n.find_first_of(" =") != std::string::npos)
+            throw std::runtime_error("within <" + n + "/>: attributes are not supported here; use within " +
+                                     n.substr(0, n.find_first_of(" =")) + " and :: filters");
+        full_name = n;
+    } else {
+        full_name = lexer_.expect(TokType::IDENT).text;
+    }
 
     // Check if this is shorthand: within s_tuid="XXX"
     Token next = lexer_.peek();
@@ -1516,6 +1547,28 @@ void Parser::parse_global_filters(TokenQuery& tq) {
                 // RHS: string/number → anchored region filter; IDENT → alignment
                 Token rhs = lexer_.peek();
                 if (rhs.type == TokType::STRING || rhs.type == TokType::NUMBER) {
+                    // `:: a.lemma = "x"` (CQP global constraint on a token attribute; region
+                    // attributes always have a '_'): a condition on the token labelled a
+                    if ((op == CompOp::EQ || op == CompOp::NEQ)
+                        && attr1.find('_') == std::string::npos && attr1.find('.') == std::string::npos) {
+                        QueryToken* tok = nullptr;
+                        for (auto& qt : tq.tokens)
+                            if (qt.name == t.text) tok = &qt;
+                        if (tok && !tok->is_anchor() && !tok->is_dep_subtree && !tok->has_repetition()) {
+                            AttrCondition ac;
+                            ac.attr = attr1;
+                            std::string v = lexer_.next().text;
+                            if (op == CompOp::EQ)
+                                interpret_quoted_eq_string(ac, std::move(v), opts_.strict_quoted_strings);
+                            else
+                                interpret_quoted_neq_string(ac, std::move(v), opts_.strict_quoted_strings);
+                            auto leaf = ConditionNode::make_leaf(std::move(ac));
+                            tok->conditions = tok->conditions
+                                ? ConditionNode::make_branch(BoolOp::AND, tok->conditions, leaf)
+                                : leaf;
+                            return;
+                        }
+                    }
                     // Anchored region filter: :: a.text_lang = "French"
                     GlobalRegionFilter gf;
                     gf.anchor_name = t.text;

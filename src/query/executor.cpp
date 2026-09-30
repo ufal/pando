@@ -3825,9 +3825,11 @@ bool build_aggregate_plan(const Corpus& corpus, const std::vector<std::string>& 
                     }
                 }
                 if (any_region) {
+                    // the region's value when the label names a region (`c:<contr>`),
+                    // the token's positional attribute when it names a token
                     col.kind = AggregateBucketData::Column::Kind::RegionFromBinding;
                     col.region_attr_name = attr;
-                    col.pa = nullptr;
+                    col.pa = &corpus.attr(attr);
                     col.sa = nullptr;
                     out.columns.push_back(std::move(col));
                     continue;
@@ -3898,7 +3900,17 @@ bool fill_aggregate_key(AggregateBucketData& data, const Corpus& corpus, const M
             }
         } else if (col.kind == AggregateBucketData::Column::Kind::RegionFromBinding) {
             auto nr = m.named_regions.find(col.named_anchor);
-            if (nr == m.named_regions.end()) return false;
+            if (nr == m.named_regions.end()) {
+                // a named token, not a region: its positional attribute
+                if (!col.pa) return false;
+                CorpusPos pos = resolve_name(m, nm, col.named_anchor);
+                if (pos == NO_HEAD) return false;
+                std::string val(col.pa->value_at(pos));
+                if (col.date_transform != AggregateBucketData::Column::DateTransform::None)
+                    val = apply_date_transform_bucket(val, col.date_transform);
+                intern_value(std::move(val));
+                continue;
+            }
             const auto& sa = corpus.structure(nr->second.struct_name);
             std::optional<std::string> val;
             if (auto rk = resolve_region_attr_key(sa, nr->second.struct_name, col.region_attr_name)) {
@@ -8060,8 +8072,11 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
             !target_query.within_having &&
             target_query.containing_clauses.empty() &&
             target_query.global_function_filters.empty();
+        // (a multivalue target attribute's lexicon holds whole values, not the
+        // components the source side collects: the general join handles it)
         if (target_simple
             && corpus_.has_attr(an1) && corpus_.has_attr(an2)
+            && !corpus_.is_multivalue(an2)
             && !is_anchor_label(source_query, af.name1)
             && !is_anchor_label(target_query, af.name2)) {
             const auto& pa2 = corpus_.attr(an2);

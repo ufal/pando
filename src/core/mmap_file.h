@@ -37,7 +37,6 @@ private:
     void close();
     void* data_  = nullptr;
     size_t size_  = 0;
-    int    fd_    = -1;
 };
 
 void write_file(const std::string& path, const void* data, size_t bytes);

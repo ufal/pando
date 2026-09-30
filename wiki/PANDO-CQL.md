@@ -19,6 +19,8 @@ For compatible behaviour with CWB and Mantee, normal string matches are interpre
 
 `!=` takes the same two forms and matches the tokens whose value does *not* match: `[lemma != ".*e.*"]` (whole token, as in CWB) and `[lemma != /e/]` (substring) both find every lemma without an *e*. With `strict_quoted_strings`, a quoted value after `!=` is a literal as well.
 
+A condition can also be negated as a whole with `!`: `[!(lemma="the" | upos="NOUN")]` is the same as `[lemma!="the" & upos!="NOUN"]`, and `[!lemma="be.*"]` the same as `[lemma!="be.*"]` (the CWB dialect accepts it too).
+
 Slash-regex values are plain regular expressions. For example `[form = /.*tion/]` matches any substring *tion* inside the token (e.g. *conditional*), not only *-tion* suffixes; anchoring is up to your pattern (e.g. `[form = /tion$/]`).
 
 The regex syntax is RE2's (a Perl / PCRE subset, as in CWB and Manatee) when pando is built with RE2 — the recommended build: `.` matches one character, including non-ASCII ones (`"h.t"` finds *hát*), `(?i)` makes a pattern case-insensitive (`[lemma = "(?i)praha"]`; for a plain word `%c` is faster: `[lemma = "praha" %c]`), classes like `\d`, `\w`, `[[:upper:]]` work. Backreferences and lookaround, which RE2 does not have, fall back to std::regex (ECMAScript). A build without RE2 uses std::regex throughout, where `.` matches one *byte* of UTF-8.
@@ -88,7 +90,11 @@ Like in Manatee, we can add a (single) token restriction on the the `within` cla
 
 Inversely, we can also say that a the match need to contain a given region, which we can express with `containing name`, meaning that our result has to contain an entire region named `<name>`. In CWB-CQL, a common example of that is to require something to contain an entire NP, but syntactic elements like NP are not regions, and in dependency parsed corpora, they are implicitly encoded in dependency subtrees. That is why in pando you can say `containing subtree [upos="NOUN"]`, which will require the result to contain all leaves of a dependency subtree heading by an noun, which is the dependency equivalent of a noun phrase. 
 
-Both within and containing can also be negated: `[] not within s`.
+Both within and containing can also be negated: `[] not within s`. The Manatee spelling `within <s/>` is accepted as well.
+
+A query is always one sequence of tokens: `|` between sequences (`[a] [b] | [c]`) and groups of several tokens (`([a] [b])+`) are not supported yet, and give an error rather than running only the first part. `|` inside one token (`[lemma="a" | lemma="b"]`) works. Note that `<s> [lemma="cat"] </s>` means a sentence consisting of the single token *cat*; for *cat* anywhere in a sentence use `[lemma="cat"] within s`.
+
+A global constraint on a named token's attribute, as in CQP, is the same as a condition in that token: `a:[upos="VERB"] :: a.lemma = "say"` equals `a:[upos="VERB" & lemma="say"]`. Region attributes always have an underscore (`a.text_lang`), so `a.form` is the token's *form*, also in `count … by a.form`.
 
 ## Named region bindings
 
