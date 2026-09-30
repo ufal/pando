@@ -4,6 +4,8 @@
 #include "query/ast.h"
 #include "corpus/corpus.h"
 #include <algorithm>
+#include <initializer_list>
+#include <iterator>
 #include <atomic>
 #include <vector>
 #include <string>
@@ -31,13 +33,226 @@ struct RegionRef {
     size_t region_idx = 0;
 };
 
+/// An unordered_map that allocates only when something is put in it: most hits
+/// have no named regions or subtrees, and a Match is kept per hit (8 bytes each
+/// instead of 56). The used subset of the map interface; with nothing in it,
+/// begin / end / find return iterators of one shared empty map.
+template <class K, class V>
+class LazyMap {
+    using Map = std::unordered_map<K, V>;
+    std::unique_ptr<Map> m_;
+    static Map& none() {
+        static Map e;
+        return e;
+    }
+    Map& get() {
+        if (!m_) m_ = std::make_unique<Map>();
+        return *m_;
+    }
+
+public:
+    using key_type = K;
+    using mapped_type = V;
+    using value_type = typename Map::value_type;
+    using iterator = typename Map::iterator;
+    using const_iterator = typename Map::const_iterator;
+
+    LazyMap() = default;
+    LazyMap(const LazyMap& o) : m_(o.empty() ? nullptr : std::make_unique<Map>(*o.m_)) {}
+    LazyMap& operator=(const LazyMap& o) {
+        if (this != &o) m_ = o.empty() ? nullptr : std::make_unique<Map>(*o.m_);
+        return *this;
+    }
+    LazyMap(LazyMap&&) noexcept = default;
+    LazyMap& operator=(LazyMap&&) noexcept = default;
+
+    bool empty() const { return !m_ || m_->empty(); }
+    size_t size() const { return m_ ? m_->size() : 0; }
+    void clear() { m_.reset(); }
+    V& operator[](const K& k) { return get()[k]; }
+    size_t count(const K& k) const { return m_ ? m_->count(k) : 0; }
+    size_t erase(const K& k) { return m_ ? m_->erase(k) : 0; }
+    iterator erase(const_iterator it) { return m_->erase(it); }
+    template <class... A>
+    std::pair<iterator, bool> emplace(A&&... a) { return get().emplace(std::forward<A>(a)...); }
+    std::pair<iterator, bool> insert(const value_type& v) { return get().insert(v); }
+    iterator find(const K& k) { return m_ ? m_->find(k) : none().end(); }
+    const_iterator find(const K& k) const { return m_ ? m_->find(k) : none().cend(); }
+    iterator begin() { return m_ ? m_->begin() : none().begin(); }
+    iterator end() { return m_ ? m_->end() : none().end(); }
+    const_iterator begin() const { return m_ ? m_->cbegin() : none().cbegin(); }
+    const_iterator end() const { return m_ ? m_->cend() : none().cend(); }
+};
+
+/// Positions of one hit: up to two inline (most queries have one or two tokens),
+/// else on the heap — no allocation per hit for those. The used subset of
+/// std::vector's interface; converts to std::vector where one is needed.
+class PosVec {
+public:
+    static constexpr uint32_t kInline = 2;
+
+private:
+    union {
+        CorpusPos in_[kInline];
+        CorpusPos* heap_;
+    };
+    uint32_t size_ = 0, cap_ = kInline;
+    bool on_heap() const { return cap_ > kInline; }
+    CorpusPos* ptr() { return on_heap() ? heap_ : in_; }
+    const CorpusPos* ptr() const { return on_heap() ? heap_ : in_; }
+    void grow(size_t need) {
+        if (need <= cap_) return;
+        const size_t nc = std::max<size_t>(need, size_t{cap_} * 2);
+        auto* p = new CorpusPos[nc];
+        std::copy(ptr(), ptr() + size_, p);
+        if (on_heap()) delete[] heap_;
+        heap_ = p;
+        cap_ = static_cast<uint32_t>(nc);
+    }
+
+public:
+    using value_type = CorpusPos;
+    using size_type = size_t;
+    using iterator = CorpusPos*;
+    using const_iterator = const CorpusPos*;
+
+    PosVec() {}
+    PosVec(std::initializer_list<CorpusPos> il) { assign(il.begin(), il.end()); }
+    PosVec(size_t n, CorpusPos v) { assign(n, v); }
+    template <class It, class = decltype(*std::declval<It>())>
+    PosVec(It b, It e) { assign(b, e); }
+    PosVec(const std::vector<CorpusPos>& v) { assign(v.begin(), v.end()); }
+    PosVec(const PosVec& o) { assign(o.begin(), o.end()); }
+    PosVec(PosVec&& o) noexcept { steal(o); }
+    PosVec& operator=(const PosVec& o) {
+        if (this != &o) assign(o.begin(), o.end());
+        return *this;
+    }
+    PosVec& operator=(PosVec&& o) noexcept {
+        if (this != &o) {
+            if (on_heap()) delete[] heap_;
+            cap_ = kInline;
+            size_ = 0;
+            steal(o);
+        }
+        return *this;
+    }
+    PosVec& operator=(std::initializer_list<CorpusPos> il) {
+        assign(il.begin(), il.end());
+        return *this;
+    }
+    PosVec& operator=(const std::vector<CorpusPos>& v) {
+        assign(v.begin(), v.end());
+        return *this;
+    }
+    ~PosVec() {
+        if (on_heap()) delete[] heap_;
+    }
+    operator std::vector<CorpusPos>() const { return std::vector<CorpusPos>(begin(), end()); }
+
+    template <class It, class = decltype(*std::declval<It>())>
+    void assign(It b, It e) {
+        const size_t n = static_cast<size_t>(std::distance(b, e));
+        size_ = 0;
+        grow(n);
+        std::copy(b, e, ptr());
+        size_ = static_cast<uint32_t>(n);
+    }
+    void assign(size_t n, CorpusPos v) {
+        size_ = 0;
+        grow(n);
+        std::fill(ptr(), ptr() + n, v);
+        size_ = static_cast<uint32_t>(n);
+    }
+    size_t size() const { return size_; }
+    bool empty() const { return size_ == 0; }
+    size_t capacity() const { return cap_; }
+    /// bytes on the heap (0 while the positions are inline)
+    size_t heap_bytes() const { return on_heap() ? size_t{cap_} * sizeof(CorpusPos) : 0; }
+    void reserve(size_t n) { grow(n); }
+    void clear() { size_ = 0; }
+    void resize(size_t n, CorpusPos v = 0) {
+        grow(n);
+        for (size_t i = size_; i < n; ++i) ptr()[i] = v;
+        size_ = static_cast<uint32_t>(n);
+    }
+    void push_back(CorpusPos v) {
+        grow(size_t{size_} + 1);
+        ptr()[size_++] = v;
+    }
+    void emplace_back(CorpusPos v) { push_back(v); }
+    void pop_back() { --size_; }
+    template <class It>
+    iterator insert(const_iterator at, It b, It e) {
+        const size_t off = static_cast<size_t>(at - begin());
+        const size_t n = static_cast<size_t>(std::distance(b, e));
+        grow(size_ + n);
+        CorpusPos* p = ptr();
+        std::move_backward(p + off, p + size_, p + size_ + n);
+        std::copy(b, e, p + off);
+        size_ += static_cast<uint32_t>(n);
+        return p + off;
+    }
+    iterator insert(const_iterator at, CorpusPos v) { return insert(at, &v, &v + 1); }
+    iterator erase(const_iterator b, const_iterator e) {
+        CorpusPos* p = ptr();
+        const size_t off = static_cast<size_t>(b - p), n = static_cast<size_t>(e - b);
+        std::move(p + off + n, p + size_, p + off);
+        size_ -= static_cast<uint32_t>(n);
+        return p + off;
+    }
+    iterator erase(const_iterator at) { return erase(at, at + 1); }
+    CorpusPos* data() { return ptr(); }
+    const CorpusPos* data() const { return ptr(); }
+    CorpusPos& operator[](size_t i) { return ptr()[i]; }
+    const CorpusPos& operator[](size_t i) const { return ptr()[i]; }
+    CorpusPos& at(size_t i) {
+        if (i >= size_) throw std::out_of_range("PosVec");
+        return ptr()[i];
+    }
+    const CorpusPos& at(size_t i) const {
+        if (i >= size_) throw std::out_of_range("PosVec");
+        return ptr()[i];
+    }
+    CorpusPos& front() { return ptr()[0]; }
+    const CorpusPos& front() const { return ptr()[0]; }
+    CorpusPos& back() { return ptr()[size_ - 1]; }
+    const CorpusPos& back() const { return ptr()[size_ - 1]; }
+    iterator begin() { return ptr(); }
+    iterator end() { return ptr() + size_; }
+    const_iterator begin() const { return ptr(); }
+    const_iterator end() const { return ptr() + size_; }
+    const_iterator cbegin() const { return ptr(); }
+    const_iterator cend() const { return ptr() + size_; }
+    friend bool operator==(const PosVec& a, const PosVec& b) {
+        return a.size_ == b.size_ && std::equal(a.begin(), a.end(), b.begin());
+    }
+    friend bool operator!=(const PosVec& a, const PosVec& b) { return !(a == b); }
+    friend bool operator<(const PosVec& a, const PosVec& b) {
+        return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end());
+    }
+
+private:
+    void steal(PosVec& o) {
+        if (o.on_heap()) {
+            heap_ = o.heap_;
+            cap_ = o.cap_;
+            o.cap_ = kInline;
+        } else {
+            std::copy(o.in_, o.in_ + o.size_, in_);
+        }
+        size_ = o.size_;
+        o.size_ = 0;
+    }
+};
+
 struct Match {
-    std::vector<CorpusPos> positions;    // start position of each query token's span
-    std::vector<CorpusPos> span_ends;    // end position (inclusive) of each token's span
+    PosVec positions;    // start position of each query token's span
+    PosVec span_ends;    // end position (inclusive) of each token's span
     /// Names from `np:<node …>`-style anchors → region row (filled when anchor constraints run).
-    std::unordered_map<std::string, RegionRef> named_regions;
+    LazyMap<std::string, RegionRef> named_regions;
     /// `label:dep_subtree(src)` — sorted unique token positions in the subtree (head + descendants).
-    std::unordered_map<std::string, std::vector<CorpusPos>> named_dep_subtrees;
+    LazyMap<std::string, std::vector<CorpusPos>> named_dep_subtrees;
     /// Token-group sidecar props (`groups/<struct>.jsonl`), set for `<err>` / overlay group matches.
     std::vector<std::pair<std::string, std::string>> token_group_props;
     /// True when this match comes from token-group expansion (`<err>` etc.), not token chain.

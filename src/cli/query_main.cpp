@@ -886,11 +886,13 @@ static bool aggregate_command_targets_stmt(const Statement& stmt, const GroupCom
 // ── Session state for interactive REPL ──────────────────────────────────
 
 struct Session {
-    std::map<std::string, MatchSet> named_results;
+    /// The result sets, shared: `Last` and a named set of the same statement are one
+    /// object (they were copies: two or three times the hits in memory).
+    std::map<std::string, std::shared_ptr<MatchSet>> named_results;
     std::map<std::string, NameIndexMap> named_name_maps;
     /// Token labels for the target side of the last / named parallel query (`with`).
     std::map<std::string, NameIndexMap> named_target_name_maps;
-    MatchSet last_ms;
+    std::shared_ptr<MatchSet> last = std::make_shared<MatchSet>();
     NameIndexMap last_name_map;
     NameIndexMap last_target_name_map;
     bool has_last = false;
@@ -1522,13 +1524,13 @@ static bool session_lookup_ms(Session& session, const std::string& qn,
                               MatchSet*& ms, NameIndexMap*& nm) {
     if (qn == "Last") {
         if (!session.has_last) return false;
-        ms = &session.last_ms;
+        ms = session.last.get();
         nm = &session.last_name_map;
         return true;
     }
     auto it = session.named_results.find(qn);
     if (it == session.named_results.end()) return false;
-    ms = &it->second;
+    ms = it->second.get();
     auto nm_it = session.named_name_maps.find(qn);
     nm = (nm_it != session.named_name_maps.end()) ? &nm_it->second : &session.last_name_map;
     return true;
@@ -2522,7 +2524,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                     if (it == session.named_results.end())
                         throw std::runtime_error("Unknown match set in `where`: '" + ref + "'");
                     std::vector<CorpusPos> ps;
-                    for (const auto& m : it->second.matches) {
+                    for (const auto& m : it->second->matches) {
                         auto mp = m.matched_positions();
                         ps.insert(ps.end(), mp.begin(), mp.end());
                     }
@@ -2554,7 +2556,8 @@ static void run_query(const Corpus& corpus, const std::string& input,
             executor.set_include_empty_alignment_values(opts.allow_empty_alignment);
             auto t0 = std::chrono::high_resolution_clock::now();
             if (stmt.is_parallel) {
-                session.last_ms = executor.execute_parallel(stmt.query, stmt.target_query, max_m, count_t);
+                session.last = std::make_shared<MatchSet>(
+                        executor.execute_parallel(stmt.query, stmt.target_query, max_m, count_t));
             } else if (stmt.has_query && stmt.query.tokens.size() == 1
                        && stmt.query.tokens[0].is_dep_subtree) {
                 const std::string& src_q = stmt.query.tokens[0].dep_subtree_source;
@@ -2565,11 +2568,11 @@ static void run_query(const Corpus& corpus, const std::string& input,
                 const NameIndexMap* src_nm = nullptr;
                 auto named_it = session.named_results.find(src_q);
                 if (named_it != session.named_results.end()) {
-                    src_ms = &named_it->second;
+                    src_ms = named_it->second.get();
                     auto nm_it = session.named_name_maps.find(src_q);
                     if (nm_it != session.named_name_maps.end()) src_nm = &nm_it->second;
                 } else if (session.has_last && session.last_name_map.count(src_q)) {
-                    src_ms = &session.last_ms;
+                    src_ms = session.last.get();
                     src_nm = &session.last_name_map;
                 }
                 if (!src_ms) {
@@ -2580,8 +2583,9 @@ static void run_query(const Corpus& corpus, const std::string& input,
                             "sub:dep_subtree(" + src_q + ") [:: ...]`.");
                 }
                 const NameIndexMap& source_nm = src_nm ? *src_nm : NameIndexMap{};
-                session.last_ms = executor.execute_dep_subtree_from_named(
-                        stmt.query, *src_ms, source_nm, max_m, count_t, max_total_cap);
+                // a new set (the source may be the current `Last`)
+                session.last = std::make_shared<MatchSet>(executor.execute_dep_subtree_from_named(
+                        stmt.query, *src_ms, source_nm, max_m, count_t, max_total_cap));
             } else {
                 // P7.8: `…; coll / dcoll` as the program's last use of these hits: count
                 // them in the executor instead of materialising them (not in the REPL,
@@ -2632,7 +2636,9 @@ static void run_query(const Corpus& corpus, const std::string& input,
                         count_t = true;
                     }
                 }
-                session.last_ms = executor.execute(stmt.query, max_m, count_t, max_total_cap,
+                // a new object: the previous one may live on as a named set
+                session.last = std::make_shared<MatchSet>();
+                *session.last = executor.execute(stmt.query, max_m, count_t, max_total_cap,
                                           opts.sample, opts.sample_seed, opts.threads,
                                           aggregate_by);
                 if (sink_state.sink) {
@@ -2641,7 +2647,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                 }
             }
             // a sample is shown in corpus order (the executor returns it in hash order)
-            if (opts.sample > 0) sort_matches_by_position(session.last_ms.matches);
+            if (opts.sample > 0) sort_matches_by_position(session.last->matches);
             session.has_last = true;
             if (!stmt.is_parallel
                 && !(stmt.query.tokens.size() == 1 && stmt.query.tokens[0].is_dep_subtree))
@@ -2654,13 +2660,13 @@ static void run_query(const Corpus& corpus, const std::string& input,
                     stmt.is_parallel ? build_name_map(stmt.target_query) : NameIndexMap{};
 
             // Always store as "Last" (CQP convention)
-            session.named_results["Last"] = session.last_ms;
+            session.named_results["Last"] = session.last;
             session.named_name_maps["Last"] = session.last_name_map;
             session.named_target_name_maps["Last"] = session.last_target_name_map;
 
             // If this statement has a name, also store under that name
             if (!stmt.name.empty()) {
-                session.named_results[stmt.name] = session.last_ms;
+                session.named_results[stmt.name] = session.last;
                 session.named_name_maps[stmt.name] = session.last_name_map;
                 session.named_target_name_maps[stmt.name] = session.last_target_name_map;
             }
@@ -2668,21 +2674,21 @@ static void run_query(const Corpus& corpus, const std::string& input,
             double query_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
             if (out_timing) {
                 out_timing->query_sec += query_ms / 1000.0;
-                out_timing->total = session.last_ms.total_count;
-                out_timing->returned = session.last_ms.matches.size();
-                out_timing->path = session.last_ms.plan_path;
-                out_timing->parts = session.last_ms.partitions;
+                out_timing->total = session.last->total_count;
+                out_timing->returned = session.last->matches.size();
+                out_timing->path = session.last->plan_path;
+                out_timing->parts = session.last->partitions;
             }
 
             if (!next_is_command) {
                 // (a program's earlier query statements only feed later ones)
                 const bool final_query = si + 1 == prog.size();
                 if (opts.count_only && final_query) {
-                    std::cout << session.last_ms.total_count << "\n";
+                    std::cout << session.last->total_count << "\n";
                     return;
                 }
                 if ((opts.dump_matches || opts.dump_page) && final_query) {
-                    const auto& ms = session.last_ms;
+                    const auto& ms = *session.last;
                     std::cout << "total=" << ms.total_count
                               << " exact=" << (ms.total_exact ? 1 : 0) << "\n";
                     for (const auto& m : ms.matches) {
@@ -2709,17 +2715,17 @@ static void run_query(const Corpus& corpus, const std::string& input,
                     if (out_timing) {
                         auto t2 = std::chrono::high_resolution_clock::now();
                         if (opts.json)
-                            emit_json(corpus, input, session.last_ms, opts, query_ms);
+                            emit_json(corpus, input, *session.last, opts, query_ms);
                         else
-                            emit_hits_text(corpus, input, session.last_ms, opts, query_ms);
+                            emit_hits_text(corpus, input, *session.last, opts, query_ms);
                         auto t3 = std::chrono::high_resolution_clock::now();
                         out_timing->fetch_sec =
                             std::chrono::duration<double, std::milli>(t3 - t2).count() / 1000.0;
                     } else {
                         if (opts.json)
-                            emit_json(corpus, input, session.last_ms, opts, query_ms);
+                            emit_json(corpus, input, *session.last, opts, query_ms);
                         else
-                            emit_hits_text(corpus, input, session.last_ms, opts, query_ms);
+                            emit_hits_text(corpus, input, *session.last, opts, query_ms);
                     }
                 }
             }
@@ -2880,7 +2886,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                 } else {
                     std::cout << "Named queries:\n";
                     for (const auto& [name, ms] : session.named_results) {
-                        std::cout << "  " << name << ": " << ms.matches.size() << " matches";
+                        std::cout << "  " << name << ": " << ms->matches.size() << " matches";
                         auto nm_it = session.named_name_maps.find(name);
                         if (nm_it != session.named_name_maps.end() && !nm_it->second.empty()) {
                             std::cout << "  (tokens:";
@@ -3176,7 +3182,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
             } else if (!cmd_to_run.query_name.empty()) {
                 auto it = session.named_results.find(cmd_to_run.query_name);
                 if (it != session.named_results.end()) {
-                    ms_to_use = &it->second;
+                    ms_to_use = it->second.get();
                     auto nm_it = session.named_name_maps.find(cmd_to_run.query_name);
                     nm_to_use = (nm_it != session.named_name_maps.end()) ? &nm_it->second : &session.last_name_map;
                 } else {
@@ -3190,12 +3196,12 @@ static void run_query(const Corpus& corpus, const std::string& input,
                                   << "' not found, using last result\n";
                     }
                     if (!session.has_last) { std::cerr << "No query to operate on\n"; continue; }
-                    ms_to_use = &session.last_ms;
+                    ms_to_use = session.last.get();
                     nm_to_use = &session.last_name_map;
                 }
             } else {
                 if (!session.has_last) { std::cerr << "No query to operate on\n"; continue; }
-                ms_to_use = &session.last_ms;
+                ms_to_use = session.last.get();
                 nm_to_use = &session.last_name_map;
             }
 
@@ -3222,6 +3228,32 @@ static void run_query(const Corpus& corpus, const std::string& input,
                     if (cmd_to_run.fields.empty()) {
                         std::cerr << "Error: sort requires 'by' clause\n";
                         return;
+                    }
+                    {
+                        // the sets are shared: another name holding the same hits keeps
+                        // its order, so this one sorts a copy
+                        // which slot the command sorts: a named set, else `Last`
+                        const std::string& qn = cmd_to_run.query_name;
+                        auto ni = qn.empty() || qn == "Last" ? session.named_results.end()
+                                                             : session.named_results.find(qn);
+                        const bool is_last = ni == session.named_results.end() || ni->second.get() != ms_to_use;
+                        const std::string key = is_last ? "Last" : qn;
+                        bool others = false;
+                        for (const auto& [n, p] : session.named_results)
+                            others |= p.get() == ms_to_use && n != key && !(is_last && n == "Last");
+                        if (!is_last && session.last.get() == ms_to_use) others = true;
+                        if (others) {
+                            auto copy = std::make_shared<MatchSet>(*ms_to_use);
+                            if (is_last) {
+                                session.last = copy;
+                                auto li = session.named_results.find("Last");
+                                if (li != session.named_results.end() && li->second.get() == ms_to_use)
+                                    li->second = copy;
+                            } else if (!key.empty()) {
+                                session.named_results[key] = copy;
+                            }
+                            ms_to_use = copy.get();
+                        }
                     }
                     // P7.7: keys computed once per hit (bytewise order, as before)
                     sort_matches_by_key(corpus, ms_to_use->matches, *nm_to_use, cmd_to_run.fields,
@@ -3295,7 +3327,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                                 std::cerr << "Error: unknown reference query '" << cmd_to_run.ref_query_name << "'\n";
                             break;
                         }
-                        ref_ms = &rit->second;
+                        ref_ms = rit->second.get();
                     }
                     if (should_emit_output) emit_keyness(corpus, *ms_to_use, cmd_to_run, opts, *nm_to_use, ref_ms);
                     break;

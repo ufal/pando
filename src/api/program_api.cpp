@@ -40,6 +40,9 @@ struct CompactHits {
     size_t n = 0;
     size_t stride = 0;
     bool has_ends = false;
+    /// every span is one token (span_ends == positions, as the executor builds
+    /// them): `ends` is not stored
+    bool ends_same = false;
     std::vector<CorpusPos> pos, ends;
 
     static bool fits(const std::vector<Match>& v, size_t& stride, bool& has_ends) {
@@ -58,6 +61,12 @@ struct CompactHits {
         CompactHits c;
         if (!fits(v, c.stride, c.has_ends)) return std::nullopt;
         c.n = v.size();
+        if (c.has_ends) {
+            c.ends_same = true;
+            for (const Match& m : v)
+                if (!(m.positions == m.span_ends)) { c.ends_same = false; break; }
+            if (c.ends_same) c.has_ends = false;
+        }
         c.pos.reserve(c.n * c.stride);
         if (c.has_ends) c.ends.reserve(c.n * c.stride);
         for (const Match& m : v) {
@@ -72,6 +81,8 @@ struct CompactHits {
         if (has_ends) {
             const auto e = ends.begin() + static_cast<std::ptrdiff_t>(i * stride);
             m.span_ends.assign(e, e + static_cast<std::ptrdiff_t>(stride));
+        } else if (ends_same) {
+            m.span_ends = m.positions;
         } else {
             m.span_ends.clear();
         }
@@ -99,7 +110,7 @@ struct CompactHits {
 };
 
 size_t match_heap_bytes(const Match& m) {
-    size_t x = (m.positions.capacity() + m.span_ends.capacity()) * sizeof(CorpusPos);
+    size_t x = m.positions.heap_bytes() + m.span_ends.heap_bytes();
     x += m.named_regions.size() * 96;
     for (const auto& kv : m.named_dep_subtrees) x += 96 + kv.second.capacity() * sizeof(CorpusPos);
     x += m.token_group_props.capacity() * sizeof(std::pair<std::string, std::string>);
@@ -116,8 +127,41 @@ size_t estimate_bytes(const MatchSet& ms) {
 
 // Bytes `n` hits of a `tokens`-token query take as Match objects (+ malloc overhead).
 size_t transient_bytes(size_t n, size_t tokens) {
-    return n * (sizeof(Match) + 2 * (tokens * sizeof(CorpusPos) + 32));
+    // positions inline up to PosVec's capacity, else two heap arrays
+    const size_t heap = tokens > PosVec::kInline ? 2 * (tokens * sizeof(CorpusPos) + 32) : 0;
+    return n * (sizeof(Match) + heap);
 }
+
+/// Hits straight into CompactHits' arrays (QueryExecutor::set_hit_sink): a set
+/// kept without a Match per hit. `ends` only once a span is longer than a token.
+struct CompactSink : HitSink {
+    size_t stride = 0, n = 0;   // stride: the query's tokens, from the first hit
+    bool ends_same = true, bad = false;
+    std::vector<CorpusPos> pos, ends;
+    void hit(const CorpusPos* s, const CorpusPos* e, size_t k) override {
+        if (n == 0) stride = k;
+        if (k != stride) { bad = true; return; }
+        if (ends_same && !std::equal(s, s + k, e)) {
+            ends_same = false;
+            ends = pos;   // the spans so far were single tokens
+        }
+        pos.insert(pos.end(), s, s + k);
+        if (!ends_same) ends.insert(ends.end(), e, e + k);
+        ++n;
+    }
+    CompactHits take() {
+        CompactHits c;
+        c.n = n;
+        c.stride = stride;
+        c.has_ends = !ends_same;
+        c.ends_same = ends_same;
+        pos.shrink_to_fit();
+        ends.shrink_to_fit();
+        c.pos = std::move(pos);
+        c.ends = std::move(ends);
+        return c;
+    }
+};
 
 // One stored result: the recipe (query AST + sort steps) and, once a command
 // needed every hit, the materialised hits (compact when they are plain).
@@ -168,6 +212,15 @@ struct HitSet {
             ms = std::move(all);
             bytes = estimate_bytes(ms);
         }
+        materialised = true;
+    }
+    // Keep hits built straight into compact arrays (CompactSink), in the set's order.
+    void keep_compact(CompactHits&& c, std::string plan_path) {
+        know_total(c.n, true);
+        compact = std::move(c);
+        ms = MatchSet{};
+        ms.plan_path = std::move(plan_path);
+        bytes = compact->bytes();
         materialised = true;
     }
     void drop() {
@@ -352,6 +405,28 @@ void materialise(const Corpus& corpus, HitSet& hs, const std::string& name, cons
     }
     QueryExecutor ex(corpus);
     setup_executor(ex, hs, progress);
+    // hits with nothing to check after the kernels go straight into the compact
+    // arrays: ~8 bytes per token instead of a Match each (~100 bytes + growth)
+    if (!st.is_parallel && ex.may_sink_hits(st.query)) {
+        CompactSink sink;
+        ex.set_hit_sink(&sink);
+        MatchSet ms = ex.execute(st.query, 0, true, 0, 0, 0, 1);
+        const size_t sunk = ex.sink_hits();
+        ex.set_hit_sink(nullptr);
+        if (sunk == 0) {
+            // a path that returns its hits itself (no per-hit loop): as before
+            for (const auto& keys : hs.sorts)
+                sort_matches_by_key(corpus, ms.matches, hs.nm, keys);
+            hs.keep(std::move(ms));
+            return;
+        }
+        if (!sink.bad && ms.matches.empty() && ms.total_exact && sink.n == ms.total_count) {
+            hs.keep_compact(sink.take(), ms.plan_path);
+            for (const auto& keys : hs.sorts) hs.sort_by(corpus, keys);
+            return;
+        }
+        // mixed (should not happen): the plain run below
+    }
     MatchSet ms = st.is_parallel
         ? ex.execute_parallel(st.query, st.target_query, 0, false)
         : ex.execute(st.query, 0, true, 0, 0, 0, std::max(1u, threads));
@@ -868,6 +943,8 @@ static void emit_count_json(std::ostream& out, const Corpus& corpus, const Match
         out << "\n  ]\n}}\n";
     }
     } catch (const std::exception& e) {
+        // the rows written so far would leave broken JSON before the error
+        if (auto* os = dynamic_cast<std::ostringstream*>(&out)) { os->str(""); os->clear(); }
         out << "{\"ok\": false, \"error\": " << jstr(e.what()) << "}\n";
     }
 }
@@ -1128,6 +1205,8 @@ static void emit_freq_json(std::ostream& out, const Corpus& corpus, const MatchS
     }
     out << "\n  ]\n}}\n";
     } catch (const std::exception& e) {
+        // the rows written so far would leave broken JSON before the error
+        if (auto* os = dynamic_cast<std::ostringstream*>(&out)) { os->str(""); os->clear(); }
         out << "{\"ok\": false, \"error\": " << jstr(e.what()) << "}\n";
     }
 }
@@ -1217,6 +1296,8 @@ static void emit_tabulate_json(std::ostream& out, const Corpus& corpus, const Ma
     }
     out << "\n  ]\n}}\n";
     } catch (const std::exception& e) {
+        // the rows written so far would leave broken JSON before the error
+        if (auto* os = dynamic_cast<std::ostringstream*>(&out)) { os->str(""); os->clear(); }
         out << "{\"ok\": false, \"error\": " << jstr(e.what()) << "}\n";
     }
 }
