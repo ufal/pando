@@ -1543,7 +1543,8 @@ static bool compare_nvals_count(int64_t n, CompOp op, int64_t rhs) {
         case CompOp::GT:  return n > rhs;
         case CompOp::LTE: return n <= rhs;
         case CompOp::GTE: return n >= rhs;
-        case CompOp::REGEX: return false;
+        case CompOp::REGEX:
+        case CompOp::IN:  return false;  // IN is position-set only (check_leaf)
     }
     return false;
 }
@@ -2432,6 +2433,8 @@ bool QueryExecutor::check_leaf(CorpusPos pos, const AttrCondition& ac) const {
                                 case CompOp::GTE:
                                     if (val >= ac.value) { any_match = true; return false; }
                                     break;
+                                case CompOp::IN:
+                                    break;  // handled at top of check_leaf
                             }
                             return true;  // continue scanning
                         });
@@ -2454,6 +2457,7 @@ bool QueryExecutor::check_leaf(CorpusPos pos, const AttrCondition& ac) const {
                             case CompOp::GT:    return val > ac.value;
                             case CompOp::LTE:   return val <= ac.value;
                             case CompOp::GTE:   return val >= ac.value;
+                            case CompOp::IN:    return false;  // handled at top of check_leaf
                         }
                     }
                 }
@@ -2526,6 +2530,7 @@ bool QueryExecutor::check_leaf(CorpusPos pos, const AttrCondition& ac) const {
         case CompOp::GT:    return val > ac.value;
         case CompOp::LTE:   return val <= ac.value;
         case CompOp::GTE:   return val >= ac.value;
+        case CompOp::IN:    return false;  // handled at top of check_leaf
     }
     return false;
 }
@@ -2559,7 +2564,8 @@ bool QueryExecutor::check_conditions(CorpusPos pos,
             case CompOp::GT:  return cnt >  cond->count_value;
             case CompOp::LTE: return cnt <= cond->count_value;
             case CompOp::GTE: return cnt >= cond->count_value;
-            case CompOp::REGEX: return false;
+            case CompOp::REGEX:
+            case CompOp::IN:  return false;
         }
         return false;
     }
@@ -8548,7 +8554,8 @@ void QueryExecutor::apply_global_filters(const TokenQuery& query, const NameInde
                     case CompOp::GT:  ok = (lhs_val >  rhs_val); break;
                     case CompOp::LTE: ok = (lhs_val <= rhs_val); break;
                     case CompOp::GTE: ok = (lhs_val >= rhs_val); break;
-                    case CompOp::REGEX: ok = false; break;
+                    case CompOp::REGEX:
+                    case CompOp::IN:  ok = false; break;
                 }
                 if (!ok) { pass = false; break; }
             }
