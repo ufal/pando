@@ -3985,24 +3985,38 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                                 bool skip_name_validation) {
     if (!skip_name_validation)
         validate_query_name_bindings(query);
+    wh_cache_ = {};   // (keyed on AST nodes, which a later query may reuse)
 
-    // Post-filters that run on the materialised hits (`within … having`,
-    // `containing`, `not within`, `::` functions / alignment, position orders)
-    // cannot see hits that were only counted, nor hits beyond a truncated page
-    // (the first page could come back empty). Until they are applied per hit:
-    // materialise every hit, filter, then cut the page and apply the total cap.
-    if (max_matches > 0 && sample_size == 0 && !aggregate_by_fields
-        && (query.within_having || query.not_within || !query.containing_clauses.empty()
-            || !query.position_orders.empty() || !query.global_alignment_filters.empty()
-            || !query.global_function_filters.empty())) {
-        MatchSet ms = execute_impl(query, 0, true, 0, 0, random_seed, num_threads, nullptr, true);
-        if (ms.matches.size() > max_matches)
-            ms.matches.erase(ms.matches.begin() + static_cast<std::ptrdiff_t>(max_matches),
-                             ms.matches.end());
-        if (!count_total) {
+    // P1.12: post-filters (`within … having`, `containing`, `not within`, `::`
+    // functions / alignment, position orders) run on each hit as it is found
+    // (add_resolved_match), so no path counts or pages hits the filters did not
+    // see. A page without a total stops once it is full; with a total every hit
+    // is enumerated (max_matches 0: no path counts past a full page without
+    // seeing the hits) and only the page is kept (store_cap_), so memory stays
+    // O(page) instead of the whole hit list.
+    const bool has_post = query.within_having || query.not_within
+        || !query.containing_clauses.empty() || !query.position_orders.empty()
+        || !query.global_alignment_filters.empty() || !query.global_function_filters.empty();
+    if (has_post && !post_per_hit_ && !aggregate_by_fields) {
+        struct Scope {
+            QueryExecutor& ex;
+            bool per_hit;
+            size_t cap;
+            ~Scope() { ex.post_per_hit_ = per_hit; ex.store_cap_ = cap; }
+        } scope{*this, post_per_hit_, store_cap_};
+        post_per_hit_ = true;
+        const size_t page = max_matches;
+        const bool enumerate = count_total && page > 0 && sample_size == 0;
+        store_cap_ = enumerate ? page : 0;
+        MatchSet ms = execute_impl(query, enumerate ? 0 : page, count_total, max_total_cap,
+                                   sample_size, random_seed, num_threads, nullptr, true);
+        // (paths with their own filter pass — region anchors — keep every hit)
+        if (page > 0 && sample_size == 0 && ms.matches.size() > page)
+            ms.matches.erase(ms.matches.begin() + static_cast<std::ptrdiff_t>(page), ms.matches.end());
+        if (!count_total && page > 0) {
             ms.total_count = ms.matches.size();
             ms.total_exact = false;
-        } else if (max_total_cap > 0 && ms.total_count > max_total_cap) {
+        } else if (max_total_cap > 0 && ms.total_count >= max_total_cap) {
             ms.total_count = max_total_cap;
             ms.total_exact = false;
         }
@@ -4286,6 +4300,9 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
             progress_tick(m.first_pos(), agg_ptr->total_hits);
             return true;
         }
+        // P1.12: the post-filters, per hit (before it counts toward the page / total)
+        if (post_per_hit_ && !passes_post_filters(q, name_map, m, post_scratch))
+            return true;
         ++result.total_count;
         progress_tick(m.first_pos(), result.total_count);
         if (sample_size > 0) {
@@ -4298,7 +4315,8 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                     reservoir[idx(rng)] = std::move(m);
                 }
             }
-        } else if (max_matches == 0 || result.matches.size() < max_matches) {
+        } else if (store_cap_ > 0 ? result.matches.size() < store_cap_
+                                  : (max_matches == 0 || result.matches.size() < max_matches)) {
             result.matches.push_back(std::move(m));
         }
         return true;
@@ -4355,11 +4373,13 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
             return std::move(result);
         }
         apply_anchor_filters(token_anchor_constraints, result);
-        apply_within_having(q, result);
-        apply_not_within(q, result);
-        apply_containing(q, result);
-        apply_position_orders(q, name_map, result);
-        apply_global_filters(q, name_map, result);
+        if (!post_per_hit_) {   // (P1.12: already applied to each hit)
+            apply_within_having(q, result);
+            apply_not_within(q, result);
+            apply_containing(q, result);
+            apply_position_orders(q, name_map, result);
+            apply_global_filters(q, name_map, result);
+        }
         result.total_exact = !reached_limit() && !reached_total_cap();
         return std::move(result);
     };
@@ -8690,186 +8710,204 @@ void QueryExecutor::apply_anchor_filters(const std::vector<AnchorConstraint>& co
         result.total_count = result.matches.size();
 }
 
-void QueryExecutor::apply_within_having(const TokenQuery& query, MatchSet& result) const {
-    if (!query.within_having || query.within.empty()) return;
-    if (!corpus_.has_structure(query.within)) return;
-
+bool QueryExecutor::passes_within_having(const TokenQuery& query, const Match& m) const {
     const auto& sa = corpus_.structure(query.within);
     const bool span_semantics = corpus_.is_nested(query.within) ||
                                 corpus_.is_overlapping(query.within);
-
-    std::vector<Match> kept;
-    kept.reserve(result.matches.size());
-
-    for (const auto& m : result.matches) {
-        if (!span_semantics) {
-            CorpusPos pos = m.first_pos();
-            int64_t rgn = sa.find_region(pos);
-            if (rgn < 0) continue;
-            Region reg = sa.get(static_cast<size_t>(rgn));
-            bool found = false;
-            for (CorpusPos p = reg.start; p <= reg.end; ++p) {
-                if (check_conditions(p, query.within_having)) {
-                    found = true;
-                    break;
-                }
-            }
-            if (found) kept.push_back(m);
-            continue;
-        }
-
-        auto ext = match_extent_from_match(m);
-        if (!ext) continue;
-        CorpusPos ms = ext->first;
-        CorpusPos me = ext->second;
-
+    if (!span_semantics) {
+        CorpusPos pos = m.first_pos();
+        int64_t rgn = sa.find_region(pos);
+        if (rgn < 0) return false;
+        // hits come in corpus order, many per region (P1.12: one at a time):
+        // the last region's answer is reused
+        if (wh_cache_.cond == query.within_having.get() && wh_cache_.sa == &sa
+            && wh_cache_.rgn == rgn)
+            return wh_cache_.found;
+        Region reg = sa.get(static_cast<size_t>(rgn));
         bool found = false;
-        sa.for_each_region_at(ms, [&](size_t rgn_idx) -> bool {
-            Region reg = sa.get(rgn_idx);
-            if (ms < reg.start || me > reg.end) return true;
-            for (CorpusPos p = reg.start; p <= reg.end; ++p) {
-                if (check_conditions(p, query.within_having)) {
-                    found = true;
-                    return false;
-                }
+        for (CorpusPos p = reg.start; p <= reg.end; ++p) {
+            if (check_conditions(p, query.within_having)) {
+                found = true;
+                break;
             }
-            return true;
-        });
-        if (found) kept.push_back(m);
+        }
+        wh_cache_ = {query.within_having.get(), &sa, rgn, found};
+        return found;
     }
 
+    auto ext = match_extent_from_match(m);
+    if (!ext) return false;
+    CorpusPos ms = ext->first;
+    CorpusPos me = ext->second;
+
+    bool found = false;
+    sa.for_each_region_at(ms, [&](size_t rgn_idx) -> bool {
+        Region reg = sa.get(rgn_idx);
+        if (ms < reg.start || me > reg.end) return true;
+        for (CorpusPos p = reg.start; p <= reg.end; ++p) {
+            if (check_conditions(p, query.within_having)) {
+                found = true;
+                return false;
+            }
+        }
+        return true;
+    });
+    return found;
+}
+
+bool QueryExecutor::within_having_active(const TokenQuery& query) const {
+    return query.within_having && !query.within.empty() && corpus_.has_structure(query.within);
+}
+
+bool QueryExecutor::not_within_active(const TokenQuery& query) const {
+    return query.not_within && !query.within.empty() && corpus_.has_structure(query.within);
+}
+
+void QueryExecutor::apply_within_having(const TokenQuery& query, MatchSet& result) const {
+    if (!within_having_active(query)) return;
+    std::vector<Match> kept;
+    kept.reserve(result.matches.size());
+    for (auto& m : result.matches)
+        if (passes_within_having(query, m)) kept.push_back(std::move(m));
     result.matches = std::move(kept);
     result.total_count = result.matches.size();
 }
 
 // ── Containing / not-within / position-order filters ─────────────────
 
-void QueryExecutor::apply_containing(const TokenQuery& query, MatchSet& result) const {
-    if (query.containing_clauses.empty()) return;
+bool QueryExecutor::passes_containing(const TokenQuery& query, const Match& m) const {
+    CorpusPos ms = m.first_pos();
+    CorpusPos me = m.last_pos();
+    for (const auto& cc : query.containing_clauses) {
+        bool found = false;
 
-    std::vector<Match> kept;
-    kept.reserve(result.matches.size());
-
-    for (const auto& m : result.matches) {
-        CorpusPos ms = m.first_pos();
-        CorpusPos me = m.last_pos();
-        bool pass = true;
-
-        for (const auto& cc : query.containing_clauses) {
-            bool found = false;
-
-            if (cc.is_subtree) {
-                // Dependency subtree containment: find a token in [ms, me] matching
-                // cc.subtree_cond whose full subtree is also within [ms, me].
-                if (!corpus_.has_deps()) { found = false; }
-                else {
-                    const auto& deps = corpus_.deps();
-                    for (CorpusPos p = ms; p <= me; ++p) {
-                        if (!check_conditions(p, cc.subtree_cond)) continue;
-                        auto sub = deps.subtree(p);
-                        bool all_inside = true;
-                        for (CorpusPos sp : sub) {
-                            if (sp < ms || sp > me) { all_inside = false; break; }
-                        }
-                        if (all_inside) { found = true; break; }
+        if (cc.is_subtree) {
+            // Dependency subtree containment: find a token in [ms, me] matching
+            // cc.subtree_cond whose full subtree is also within [ms, me].
+            if (!corpus_.has_deps()) { found = false; }
+            else {
+                const auto& deps = corpus_.deps();
+                for (CorpusPos p = ms; p <= me; ++p) {
+                    if (!check_conditions(p, cc.subtree_cond)) continue;
+                    auto sub = deps.subtree(p);
+                    bool all_inside = true;
+                    for (CorpusPos sp : sub) {
+                        if (sp < ms || sp > me) { all_inside = false; break; }
                     }
+                    if (all_inside) { found = true; break; }
                 }
-            } else {
-                // Structural region containment: check if any region of the
-                // specified type has both start and end within [ms, me].
-                if (!corpus_.has_structure(cc.region)) { found = false; }
-                else {
-                    const auto& sa = corpus_.structure(cc.region);
-                    // Binary search: find first region whose start >= ms
-                    size_t count = sa.region_count();
-                    // Linear scan from the region containing ms
-                    int64_t rgn = sa.find_region(ms);
-                    if (rgn < 0) rgn = 0;
-                    for (size_t r = static_cast<size_t>(rgn); r < count; ++r) {
-                        Region reg = sa.get(r);
-                        if (reg.start > me) break;  // past match end
-                        if (reg.start >= ms && reg.end <= me) {
-                            found = true;
-                            break;
-                        }
+            }
+        } else {
+            // Structural region containment: check if any region of the
+            // specified type has both start and end within [ms, me].
+            if (!corpus_.has_structure(cc.region)) { found = false; }
+            else {
+                const auto& sa = corpus_.structure(cc.region);
+                size_t count = sa.region_count();
+                // Linear scan from the region containing ms
+                int64_t rgn = sa.find_region(ms);
+                if (rgn < 0) rgn = 0;
+                for (size_t r = static_cast<size_t>(rgn); r < count; ++r) {
+                    Region reg = sa.get(r);
+                    if (reg.start > me) break;  // past match end
+                    if (reg.start >= ms && reg.end <= me) {
+                        found = true;
+                        break;
                     }
                 }
             }
-
-            if (cc.negated) found = !found;
-            if (!found) { pass = false; break; }
         }
 
-        if (pass) kept.push_back(m);
+        if (cc.negated) found = !found;
+        if (!found) return false;
     }
+    return true;
+}
 
+void QueryExecutor::apply_containing(const TokenQuery& query, MatchSet& result) const {
+    if (query.containing_clauses.empty()) return;
+    std::vector<Match> kept;
+    kept.reserve(result.matches.size());
+    for (auto& m : result.matches)
+        if (passes_containing(query, m)) kept.push_back(std::move(m));
     result.matches = std::move(kept);
     result.total_count = result.matches.size();
 }
 
-void QueryExecutor::apply_not_within(const TokenQuery& query, MatchSet& result) const {
-    if (!query.not_within || query.within.empty()) return;
-    if (!corpus_.has_structure(query.within)) return;
-
+bool QueryExecutor::passes_not_within(const TokenQuery& query, const Match& m) const {
     const auto& sa = corpus_.structure(query.within);
     const bool span_semantics = corpus_.is_nested(query.within) ||
                                 corpus_.is_overlapping(query.within);
+    auto ext = match_extent_from_match(m);
+    if (!ext) return false;
+    CorpusPos ms = ext->first;
+    CorpusPos me = ext->second;
 
+    if (!span_semantics) {
+        // Flat: at most one region per position; find_region(ms) is the only
+        // candidate that could contain the full span.
+        int64_t rgn = sa.find_region(ms);
+        if (rgn < 0) return true;
+        Region reg = sa.get(static_cast<size_t>(rgn));
+        return !(reg.start <= ms && me <= reg.end);
+    }
+    return !within_span_in_some_region(sa, ms, me);
+}
+
+void QueryExecutor::apply_not_within(const TokenQuery& query, MatchSet& result) const {
+    if (!not_within_active(query)) return;
     std::vector<Match> kept;
     kept.reserve(result.matches.size());
-
-    for (const auto& m : result.matches) {
-        auto ext = match_extent_from_match(m);
-        if (!ext) continue;
-        CorpusPos ms = ext->first;
-        CorpusPos me = ext->second;
-
-        if (!span_semantics) {
-            // Flat: at most one region per position; find_region(ms) is the only
-            // candidate that could contain the full span.
-            int64_t rgn = sa.find_region(ms);
-            if (rgn < 0) {
-                kept.push_back(m);
-                continue;
-            }
-            Region reg = sa.get(static_cast<size_t>(rgn));
-            bool fully_inside = (reg.start <= ms && me <= reg.end);
-            if (!fully_inside) kept.push_back(m);
-            continue;
-        }
-
-        if (!within_span_in_some_region(sa, ms, me)) kept.push_back(m);
-    }
-
+    for (auto& m : result.matches)
+        if (passes_not_within(query, m)) kept.push_back(std::move(m));
     result.matches = std::move(kept);
     result.total_count = result.matches.size();
+}
+
+bool QueryExecutor::passes_position_orders(const TokenQuery& query, const NameIndexMap& name_map,
+                                           const Match& m) const {
+    for (const auto& po : query.position_orders) {
+        CorpusPos p1 = resolve_name(m, name_map, po.name1);
+        CorpusPos p2 = resolve_name(m, name_map, po.name2);
+        if (p1 == NO_HEAD || p2 == NO_HEAD) return false;
+        bool ok = false;
+        switch (po.op) {
+            case CompOp::LT:  ok = (p1 < p2); break;
+            case CompOp::GT:  ok = (p1 > p2); break;
+            default: ok = (p1 < p2); break;
+        }
+        if (!ok) return false;
+    }
+    return true;
 }
 
 void QueryExecutor::apply_position_orders(const TokenQuery& query, const NameIndexMap& name_map, MatchSet& result) const {
     if (query.position_orders.empty()) return;
-
     std::vector<Match> kept;
     kept.reserve(result.matches.size());
-
-    for (const auto& m : result.matches) {
-        bool pass = true;
-        for (const auto& po : query.position_orders) {
-            CorpusPos p1 = resolve_name(m, name_map, po.name1);
-            CorpusPos p2 = resolve_name(m, name_map, po.name2);
-            if (p1 == NO_HEAD || p2 == NO_HEAD) { pass = false; break; }
-            bool ok = false;
-            switch (po.op) {
-                case CompOp::LT:  ok = (p1 < p2); break;
-                case CompOp::GT:  ok = (p1 > p2); break;
-                default: ok = (p1 < p2); break;
-            }
-            if (!ok) { pass = false; break; }
-        }
-        if (pass) kept.push_back(m);
-    }
-
+    for (auto& m : result.matches)
+        if (passes_position_orders(query, name_map, m)) kept.push_back(std::move(m));
     result.matches = std::move(kept);
     result.total_count = result.matches.size();
+}
+
+/// P1.12: every post-filter on one hit, in apply order (m is moved through the
+/// set-based `::` filters and back when it survives).
+bool QueryExecutor::passes_post_filters(const TokenQuery& query, const NameIndexMap& name_map,
+                                        Match& m, MatchSet& scratch) const {
+    if (within_having_active(query) && !passes_within_having(query, m)) return false;
+    if (not_within_active(query) && !passes_not_within(query, m)) return false;
+    if (!query.containing_clauses.empty() && !passes_containing(query, m)) return false;
+    if (!query.position_orders.empty() && !passes_position_orders(query, name_map, m)) return false;
+    if (query.global_alignment_filters.empty() && query.global_function_filters.empty())
+        return true;   // (region filters: already inline)
+    scratch.matches.clear();
+    scratch.matches.push_back(std::move(m));
+    scratch.total_count = 1;
+    apply_global_filters(query, name_map, scratch);
+    if (scratch.matches.empty()) return false;
+    m = std::move(scratch.matches.front());
+    return true;
 }
 
 // ── Set operations ──────────────────────────────────────────────────────

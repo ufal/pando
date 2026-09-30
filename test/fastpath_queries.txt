@@ -264,3 +264,18 @@ a:[upos="ADJ"] b:[upos="NOUN"]; count by a.lemma, text_langcode
 [upos!="N.*"] [upos="NOUN"]
 [word!="[A-Z].*" & upos!="PUNCT"]
 [lemma!=/.*e.*/]+
+# P1.12 post-filters per hit (pages without total stop early; totals enumerate, keep the page)
+[upos="NOUN"] within s having [upos="ADJ"]
+[upos="DET"] [upos="NOUN"] within s having [lemma="the"]
+[upos="DET"] []{0,3} [upos="NOUN"] containing s
+[upos="DET"] []{0,5} [upos="PUNCT"] containing subtree [upos="NOUN"]
+[upos="NOUN"] [upos="PUNCT"] not within s
+[] [] not within s
+a:[upos="ADJ"] []{0,3} b:[upos="NOUN"] :: a < b
+a:[upos="NOUN"] []{0,3} b:[upos="NOUN"] :: distance(a,b) < 3
+a:[upos="NOUN"] []{0,2} b:[upos="NOUN"] :: a.lemma = b.lemma
+a:[upos="VERB"] > b:[upos="NOUN"] :: depth(b) < 3
+a:[upos="VERB"] > b:[] :: nchildren(b) > 1
+a:[upos="NOUN"] :: strlen(a.lemma) > 6 & match.text_lang = "English"
+[upos="ADJ"]+ containing s
+a:[upos="DET"] b:[upos="NOUN"] :: distance(a,b) < 2; count by b.lemma

@@ -881,6 +881,17 @@ private:
 
     // Apply within-having as post-filter
     void apply_within_having(const TokenQuery& query, MatchSet& result) const;
+    /// P1.12: the post-filters as per-hit predicates (the apply_* functions filter
+    /// a hit list with them).
+    bool passes_within_having(const TokenQuery& query, const Match& m) const;
+    bool passes_not_within(const TokenQuery& query, const Match& m) const;
+    bool passes_containing(const TokenQuery& query, const Match& m) const;
+    bool passes_position_orders(const TokenQuery& query, const NameIndexMap& name_map,
+                                const Match& m) const;
+    bool passes_post_filters(const TokenQuery& query, const NameIndexMap& name_map,
+                             Match& m, MatchSet& scratch) const;
+    bool within_having_active(const TokenQuery& query) const;
+    bool not_within_active(const TokenQuery& query) const;
 
     // Apply containing/not-containing clauses as post-filter
     void apply_containing(const TokenQuery& query, MatchSet& result) const;
@@ -935,6 +946,24 @@ private:
     /// Workers run on a query the driver already compiled (compile_conditions
     /// writes into the shared AST, so it must not run concurrently).
     bool skip_compile_ = false;
+    /// P1.12: the query's post-filters (`within … having`, `containing`, `not
+    /// within`, position orders, `::` alignment / functions) run on each hit as it
+    /// is found (add_resolved_match), not on the materialised hit list at the end.
+    /// Set by execute_impl for its inner run.
+    bool post_per_hit_ = false;
+    /// With post_per_hit_ and a total: every hit is enumerated (max_matches 0, so
+    /// no path counts past a full page without seeing the hits), only this many
+    /// are kept (0: no limit).
+    size_t store_cap_ = 0;
+    /// apply_within_having: the last flat region checked (per executor; hits of a
+    /// query arrive in order, so consecutive hits mostly share it).
+    struct WithinHavingCache {
+        const void* cond = nullptr;
+        const void* sa = nullptr;
+        int64_t rgn = -1;
+        bool found = false;
+    };
+    mutable WithinHavingCache wh_cache_;
     /// P6.5e: materialised operands (id-set unions, `!=`, AND / OR lists) only
     /// cover these positions (hi == 0: the whole corpus). Set by the progressive
     /// page driver on its range workers: the range ± the longest match.
