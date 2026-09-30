@@ -5817,6 +5817,289 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                 return finish_query();
             }
         }
+        // ── P2.x: two or more variable-length elements (seq_multi_bitmap) ──
+        // `[ADP] [DET]? [ADJ]* [NOUN]`, `[DET] [ADJ]* [NOUN]+`: every assignment of
+        // lengths L_i ({0 if min_i = 0} ∪ [max(min_i, 1), max_i]) with token i's L_i
+        // positions all matching X_i and the tokens contiguous is one hit — the
+        // generic executor's hits (it seeds from a token with min >= 1, so one is
+        // required here). Per chunk, a depth-first walk over the tokens and their
+        // lengths keeps the set of starts whose prefix matches at the current
+        // offset d as a bitmap: acc & (X_i >> d + L - 1) for each extra position,
+        // & A_d (the span [s, s+d-1] inside one `within` region: covered start, no
+        // region end before its last position; the corpus end counts as one).
+        // A branch dies when its bitmap is empty, so runs of a selective X end after
+        // a few lengths. Leaves are counted (popcount) or, for the page, walked in
+        // start order.
+        if (simple && n_var >= 2 && bitmap_mode() != BitmapMode::Off) {
+            std::string eff_within = q.within.empty() ? corpus_.default_within() : q.within;
+            const StructuralAttr* wsa = (!eff_within.empty() && corpus_.has_structure(eff_within))
+                ? &corpus_.structure(eff_within) : nullptr;
+            const bool wspan = wsa && (corpus_.is_nested(eff_within) || corpus_.is_overlapping(eff_within));
+            int sum_max = 0, wild_var = 0;
+            bool any_required = false, lengths_ok = true;
+            for (size_t i = 0; i < n; ++i) {
+                const auto& tok = q.tokens[i];
+                if (tok.max_repeat < 1 || tok.max_repeat < tok.min_repeat) lengths_ok = false;
+                sum_max += tok.max_repeat;
+                if (tok.min_repeat >= 1) any_required = true;
+                if (!tok.conditions && tok.has_repetition()) ++wild_var;
+            }
+            bool mcompiled = !wspan && lengths_ok && any_required && wild_var <= 1
+                             && sum_max - 1 <= kBmMaxShift;
+            bool mdense = false;
+            std::vector<std::unique_ptr<BmExpr>> mtex(n);   // nullptr = []
+            for (size_t i = 0; i < n && mcompiled; ++i) {
+                if (!q.tokens[i].conditions) continue;
+                mtex[i] = compile_bm(q.tokens[i].conditions, &mdense);
+                if (!mtex[i]) mcompiled = false;
+            }
+            if (mcompiled) {
+                RegionPosMask bm_mask = build_start_mask();
+                result.plan_path = "seq_multi_bitmap";
+                mark_ranged(bm_mask);
+                if (bm_mask.status == RegionMaskStatus::Unsatisfiable) {
+                    result.total_exact = true;
+                    return result;
+                }
+                const bool use_mask = bm_mask.status == RegionMaskStatus::Ready;
+                const bool cheap_total_ok = (q.global_region_filters.empty() || use_mask)
+                                            && token_anchor_constraints.empty();
+                constexpr size_t W = BitmapIndex::kWords;
+                constexpr size_t WX = W + kBmExtra;
+                const CorpusPos N = corpus_.size();
+                const size_t nchunks = static_cast<size_t>((N + BitmapIndex::kChunk - 1) >> BitmapIndex::kChunkShift);
+                // tokens a match cannot do without (min >= 1), rarest first: an empty
+                // chunk of one of them (and its first extra words) skips the chunk
+                std::vector<size_t> required, others;
+                for (size_t i = 0; i < n; ++i) {
+                    if (!mtex[i]) continue;
+                    (q.tokens[i].min_repeat >= 1 ? required : others).push_back(i);
+                }
+                std::stable_sort(required.begin(), required.end(), [&](size_t a, size_t b) {
+                    return mtex[a]->estimate < mtex[b]->estimate;
+                });
+                size_t fv = 0;                                       // first variable token
+                while (fv < n && !q.tokens[fv].has_repetition()) ++fv;
+                std::vector<BmChunk> view(n);
+                std::vector<uint64_t> cw(WX), ew(WX), alw(W), acc0(W);
+                std::vector<uint64_t> A(static_cast<size_t>(sum_max + 1) * W);
+                std::vector<uint64_t> bufs(static_cast<size_t>(n + 1) * W);
+                std::vector<int> lens(n, 0);
+                struct Leaf { std::vector<int> lens; std::vector<uint64_t> w; };
+                std::vector<Leaf> leaves;
+                size_t nleaves = 0;
+                size_t ivc = 0, wr = 0;
+                const Region* wreg = wsa ? wsa->region_data() : nullptr;
+                const size_t wn = wsa ? wsa->region_count() : 0;
+                std::shared_ptr<BitmapIndex> sbi = wsa ? structure_bitmap(eff_within) : nullptr;
+                std::unique_ptr<BmValue> sC, sE;
+                if (sbi) {
+                    sC = std::make_unique<BmValue>(*sbi, BitmapIndex::kStructCovered, 0);
+                    sE = std::make_unique<BmValue>(*sbi, BitmapIndex::kStructEnds, 0);
+                }
+                auto set_range = [](uint64_t* m, size_t a, size_t b) {   // inclusive bit range
+                    const size_t wa = a >> 6, wb = b >> 6;
+                    const uint64_t ma = ~uint64_t{0} << (a & 63);
+                    const uint64_t mb = ~uint64_t{0} >> (63 - (b & 63));
+                    if (wa == wb) { m[wa] |= ma & mb; return; }
+                    m[wa] |= ma;
+                    for (size_t w = wa + 1; w < wb; ++w) m[w] = ~uint64_t{0};
+                    m[wb] |= mb;
+                };
+                auto shifted_raw = [](const std::vector<uint64_t>& a, size_t i, int k) -> uint64_t {
+                    const size_t q0 = i + static_cast<size_t>(k >> 6);
+                    const int r = k & 63;
+                    if (r == 0) return a[q0];
+                    return (a[q0] >> r) | (a[q0 + 1] << (64 - r));
+                };
+                bool stop = false, counting = false;
+                size_t nw = W;
+                int a_hi = 1;                                         // A_d computed for d <= a_hi
+                auto Aat = [&](int d) -> const uint64_t* {
+                    while (a_hi < d) {
+                        ++a_hi;
+                        uint64_t* dst = A.data() + static_cast<size_t>(a_hi) * W;
+                        const uint64_t* prev = dst - W;
+                        for (size_t w = 0; w < nw; ++w) dst[w] = prev[w] & ~shifted_raw(ew, w, a_hi - 2);
+                    }
+                    return A.data() + static_cast<size_t>(d) * W;
+                };
+                auto leaf = [&](const uint64_t* acc) {
+                    if (counting) {
+                        size_t cnt = 0;
+                        for (size_t w = 0; w < nw; ++w) cnt += static_cast<size_t>(__builtin_popcountll(acc[w]));
+                        result.total_count += cnt;
+                        return;
+                    }
+                    if (nleaves == leaves.size()) leaves.push_back(Leaf{std::vector<int>(n), std::vector<uint64_t>(W)});
+                    Leaf& lf = leaves[nleaves++];
+                    lf.lens = lens;
+                    std::copy(acc, acc + nw, lf.w.begin());
+                };
+                // depth-first over tokens i >= fv; acc: starts whose tokens < i match
+                // with the span so far = d positions
+                auto dfs = [&](auto& self, size_t i, int d, const uint64_t* acc) -> void {
+                    if (i == n) { leaf(acc); return; }
+                    const auto& tok = q.tokens[i];
+                    const BmExpr* ex = mtex[i].get();
+                    uint64_t* r = bufs.data() + i * W;
+                    if (!tok.has_repetition()) {
+                        const uint64_t* Ad = Aat(d + 1);
+                        uint64_t any = 0;
+                        for (size_t w = 0; w < nw; ++w) {
+                            uint64_t x = acc[w] & Ad[w];
+                            if (ex) x &= view[i].shifted(w, d);
+                            r[w] = x;
+                            any |= x;
+                        }
+                        if (any) { lens[i] = 1; self(self, i + 1, d + 1, r); }
+                        return;
+                    }
+                    const int mn = tok.min_repeat, mx = tok.max_repeat;
+                    if (mn == 0) { lens[i] = 0; self(self, i + 1, d, acc); }
+                    std::copy(acc, acc + nw, r);
+                    for (int L = 1; L <= mx; ++L) {
+                        const uint64_t* Ad = Aat(d + L);
+                        uint64_t any = 0;
+                        for (size_t w = 0; w < nw; ++w) {
+                            uint64_t x = r[w] & Ad[w];
+                            if (ex) x &= view[i].shifted(w, d + L - 1);
+                            r[w] = x;
+                            any |= x;
+                        }
+                        if (!any) break;
+                        if (L >= mn) { lens[i] = L; self(self, i + 1, d + L, r); }
+                    }
+                };
+                for (size_t c = 0; c < nchunks && !stop; ++c) {
+                    const CorpusPos base = static_cast<CorpusPos>(c) << BitmapIndex::kChunkShift;
+                    progress_tick(base, result.total_count, true);
+                    const CorpusPos top = std::min<CorpusPos>(base + BitmapIndex::kChunk, N) - 1;
+                    nw = static_cast<size_t>((top - base) >> 6) + 1;
+                    if (use_mask && !bm_mask.use_bits) {
+                        const auto& iv = bm_mask.iv;
+                        while (ivc < iv.size() && iv[ivc].e < base) ++ivc;
+                        if (ivc >= iv.size()) break;
+                        if (iv[ivc].s > top) continue;
+                    }
+                    bool any = true;
+                    for (size_t i : required) {
+                        view[i] = mtex[i]->load(c);
+                        if (view[i].zero) { any = false; break; }
+                    }
+                    if (!any) continue;
+                    for (size_t i : others) view[i] = mtex[i]->load(c);
+                    // starts: in the chunk, allowed by the `:: match.…` mask, the fixed prefix
+                    uint64_t orr = 0;
+                    for (size_t w = 0; w < nw; ++w) {
+                        uint64_t x = ~uint64_t{0};
+                        for (size_t i = 0; i < fv; ++i)
+                            if (mtex[i]) x &= view[i].shifted(w, static_cast<int>(i));
+                        acc0[w] = x;
+                    }
+                    if ((top - base + 1) & 63) acc0[nw - 1] &= (uint64_t{1} << ((top - base + 1) & 63)) - 1;
+                    if (use_mask) {
+                        if (bm_mask.use_bits) {
+                            const size_t b0 = static_cast<size_t>(base >> 6);
+                            for (size_t w = 0; w < nw; ++w)
+                                acc0[w] &= b0 + w < bm_mask.bits.size() ? bm_mask.bits[b0 + w] : 0;
+                        } else {
+                            std::fill(alw.begin(), alw.begin() + nw, 0);
+                            const auto& iv = bm_mask.iv;
+                            for (size_t j = ivc; j < iv.size() && iv[j].s <= top; ++j) {
+                                const CorpusPos a = std::max(iv[j].s, base), b = std::min(iv[j].e, top);
+                                if (b >= a) set_range(alw.data(), static_cast<size_t>(a - base), static_cast<size_t>(b - base));
+                            }
+                            for (size_t w = 0; w < nw; ++w) acc0[w] &= alw[w];
+                        }
+                    }
+                    for (size_t w = 0; w < nw; ++w) orr |= acc0[w];
+                    if (!orr) continue;
+                    // covered positions C and region ends E over the chunk + the extra words
+                    std::fill(cw.begin(), cw.end(), 0);
+                    std::fill(ew.begin(), ew.end(), 0);
+                    const CorpusPos wend = base + static_cast<CorpusPos>(WX * 64);   // exclusive
+                    if (sC) {
+                        const BmChunk cv = sC->load(c), ev = sE->load(c);
+                        std::copy(cv.w, cv.w + W, cw.begin());
+                        std::copy(cv.nx, cv.nx + kBmExtra, cw.begin() + W);
+                        std::copy(ev.w, ev.w + W, ew.begin());
+                        std::copy(ev.nx, ev.nx + kBmExtra, ew.begin() + W);
+                    } else if (wreg) {
+                        while (wr < wn && wreg[wr].end < base) ++wr;
+                        for (size_t j = wr; j < wn && wreg[j].start < wend; ++j) {
+                            const CorpusPos a = std::max<CorpusPos>(wreg[j].start, base);
+                            const CorpusPos b = std::min<CorpusPos>(wreg[j].end, wend - 1);
+                            if (b >= a) set_range(cw.data(), static_cast<size_t>(a - base), static_cast<size_t>(b - base));
+                            if (wreg[j].end < wend) {
+                                const size_t o = static_cast<size_t>(wreg[j].end - base);
+                                ew[o >> 6] |= uint64_t{1} << (o & 63);
+                            }
+                        }
+                    } else {
+                        const CorpusPos b = std::min<CorpusPos>(N, wend) - 1;
+                        set_range(cw.data(), 0, static_cast<size_t>(b - base));
+                    }
+                    if (N - 1 < wend) {
+                        const size_t o = static_cast<size_t>(N - 1 - base);
+                        ew[o >> 6] |= uint64_t{1} << (o & 63);
+                    }
+                    std::copy(cw.begin(), cw.begin() + nw, A.begin() + W);   // A_1: covered starts
+                    a_hi = 1;
+                    // the fixed prefix spans fv positions: A_fv
+                    if (fv > 0) {
+                        const uint64_t* Af = Aat(static_cast<int>(fv));
+                        orr = 0;
+                        for (size_t w = 0; w < nw; ++w) orr |= (acc0[w] &= Af[w]);
+                        if (!orr) continue;
+                        for (size_t i = 0; i < fv; ++i) lens[i] = 1;
+                    }
+                    nleaves = 0;
+                    dfs(dfs, fv, static_cast<int>(fv), acc0.data());
+                    if (counting || nleaves == 0) {
+                        if (counting && max_total_cap > 0 && result.total_count >= max_total_cap) {
+                            result.total_count = max_total_cap;
+                            stop = true;
+                        }
+                        continue;
+                    }
+                    // the page: starts ascending, per start the leaves in walk order
+                    for (size_t w = 0; w < nw && !stop; ++w) {
+                        uint64_t starts = 0;
+                        for (size_t k = 0; k < nleaves; ++k) starts |= leaves[k].w[w];
+                        while (starts && !stop) {
+                            const int j = __builtin_ctzll(starts);
+                            starts &= starts - 1;
+                            const CorpusPos st = base + static_cast<CorpusPos>(w * 64) + j;
+                            for (size_t k = 0; k < nleaves && !stop; ++k) {
+                                if (!(leaves[k].w[w] >> j & 1)) continue;
+                                if (counting) { ++result.total_count; continue; }
+                                if (max_matches > 0 && result.matches.size() >= max_matches) {
+                                    if (!count_total) { stop = true; break; }
+                                    if (cheap_total_ok) { counting = true; ++result.total_count; continue; }
+                                }
+                                std::vector<CorpusPos> pm(2 * n);
+                                CorpusPos off = st;
+                                for (size_t i = 0; i < n; ++i) {
+                                    const int L = leaves[k].lens[i];
+                                    if (L == 0) { pm[i] = pm[n + i] = NO_HEAD; continue; }
+                                    pm[i] = off;
+                                    pm[n + i] = off + L - 1;
+                                    off += L;
+                                }
+                                add_match(std::move(pm));
+                                if (reached_limit() || reached_total_cap()) { stop = true; break; }
+                            }
+                        }
+                    }
+                    if (counting && max_total_cap > 0 && result.total_count >= max_total_cap) {
+                        result.total_count = max_total_cap;
+                        stop = true;
+                    }
+                }
+                return finish_query();
+            }
+        }
     }
 
     // ── Sequence fast path: bypass plan/step/expand for pure linear sequences ──

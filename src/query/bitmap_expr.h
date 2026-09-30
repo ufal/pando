@@ -19,7 +19,7 @@
 
 namespace pando {
 
-constexpr size_t kBmExtra = 4;                                 // words of chunk c + 1
+constexpr size_t kBmExtra = 8;                                 // words of chunk c + 1
 constexpr int kBmMaxShift = static_cast<int>(64 * (kBmExtra - 1));   // largest token offset
 
 struct BmChunk {

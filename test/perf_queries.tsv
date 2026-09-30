@@ -75,3 +75,14 @@ B10	[upos="DET"] [upos!="PUNCT"]{0,4} [upos="VERB"] within s
 B11	[upos="NOUN"] [upos="ADJ"]{2,3}
 B12	[upos="VERB" & text_langcode="en"] [upos="DET"]
 B13	[upos="ADP"] []{0,3} [upos="NOUN"] [upos="PUNCT"]
+# ── P2.x several variable-length elements (seq_multi_bitmap), P3.10 / P3.11, P1.12
+M1	[upos="ADP"] [upos="DET"]? [upos="ADJ"]* [upos="NOUN"]
+M2	[upos="DET"] [upos="ADJ"]* [upos="NOUN"]+
+M3	[upos="VERB"] [upos="ADV"]* [upos="DET"]? [upos="ADJ"]* [upos="NOUN"]
+M4	[upos="DET"] [upos="ADJ"]* [upos="NOUN"]+ within s
+M5	[upos="ADJ"]+ [upos="NOUN"]+
+R5	[lemma!="the"]+
+R6	[lemma!="shoe"]
+R7	[lemma!=".*e.*"]
+P1	[upos="NOUN"] within s having [upos="ADJ"]
+P2	a:[upos="NOUN"] []{0,3} b:[upos="NOUN"] :: distance(a,b) < 3

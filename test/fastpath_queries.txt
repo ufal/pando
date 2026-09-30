@@ -279,3 +279,19 @@ a:[upos="VERB"] > b:[] :: nchildren(b) > 1
 a:[upos="NOUN"] :: strlen(a.lemma) > 6 & match.text_lang = "English"
 [upos="ADJ"]+ containing s
 a:[upos="DET"] b:[upos="NOUN"] :: distance(a,b) < 2; count by b.lemma
+# P2.x several variable-length elements (seq_multi_bitmap)
+[upos="ADP"] [upos="DET"]? [upos="ADJ"]* [upos="NOUN"]
+[upos="DET"] [upos="ADJ"]* [upos="NOUN"]+
+[upos="DET"]? [upos="ADJ"]* [upos="NOUN"]
+[upos="ADJ"]* [upos="ADJ"]* [upos="NOUN"]
+[upos="ADJ"]+ [upos="NOUN"]+
+[upos="DET"] []{0,2} [upos="ADJ"]? [upos="NOUN"]
+[upos="DET"] [upos="ADJ"]{1,2} [upos="NOUN"]{2}
+[lemma="the"] [upos!="PUNCT"]{0,3} [upos="NOUN"]{1,2} [upos="VERB"]
+[upos="ADJ"]? [upos="ADJ"]? [upos="NOUN"]
+[upos="NOUN"] [upos="ADP"]? [upos="DET"]? [upos="NOUN"]
+[upos="DET"] [upos="ADJ"]* [upos="NOUN"]+ within s
+[upos="DET"] [upos="ADJ"]* [upos="NOUN"]+ :: match.text_langcode="en"
+[upos="VERB"] [upos="ADV"]* [upos="DET"]? [upos="ADJ"]* [upos="NOUN"]
+a:[upos="DET"] [upos="ADJ"]* b:[upos="NOUN"]+; count by b.lemma
+[upos="DET"] [upos="ADJ"]* [upos="NOUN"]+ within s having [upos="VERB"]
