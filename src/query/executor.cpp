@@ -1642,6 +1642,12 @@ std::string normalize_query_attr_name(const Corpus& corpus, const std::string& a
     return a;
 }
 
+bool QueryExecutor::leaf_regex_eval(std::string_view val, const AttrCondition& ac) const {
+    // pando-CQL: %c / %d apply to literal comparisons only (PANDO-CQL.md); a regex
+    // is made case-insensitive with (?i) — the CWB dialect adds it for "…"%c
+    return regex_eval_sv(val, regex_for(ac.value), ac.regex_full_match);
+}
+
 const Regex& QueryExecutor::regex_for(const std::string& pattern) const {
     std::lock_guard<std::mutex> lock(regex_cache_mutex_);
     auto it = regex_cache_.find(pattern);
@@ -1714,7 +1720,15 @@ void QueryExecutor::compile_conditions(const ConditionPtr& cond) const {
     if (cond->is_leaf) {
         AttrCondition& ac = const_cast<AttrCondition&>(cond->leaf);
         if (ac.is_nvals || ac.op == CompOp::IN) return;
-        if ((ac.op == CompOp::EQ || ac.op == CompOp::NEQ)
+        {
+            const std::string name = normalize_attr(ac.attr);
+            std::string feat_name;
+            const bool plain = !feats_is_subkey(name, feat_name) && corpus_.has_attr(name)
+                               && !corpus_.is_multivalue(name);
+            ac.plain_attr = plain ? static_cast<const void*>(&corpus_.attr(name)) : nullptr;
+            ac.plain_attr_corpus = plain ? static_cast<const void*>(&corpus_) : nullptr;
+        }
+        if ((ac.op == CompOp::EQ || ac.op == CompOp::NEQ) && !ac.neq_regex
             && !ac.case_insensitive && !ac.diacritics_insensitive) {
             std::string name = normalize_attr(ac.attr);
             std::string feat_name;
@@ -1724,7 +1738,8 @@ void QueryExecutor::compile_conditions(const ConditionPtr& cond) const {
                     corpus_.attr(name).mv_lookup(ac.value);
             }
         }
-        if (ac.op == CompOp::REGEX && !ac.id_set_resolved) {
+        // (also `!= /re/`: the ids that match; the NEQ paths take the complement)
+        if ((ac.op == CompOp::REGEX || ac.neq_regex) && !ac.id_set_resolved) {
             std::string name = normalize_attr(ac.attr);
             std::string feat_name;
             if (!feats_is_subkey(name, feat_name) && corpus_.has_attr(name)
@@ -1761,13 +1776,12 @@ void QueryExecutor::compile_conditions(const ConditionPtr& cond) const {
                         lex_lo = nlex = 0;
                     }
                 }
-                const Regex& compiled = regex_for(ac.value);
                 for (LexiconId id = lex_lo; id < nlex; ++id) {
                     // a scan over a large lexicon can take seconds: honour cancel / timeouts
                     if ((id & 0xFFF) == 0) check_cancelled();
                     const std::string_view v = lex.get(id);
                     if (!req.empty() && v.find(req) == std::string_view::npos) continue;
-                    if (regex_eval_sv(v, compiled, ac.regex_full_match))
+                    if (leaf_regex_eval(v, ac))
                         ac.id_set.push_back(id);
                 }
                 if (!ac.id_set_resolved && !cache_key.empty())
@@ -1776,7 +1790,7 @@ void QueryExecutor::compile_conditions(const ConditionPtr& cond) const {
                 ac.id_set_total = id_set_count(corpus_.attr(name), ac.id_set);
             }
         }
-        if ((ac.op == CompOp::EQ || ac.op == CompOp::NEQ)
+        if ((ac.op == CompOp::EQ || ac.op == CompOp::NEQ) && !ac.neq_regex
             && (ac.case_insensitive || ac.diacritics_insensitive) && !ac.id_set_resolved) {
             std::string name = normalize_attr(ac.attr);
             std::string feat_name;
@@ -2040,6 +2054,12 @@ size_t QueryExecutor::estimate_leaf(const AttrCondition& ac) const {
     std::string name = normalize_attr(ac.attr);
     if (ac.is_nvals)
         return static_cast<size_t>(corpus_.size());
+    if (ac.neq_regex) {   // complement of the matching ids (when resolved)
+        const size_t N = static_cast<size_t>(corpus_.size());
+        if (ac.id_set_resolved && ac.id_set_total >= 0)
+            return N - std::min(N, static_cast<size_t>(ac.id_set_total));
+        return N;
+    }
 
     // Combined feats mode: scan the feats lexicon for matching entries
     std::string feat_name;
@@ -2273,6 +2293,23 @@ bool QueryExecutor::check_leaf(CorpusPos pos, const AttrCondition& ac) const {
         return compare_nvals_count(*n, ac.op, ac.nvals_compare);
     }
 
+    // Plain positional attribute resolved by compile_conditions: id comparisons
+    // without the name normalisation / lookups below (same results).
+    if (ac.plain_attr && ac.plain_attr_corpus == &corpus_) {
+        const auto& pa = *static_cast<const PositionalAttr*>(ac.plain_attr);
+        if (ac.resolved_id >= 0) return pa.id_at(pos) == static_cast<LexiconId>(ac.resolved_id);
+        if (ac.id_set_resolved) {
+            const bool in = std::binary_search(ac.id_set.begin(), ac.id_set.end(),
+                                               static_cast<int32_t>(pa.id_at(pos)));
+            return ac.op == CompOp::NEQ ? !in : in;
+        }
+        if (ac.neq_regex) return !leaf_regex_eval(pa.value_at(pos), ac);
+        if (!ac.case_insensitive && !ac.diacritics_insensitive) {
+            if (ac.op == CompOp::NEQ) return !multivalue_eq(pa.value_at(pos), ac.value);
+            if (ac.op == CompOp::EQ) return multivalue_eq(pa.value_at(pos), ac.value);
+        }
+    }
+
     std::string name = normalize_attr(ac.attr);
 
     // Combined feats mode: feats/Number="Sing" → check within combined feats string
@@ -2282,6 +2319,8 @@ bool QueryExecutor::check_leaf(CorpusPos pos, const AttrCondition& ac) const {
         const auto& pa = corpus_.attr("feats");
         std::string_view feats_str = pa.value_at(pos);
         std::string feat_val = feats_extract_value(feats_str, feat_name);
+        if (ac.neq_regex)
+            return !leaf_regex_eval(feat_val, ac);
         switch (ac.op) {
             case CompOp::EQ:  return feat_val == ac.value;
             case CompOp::NEQ: return feat_val != ac.value;
@@ -2315,11 +2354,15 @@ bool QueryExecutor::check_leaf(CorpusPos pos, const AttrCondition& ac) const {
                                     break;
                                 case CompOp::NEQ:
                                     // Existential: true if ANY region has val != target
-                                    if (!multivalue_eq(val, ac.value)) { any_match = true; return false; }
+                                    if (ac.neq_regex
+                                            ? !leaf_regex_eval(val, ac)
+                                            : !multivalue_eq(val, ac.value)) {
+                                        any_match = true;
+                                        return false;
+                                    }
                                     break;
                                 case CompOp::REGEX: {
-                                    const Regex& compiled = regex_for(ac.value);
-                                    if (regex_eval_sv(val, compiled, ac.regex_full_match)) {
+                                    if (leaf_regex_eval(val, ac)) {
                                         any_match = true;
                                         return false;
                                     }
@@ -2349,11 +2392,12 @@ bool QueryExecutor::check_leaf(CorpusPos pos, const AttrCondition& ac) const {
                         std::string_view val = sa.region_value(resolved_attr, static_cast<size_t>(rgn));
                         switch (ac.op) {
                             case CompOp::EQ:    return multivalue_eq(val, ac.value);
-                            case CompOp::NEQ:   return !multivalue_eq(val, ac.value);
-                            case CompOp::REGEX: {
-                                const Regex& compiled = regex_for(ac.value);
-                                return regex_eval_sv(val, compiled, ac.regex_full_match);
-                            }
+                            case CompOp::NEQ:
+                                if (ac.neq_regex)
+                                    return !leaf_regex_eval(val, ac);
+                                return !multivalue_eq(val, ac.value);
+                            case CompOp::REGEX:
+                                return leaf_regex_eval(val, ac);
                             case CompOp::LT:    return val < ac.value;
                             case CompOp::GT:    return val > ac.value;
                             case CompOp::LTE:   return val <= ac.value;
@@ -2369,7 +2413,7 @@ bool QueryExecutor::check_leaf(CorpusPos pos, const AttrCondition& ac) const {
 
     // Stage 1: multivalue EQ/NEQ via sorted .mv.fwd component ids (membership).
     if (corpus_.is_multivalue(name) && pa.has_mv() && pa.has_mv_fwd()
-        && (ac.op == CompOp::EQ || ac.op == CompOp::NEQ)
+        && (ac.op == CompOp::EQ || ac.op == CompOp::NEQ) && !ac.neq_regex
         && !ac.case_insensitive && !ac.diacritics_insensitive) {
         LexiconId mid = ac.resolved_mv_component_id;
         if (mid >= 0) {
@@ -2396,6 +2440,9 @@ bool QueryExecutor::check_leaf(CorpusPos pos, const AttrCondition& ac) const {
 
     std::string_view val = pa.value_at(pos);
 
+    if (ac.neq_regex)
+        return !leaf_regex_eval(val, ac);
+
     // Fold-aware comparison for %c / %d flags
     if ((ac.case_insensitive || ac.diacritics_insensitive) &&
         (ac.op == CompOp::EQ || ac.op == CompOp::NEQ)) {
@@ -2421,10 +2468,8 @@ bool QueryExecutor::check_leaf(CorpusPos pos, const AttrCondition& ac) const {
     switch (ac.op) {
         case CompOp::EQ:    return multivalue_eq(val, ac.value);
         case CompOp::NEQ:   return !multivalue_eq(val, ac.value);
-        case CompOp::REGEX: {
-            const Regex& compiled = regex_for(ac.value);
-            return regex_eval_sv(val, compiled, ac.regex_full_match);
-        }
+        case CompOp::REGEX:
+            return leaf_regex_eval(val, ac);
         case CompOp::LT:    return val < ac.value;
         case CompOp::GT:    return val > ac.value;
         case CompOp::LTE:   return val <= ac.value;
@@ -2812,6 +2857,31 @@ std::vector<CorpusPos> QueryExecutor::resolve_leaf(
         for (CorpusPos p = 0; p < corpus_.size(); ++p)
             if (check_leaf(p, ac)) result.push_back(p);
         return result;
+    }
+
+    // `!= /re/` and `!= "x" %c` with a resolved id set: the complement of the ids'
+    // postings; `!= /re/` elsewhere (feats, regions, multivalue): check each position
+    if (ac.op == CompOp::NEQ && (ac.neq_regex || ac.id_set_resolved)) {
+        const CorpusPos lo = windowed() ? operand_window_.lo : 0;
+        const CorpusPos hi = windowed() ? std::min(operand_window_.hi, corpus_.size()) : corpus_.size();
+        std::vector<CorpusPos> out;
+        if (ac.id_set_resolved && corpus_.has_attr(name) && !corpus_.is_multivalue(name)) {
+            const std::vector<CorpusPos> in =
+                union_id_postings(corpus_.attr(name), ac.id_set, corpus_.size(), *this, &ac);
+            out.reserve(static_cast<size_t>(hi - lo) - std::min(in.size(), static_cast<size_t>(hi - lo)));
+            auto it = std::lower_bound(in.begin(), in.end(), lo);
+            for (CorpusPos p = lo; p < hi; ++p) {
+                while (it != in.end() && *it < p) ++it;
+                if (it != in.end() && *it == p) continue;
+                out.push_back(p);
+            }
+            return out;
+        }
+        for (CorpusPos p = lo; p < hi; ++p) {
+            if ((p & 0xFFFF) == 0) check_cancelled();
+            if (check_leaf(p, ac)) out.push_back(p);
+        }
+        return out;
     }
 
     // Combined feats mode: scan feats lexicon, union matching position lists
@@ -4529,14 +4599,14 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
             std::sort(ids.begin(), ids.end());
             return ids;
         };
-        if ((ac.op == CompOp::EQ || ac.op == CompOp::NEQ) && bi
+        if ((ac.op == CompOp::EQ || ac.op == CompOp::NEQ) && bi && !ac.neq_regex
             && !ac.case_insensitive && !ac.diacritics_insensitive) {
             auto e = set_expr(mv_eq_ids());
             return ac.op == CompOp::NEQ ? negate(std::move(e)) : std::move(e);
         }
         // The same without a bitmap (`[lemma!="shoe"]`): few ids → NOT of their
         // postings, many → a lexicon truth table.
-        if ((ac.op == CompOp::EQ || ac.op == CompOp::NEQ) && !bi
+        if ((ac.op == CompOp::EQ || ac.op == CompOp::NEQ) && !bi && !ac.neq_regex
             && !ac.case_insensitive && !ac.diacritics_insensitive) {
             if (auto e = from_merge_operand()) return e;
             std::vector<int64_t> ids = mv_eq_ids();
@@ -4975,7 +5045,111 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
         // Repetition (+, *, {n,m}, …): one hit per maximal contiguous stretch of matching
         // tokens (tile if length > max_repeat). Same for * and +; min_repeat==0 only relaxes
         // the final tile (any positive remainder is emitted). Sub-span enumeration is not used.
-        if (q.tokens[0].has_repetition()) {
+        // P3.10: the same maximal runs from the token's chunk bitmaps (word-level run
+        // detection) instead of check_conditions per position; the hits and their
+        // order are the generic loop's below. Past the first page, runs are only
+        // counted (tiles per run) when nothing else has to see each hit.
+        bool runs_done = false;
+        if (q.tokens[0].has_repetition() && fastpath_mode() == FastPathMode::On
+            && bitmap_mode() != BitmapMode::Off && !q.tokens[0].is_dep_subtree) {
+            bool dense = false;
+            std::unique_ptr<BmExpr> e = tok_cond ? compile_bm(tok_cond, &dense) : nullptr;
+            if (e || !tok_cond) {
+                result.plan_path = "single_runs";
+                runs_done = true;
+                const CorpusPos N = corpus_.size();
+                const bool cheap_count = count_total && sample_size == 0 && !agg_ptr
+                    && q.global_region_filters.empty() && token_anchor_constraints.empty();
+                bool counting = false, stop = false;
+                // tiles of a maximal run [s, e] (see the generic loop below)
+                auto tiles_of = [&](int64_t L) -> size_t {
+                    if (L < min_rep) return 0;
+                    if (L <= max_rep) return 1;
+                    const int64_t full = L / max_rep, r = L % max_rep;
+                    return static_cast<size_t>(full) + (r > 0 && r >= min_rep ? 1 : 0);
+                };
+                auto emit_run = [&](CorpusPos rs, CorpusPos re) {
+                    const int64_t L = static_cast<int64_t>(re - rs + 1);
+                    if (counting) {
+                        result.total_count += tiles_of(L);
+                        if (max_total_cap > 0 && result.total_count >= max_total_cap) {
+                            result.total_count = max_total_cap;
+                            stop = true;
+                        }
+                        return;
+                    }
+                    if (L < min_rep) return;
+                    CorpusPos cur = rs;
+                    while (cur <= re) {
+                        const int64_t rem = static_cast<int64_t>(re - cur + 1);
+                        CorpusPos te;
+                        if (L <= max_rep) te = re;
+                        else if (rem > max_rep) te = static_cast<CorpusPos>(cur + max_rep - 1);
+                        else if (rem >= min_rep) te = re;
+                        else break;
+                        if (cheap_count && max_matches > 0 && result.matches.size() >= max_matches) {
+                            // page full: count this run's remaining tiles, then the rest
+                            counting = true;
+                            const int64_t R = static_cast<int64_t>(re - cur + 1);
+                            result.total_count += (L <= max_rep) ? 1 : tiles_of(R);
+                            if (max_total_cap > 0 && result.total_count >= max_total_cap) {
+                                result.total_count = max_total_cap;
+                                stop = true;
+                            }
+                            return;
+                        }
+                        std::vector<CorpusPos> pm = {cur, te};
+                        add_match(std::move(pm));
+                        if (reached_limit() || reached_total_cap()) { stop = true; return; }
+                        if (te == re) break;
+                        cur = te + 1;
+                    }
+                };
+                if (!tok_cond) {
+                    if (N > 0) emit_run(0, N - 1);
+                } else {
+                    constexpr size_t W = BitmapIndex::kWords;
+                    const size_t nchunks = static_cast<size_t>((N + BitmapIndex::kChunk - 1) >> BitmapIndex::kChunkShift);
+                    CorpusPos open_s = -1;   // start of the run still open (-1: none)
+                    for (size_t c = 0; c < nchunks && !stop; ++c) {
+                        const CorpusPos base = static_cast<CorpusPos>(c) << BitmapIndex::kChunkShift;
+                        progress_tick(base, result.total_count, true);
+                        const BmChunk v = e->load(c);
+                        if (v.zero || (v.w == bm_zero_words())) {
+                            if (open_s >= 0) { emit_run(open_s, base - 1); open_s = -1; }
+                            continue;
+                        }
+                        for (size_t w = 0; w < W && !stop; ++w) {
+                            const CorpusPos P = base + static_cast<CorpusPos>(w * 64);
+                            if (P >= N) break;
+                            uint64_t x = v.w[w];
+                            if (N - P < 64) x &= (uint64_t{1} << (N - P)) - 1;   // past the corpus end
+                            if (open_s >= 0) {
+                                if (x == ~uint64_t{0}) continue;
+                                const int t = __builtin_ctzll(~x);          // first 0: the run ends before it
+                                emit_run(open_s, P + t - 1);
+                                open_s = -1;
+                                if (stop) break;
+                                x &= ~uint64_t{0} << t;                     // (bits below t were the run)
+                            }
+                            while (x) {
+                                const int st = __builtin_ctzll(x);
+                                const uint64_t zeros = ~x & (~uint64_t{0} << st);
+                                if (!zeros) { open_s = P + st; break; }     // runs into the next word
+                                const int en = __builtin_ctzll(zeros);
+                                emit_run(P + st, P + en - 1);
+                                if (stop) break;
+                                x &= ~uint64_t{0} << en;
+                            }
+                        }
+                    }
+                    if (!stop && open_s >= 0) emit_run(open_s, N - 1);
+                }
+            }
+        }
+        if (runs_done) {
+            // (hits went through add_match like the loop below)
+        } else if (q.tokens[0].has_repetition()) {
             CorpusPos i = 0;
             const CorpusPos n = corpus_.size();
             while (i < n) {

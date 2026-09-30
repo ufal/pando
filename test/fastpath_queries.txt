@@ -243,3 +243,24 @@ a:[upos="ADJ"] b:[upos="NOUN"]; count by a.lemma, text_langcode
 [word=".*[aeiou].*"] [lemma!="of"]
 [lemma=".*[aeiou].*" & upos!="NOUN"]
 [lemma!="the"] within s
+# P3.10 single-token repetition from chunk bitmaps (maximal runs, tiles)
+[lemma!="the"]+
+[lemma!="the"]{2}
+[upos="ADJ"]+
+[upos="NOUN"]{2,3}
+[upos="ADJ"]{0,2}
+[upos!="PUNCT"]*
+[]+
+[]{3}
+[upos="ADJ" | upos="NOUN"]+
+[word=".*[aeiou].*"]{1,4}
+[upos="ADJ"]+; count by lemma
+[upos="ADJ"]+ :: match.text_langcode="en"
+# P3.11 `!=` with a regex (CQP semantics) and %c / %d on regexes
+[lemma!=/.*e.*/]
+[lemma!=".*e.*"]
+[lemma!=".*E.*"%c]
+[lemma=".*E.*"%c]
+[upos!="N.*"] [upos="NOUN"]
+[word!="[A-Z].*" & upos!="PUNCT"]
+[lemma!=/.*e.*/]+

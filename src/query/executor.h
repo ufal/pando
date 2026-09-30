@@ -1028,6 +1028,8 @@ private:
     std::mutex& regex_cache_mutex_;  // protects cache insertion only
     /// The compiled pattern (cached per query executor tree). Throws on a bad pattern.
     const Regex& regex_for(const std::string& pattern) const;
+    /// A REGEX / `!= /re/` leaf's pattern against one value.
+    bool leaf_regex_eval(std::string_view val, const AttrCondition& ac) const;
 };
 
 } // namespace pando

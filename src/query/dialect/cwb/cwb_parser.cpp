@@ -45,14 +45,22 @@ void apply_string_flags(AttrCondition& ac, const std::string& flags) {
     for (char f : flags) {
         switch (f) {
         case 'c':
-            ac.case_insensitive = true;
+            // CQP: %c also applies to a pattern ("the.*"%c); native pando-CQL keeps
+            // %c for literal comparisons, so a pattern gets (?i) instead
+            if (ac.op == CompOp::REGEX || ac.neq_regex) {
+                if (ac.value.rfind("(?i)", 0) != 0) ac.value = "(?i)" + ac.value;
+            } else {
+                ac.case_insensitive = true;
+            }
             break;
         case 'd':
             ac.diacritics_insensitive = true;
             break;
         case 'l':
-            ac.op = CompOp::EQ;
-            ac.value = ac.value; // literal — already set
+            // literal: a pattern becomes a plain comparison (`!=` stays `!=`)
+            if (ac.op == CompOp::REGEX) ac.op = CompOp::EQ;
+            ac.neq_regex = false;
+            ac.regex_full_match = false;
             break;
         default:
             break;
@@ -265,8 +273,7 @@ ConditionPtr parse_rel_expr(TokStream& ts, std::ostringstream* trace) {
         } else if (op == CompOp::EQ) {
             set_attr_pattern(ac, ac.value, trace);
         } else if (op == CompOp::NEQ) {
-            validate_neq_quoted_string(ac.value, /*strict_quoted_strings=*/false);
-            ac.op = CompOp::NEQ;
+            interpret_quoted_neq_string(ac, ac.value, /*strict_quoted_strings=*/false);
         } else {
             ac.op = op;
         }

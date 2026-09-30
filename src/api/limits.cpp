@@ -60,7 +60,7 @@ bool regex_has_literal_start(const std::string& pat) {
 void walk_cond(const ConditionPtr& c, Uses& u) {
     if (!c) return;
     if (c->is_leaf) {
-        if (c->leaf.op == CompOp::REGEX) {
+        if (c->leaf.op == CompOp::REGEX || c->leaf.neq_regex) {
             u.regex = true;
             if (!regex_has_literal_start(c->leaf.value)) u.regex_no_prefix = true;
         }

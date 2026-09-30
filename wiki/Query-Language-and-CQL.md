@@ -37,6 +37,7 @@ To disable a dialect: configure with **`-DPANDO_CWB_DIALECT=OFF`** or **`-DPANDO
 **Supported (representative):**
 
 - **Named and anonymous** `RegWordfExpr`-style token sequences with **`[ attr op value ]`**, **`[]`**, repetition **`? * + {m,n}`**, sequence concatenation.
+- **`!=` with a pattern** (`[lemma != ".*e.*"]`: tokens whose lemma does not match), and the flags **`%c`** (also on patterns: `"the.*"%c`, as in CQP — native pando-CQL keeps `%c` for literal comparisons), **`%d`** (literal comparisons) and **`%l`** (literal, also after `!=`).
 - **`count by <attribute>`** with basic forms (see trace output for ignored modifiers).
 - **`group by <field>[, <field> …]`** mapped to the native **`group`** command. Fields use Pando’s **`name.attribute`** form; CWB-style **`name attribute`** (space instead of a dot) is accepted and normalized (e.g. `match lemma` → `match.lemma`). **`match.lemma`** is also accepted as a single dotted token.
 - **`sort by <field>[, …]`** → native **`sort`** (optional corpus id before **`by`** is skipped).

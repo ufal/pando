@@ -17,6 +17,8 @@ To look for patterns inside words, CQL allows regular expressions in token restr
 
 For compatible behaviour with CWB and Mantee, normal string matches are interpreted as bound regular expressions when they contain regular expression characters. So `[form = ".*tion"]` matches words that end in *-tion*, like CWB. This behaviour can be turned off by setting `strict_quoted_strings`, which will make the previous query look for the literal string *.\*tion*.
 
+`!=` takes the same two forms and matches the tokens whose value does *not* match: `[lemma != ".*e.*"]` (whole token, as in CWB) and `[lemma != /e/]` (substring) both find every lemma without an *e*. With `strict_quoted_strings`, a quoted value after `!=` is a literal as well.
+
 Slash-regex values are plain regular expressions. For example `[form = /.*tion/]` matches any substring *tion* inside the token (e.g. *conditional*), not only *-tion* suffixes; anchoring is up to your pattern (e.g. `[form = /tion$/]`).
 
 The regex syntax is RE2's (a Perl / PCRE subset, as in CWB and Manatee) when pando is built with RE2 — the recommended build: `.` matches one character, including non-ASCII ones (`"h.t"` finds *hát*), `(?i)` makes a pattern case-insensitive (`[lemma = "(?i)praha"]`; for a plain word `%c` is faster: `[lemma = "praha" %c]`), classes like `\d`, `\w`, `[[:upper:]]` work. Backreferences and lookaround, which RE2 does not have, fall back to std::regex (ECMAScript). A build without RE2 uses std::regex throughout, where `.` matches one *byte* of UTF-8.

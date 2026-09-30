@@ -1208,10 +1208,14 @@ ConditionPtr Parser::parse_primary_condition() {
         }
         case TokType::NEQ: {
             Token v = lexer_.next();
-            ac.op = CompOp::NEQ;
-            ac.value = v.text;
-            if (v.type == TokType::STRING)
-                validate_neq_quoted_string(ac.value, opts_.strict_quoted_strings);
+            if (v.type == TokType::STRING) {
+                interpret_quoted_neq_string(ac, std::string(v.text), opts_.strict_quoted_strings);
+            } else {
+                ac.op = CompOp::NEQ;
+                ac.value = v.text;
+                // `!= /pattern/`: the complement of `= /pattern/` (same matching rules)
+                if (v.type == TokType::REGEX) ac.neq_regex = true;
+            }
             break;
         }
         case TokType::LT:   ac.op = CompOp::LT;   ac.value = lexer_.next().text; break;

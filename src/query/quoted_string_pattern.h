@@ -55,13 +55,18 @@ inline void interpret_quoted_eq_string(AttrCondition& ac, std::string raw,
     ac.value = std::move(raw);
 }
 
-inline void validate_neq_quoted_string(const std::string& value, bool strict_quoted_strings) {
-    if (strict_quoted_strings)
-        return;
-    if (string_has_regex_metachar(value))
-        throw std::runtime_error(
-            "Unsupported: != with quoted string that contains regex metacharacters (use == with "
-            "literal or /pattern/, or pass --strict-quoted-strings for literal-only quotes)");
+// `[attr != "value"]`: like `=` (CWB/Manatee), a quoted value with regex metacharacters is a
+// whole-token pattern, and != is its complement (neq_regex). strict_quoted_strings: literal.
+inline void interpret_quoted_neq_string(AttrCondition& ac, std::string raw,
+                                        bool strict_quoted_strings) {
+    ac.op = CompOp::NEQ;
+    ac.regex_full_match = false;
+    ac.neq_regex = false;
+    if (!strict_quoted_strings && string_has_regex_metachar(raw)) {
+        ac.neq_regex = true;
+        ac.regex_full_match = true;
+    }
+    ac.value = std::move(raw);
 }
 
 } // namespace pando

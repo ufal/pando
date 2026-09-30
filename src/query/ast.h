@@ -83,6 +83,19 @@ struct AttrCondition {
     // heuristics set this instead of wrapping the pattern in ^$.
     bool regex_full_match = false;
 
+    /// op == NEQ with a regex value (`attr != /re/`, or a quoted pattern as in CQP:
+    /// `attr != ".*e.*"`): the token's value does NOT match `value` (same matching
+    /// rules as REGEX, incl. regex_full_match). compile_conditions resolves the
+    /// matching ids into id_set, so the NEQ + id-set paths negate it.
+    bool neq_regex = false;
+
+    /// Set by compile_conditions when the leaf reads a plain positional attribute
+    /// (not multivalue, not a feats sub-key): that attribute (a `const
+    /// PositionalAttr*`) and the corpus it belongs to, so check_leaf skips the
+    /// per-call name normalisation and lookups.
+    const void* plain_attr = nullptr;
+    const void* plain_attr_corpus = nullptr;
+
     /// op == IN: the sorted token positions that satisfy the condition (set by
     /// QueryExecutor::bind_external_alignment; `value` then only describes it).
     std::shared_ptr<const std::vector<CorpusPos>> in_positions;
