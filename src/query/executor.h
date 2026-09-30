@@ -619,6 +619,14 @@ struct ExecProgress {
     std::atomic<bool> cancel{false};
 };
 
+/// P7.8: receives each hit's token starts / ends instead of a Match (see
+/// QueryExecutor::set_hit_sink). `starts[i]` / `ends[i]` for query token i
+/// (NO_HEAD for a skipped optional token).
+struct HitSink {
+    virtual ~HitSink() = default;
+    virtual void hit(const CorpusPos* starts, const CorpusPos* ends, size_t n_tokens) = 0;
+};
+
 struct QueryCancelled : std::runtime_error {
     QueryCancelled() : std::runtime_error("query cancelled") {}
 };
@@ -628,6 +636,17 @@ public:
     explicit QueryExecutor(const Corpus& corpus);
     /// Report progress to `p` (nullptr = off) during execute(); see ExecProgress.
     void set_progress(ExecProgress* p) { progress_ = p; }
+    /// P7.8: hand the hits of the next execute() to `s` instead of materialising
+    /// them, when the query has no per-hit post filters (else they are
+    /// materialised as usual). Afterwards sink_hits() says how many went to the
+    /// sink; hits in the returned MatchSet did not. The query then runs on one
+    /// thread. nullptr = off.
+    void set_hit_sink(HitSink* s) { hit_sink_ = s; sink_hits_ = 0; }
+    size_t sink_hits() const { return sink_hits_; }
+    /// Whether the hits of `q` can go to a hit sink as far as the query itself
+    /// says (no per-hit filters after the kernels); token anchors are decided at
+    /// execution. A false here: the hits would all be materialised anyway.
+    bool may_sink_hits(const TokenQuery& q) const;
     /// Throw QueryCancelled when the progress block asks to stop (long loops outside
     /// the per-hit checkpoints: operand unions, lexicon scans).
     void check_cancelled() const {
@@ -1038,6 +1057,8 @@ private:
     std::shared_ptr<DepPairIndex> dep_pair_index(const std::string& head_attr,
                                                  const std::string& child_attr) const;
     ExecProgress* progress_ = nullptr;
+    HitSink* hit_sink_ = nullptr;
+    size_t sink_hits_ = 0;
     mutable uint32_t progress_ticks_ = 0;
     /// Checkpoint in the counting loops: publishes (throttled; `force` per chunk)
     /// and throws QueryCancelled when asked to stop.

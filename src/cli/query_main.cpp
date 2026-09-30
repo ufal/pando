@@ -3,6 +3,7 @@
 #include "api/group_counts.h"
 #include "corpus/corpus.h"
 #include "api/query_json.h"
+#include "api/coll_counts.h"
 #include "core/json_utils.h"
 #include "core/count_hierarchy_json.h"
 #include "query/ast.h"
@@ -1918,94 +1919,75 @@ static std::unordered_set<LexiconId> build_stoplist_ids(const PositionalAttr& pa
 
 // ── coll: window-based collocation ─────────────────────────────────────
 
-static void emit_coll(const Corpus& corpus, const MatchSet& ms,
-                      const GroupCommand& cmd, const Options& opts,
-                      const NameIndexMap& name_map,
-                      const NameIndexMap* target_name_map) {
-    // Determine which attribute to group collocates by (default: lemma, fallback form)
-    std::string coll_attr = "lemma";
-    if (!cmd.fields.empty()) coll_attr = cmd.fields[0];
-    if (!corpus.has_attr(coll_attr)) coll_attr = "form";
-    const auto& pa = corpus.attr(coll_attr);
-    const auto stop_ids = build_stoplist_ids(pa, opts.coll_stoplist);
-
-    std::vector<std::string> measures = opts.coll_measures;
-    if (measures.empty()) measures = {"logdice"};
-
-    // Collect co-occurrence counts
-    std::unordered_map<LexiconId, size_t> obs_counts;
-    size_t total_window_positions = 0;
-
-    auto count_coll_token = [&](CorpusPos p) {
-        // Parallel tiers often leave lemma (etc.) empty; counting those positions collapses into
-        // one high-frequency "" bucket and hides real collocates.
-        if (pa.value_at(p).empty()) return;
-        ++obs_counts[pa.id_at(p)];
-        ++total_window_positions;
-    };
-
-    auto add_coll_envelope = [&](const Match& m) {
-        auto matched = m.matched_positions();
-        std::set<CorpusPos> matched_set(matched.begin(), matched.end());
-        CorpusPos first = m.first_pos();
-        CorpusPos last = m.last_pos();
-
-        CorpusPos left_start =
-                (first > static_cast<CorpusPos>(opts.coll_left)) ? first - opts.coll_left : 0;
-        for (CorpusPos p = left_start; p < first; ++p) {
-            if (matched_set.count(p)) continue;
-            count_coll_token(p);
-        }
-        CorpusPos right_end = std::min(last + static_cast<CorpusPos>(opts.coll_right) + 1,
-                                         static_cast<CorpusPos>(corpus.size()));
-        for (CorpusPos p = last + 1; p < right_end; ++p) {
-            if (matched_set.count(p)) continue;
-            count_coll_token(p);
+/// `coll` counts over materialised hits (the sink path counts in the executor).
+static void count_coll_hits(CollCounter& counter, const MatchSet& ms, const GroupCommand& cmd,
+                            const NameIndexMap& name_map, const NameIndexMap* target_name_map) {
+    auto envelope = [&](const Match& m) {
+        if (m.named_dep_subtrees.empty()) {
+            counter.add_envelope(m.first_pos(), m.last_pos());
+        } else {
+            auto matched = m.matched_positions();
+            counter.add_envelope(m.first_pos(), m.last_pos(), &matched);
         }
     };
-
-    auto add_coll_hub = [&](const std::set<CorpusPos>& matched_set, CorpusPos hub) {
-        CorpusPos left_start =
-                (hub > static_cast<CorpusPos>(opts.coll_left)) ? hub - opts.coll_left : 0;
-        for (CorpusPos p = left_start; p < hub; ++p) {
-            if (matched_set.count(p)) continue;
-            count_coll_token(p);
-        }
-        CorpusPos right_end = std::min(hub + static_cast<CorpusPos>(opts.coll_right) + 1,
-                                         static_cast<CorpusPos>(corpus.size()));
-        for (CorpusPos p = hub + 1; p < right_end; ++p) {
-            if (matched_set.count(p)) continue;
-            count_coll_token(p);
-        }
-    };
-
     if (!ms.parallel_matches.empty()) {
         for (const auto& [s, t] : ms.parallel_matches) {
             if (cmd.coll_on_label.empty()) {
-                add_coll_envelope(s);
+                envelope(s);
             } else {
                 CorpusPos hub =
                         resolve_token_label_pair(s, name_map, t, target_name_map, cmd.coll_on_label);
                 if (hub == NO_HEAD) continue;
-                std::set<CorpusPos> excl;
-                for (CorpusPos p : s.matched_positions()) excl.insert(p);
-                for (CorpusPos p : t.matched_positions()) excl.insert(p);
-                add_coll_hub(excl, hub);
+                std::vector<CorpusPos> excl = s.matched_positions();
+                for (CorpusPos p : t.matched_positions()) excl.push_back(p);
+                counter.add_hub(hub, excl);
             }
         }
     } else {
         for (const auto& m : ms.matches) {
             if (cmd.coll_on_label.empty()) {
-                add_coll_envelope(m);
+                envelope(m);
             } else {
                 CorpusPos hub = resolve_name(m, name_map, cmd.coll_on_label);
                 if (hub == NO_HEAD) continue;
-                auto matched = m.matched_positions();
-                std::set<CorpusPos> matched_set(matched.begin(), matched.end());
-                add_coll_hub(matched_set, hub);
+                counter.add_hub(hub, m.matched_positions());
             }
         }
     }
+}
+
+static std::string coll_attr_of(const Corpus& corpus, const GroupCommand& cmd) {
+    // group collocates by this attribute (default: lemma, fallback form)
+    std::string coll_attr = "lemma";
+    if (!cmd.fields.empty()) coll_attr = cmd.fields[0];
+    if (!corpus.has_attr(coll_attr)) coll_attr = "form";
+    return coll_attr;
+}
+
+static void emit_coll_result(const Corpus& corpus, const GroupCommand& cmd, const Options& opts,
+                             const CollCounts& cc, size_t coll_match_n);
+
+static void emit_coll(const Corpus& corpus, const MatchSet& ms,
+                      const GroupCommand& cmd, const Options& opts,
+                      const NameIndexMap& name_map,
+                      const NameIndexMap* target_name_map) {
+    const auto& pa = corpus.attr(coll_attr_of(corpus, cmd));
+    CollCounter counter(pa, opts.coll_left, opts.coll_right, corpus.size());
+    count_coll_hits(counter, ms, cmd, name_map, target_name_map);
+    const CollCounts cc = counter.finish();
+    emit_coll_result(corpus, cmd, opts, cc,
+                     !ms.parallel_matches.empty() ? ms.parallel_matches.size() : ms.matches.size());
+}
+
+static void emit_coll_result(const Corpus& corpus, const GroupCommand& cmd, const Options& opts,
+                             const CollCounts& cc, size_t coll_match_n) {
+    const std::string coll_attr = coll_attr_of(corpus, cmd);
+    const auto& pa = corpus.attr(coll_attr);
+    const auto stop_ids = build_stoplist_ids(pa, opts.coll_stoplist);
+    std::vector<std::string> measures = opts.coll_measures;
+    if (measures.empty()) measures = {"logdice"};
+    const auto& obs_counts = cc.items;
+    const size_t total_window_positions = cc.total;
 
     // Build entries, filter by min freq
     std::vector<CollEntry> entries;
@@ -2021,13 +2003,14 @@ static void emit_coll(const Corpus& corpus, const MatchSet& ms,
 
     // Sort by primary measure descending
     std::sort(entries.begin(), entries.end(), [&](const CollEntry& a, const CollEntry& b) {
-        return compute_measure(measures[0], a) > compute_measure(measures[0], b);
+        // ties: more observations first, then by value (deterministic order)
+        const double ma = compute_measure(measures[0], a), mb = compute_measure(measures[0], b);
+        if (ma != mb) return ma > mb;
+        if (a.obs != b.obs) return a.obs > b.obs;
+        return a.form < b.form;
     });
 
     size_t show = std::min(entries.size(), opts.coll_max_items);
-
-    const size_t coll_match_n =
-            !ms.parallel_matches.empty() ? ms.parallel_matches.size() : ms.matches.size();
 
     if (opts.json) {
         std::cout << "{\"ok\": true, \"operation\": \"coll\", \"last_command\": \"coll\", \"result\": {\n";
@@ -2069,52 +2052,9 @@ static void emit_coll(const Corpus& corpus, const MatchSet& ms,
 
 // ── dcoll: dependency-based collocation ────────────────────────────────
 
-static void emit_dcoll(const Corpus& corpus, const MatchSet& ms,
-                       const GroupCommand& cmd, const Options& opts,
-                       const NameIndexMap& name_map,
-                       const NameIndexMap* target_name_map) {
-    if (!corpus.has_deps()) {
-        std::cerr << "Error: dcoll requires dependency index\n";
-        return;
-    }
-
-    std::string coll_attr = "lemma";
-    if (!cmd.fields.empty()) coll_attr = cmd.fields[0];
-    if (!corpus.has_attr(coll_attr)) coll_attr = "form";
-    const auto& pa = corpus.attr(coll_attr);
-    const auto stop_ids = build_stoplist_ids(pa, opts.coll_stoplist);
-    const auto& deps = corpus.deps();
-
-    // Deprel attribute for filtering child relations
-    bool has_deprel_attr = corpus.has_attr("deprel");
-    const PositionalAttr* deprel_pa = has_deprel_attr ? &corpus.attr("deprel") : nullptr;
-
-    // Classify relations: separate "head", "descendants" from deprel names
-    // If relations is empty → default to all children
-    bool want_head = false;
-    bool want_descendants = false;
-    bool want_all_children = false;
-    std::set<std::string> deprel_filter;
-
-    if (cmd.relations.empty()) {
-        want_all_children = true;
-    } else {
-        for (const auto& rel : cmd.relations) {
-            if (rel == "head") want_head = true;
-            else if (rel == "descendants") want_descendants = true;
-            else if (rel == "children") want_all_children = true;
-            else deprel_filter.insert(rel);  // specific deprel on children
-        }
-    }
-    // If we have specific deprels, we also need children
-    bool want_filtered_children = !deprel_filter.empty();
-
-    std::vector<std::string> measures = opts.coll_measures;
-    if (measures.empty()) measures = {"logdice"};
-
-    std::unordered_map<LexiconId, size_t> obs_counts;
-    size_t total_related = 0;
-
+/// `dcoll` counts over materialised hits.
+static void count_dcoll_hits(DcollCounter& counter, const MatchSet& ms, const GroupCommand& cmd,
+                             const NameIndexMap& name_map, const NameIndexMap* target_name_map) {
     auto emit_one_dcoll = [&](const Match& m, const Match* tgt_parallel) {
         CorpusPos node_pos = m.first_pos();
         if (!cmd.dcoll_anchor.empty()) {
@@ -2124,38 +2064,8 @@ static void emit_dcoll(const Corpus& corpus, const MatchSet& ms,
                                  : resolve_name(m, name_map, cmd.dcoll_anchor);
             if (ap != NO_HEAD) node_pos = ap;
         }
-
-        auto count_token = [&](CorpusPos rp) {
-            if (rp == node_pos) return;  // skip self
-            ++obs_counts[pa.id_at(rp)];
-            ++total_related;
-        };
-
-        if (want_head) {
-            auto h = deps.head(node_pos);
-            if (h != NO_HEAD) count_token(h);
-        }
-
-        if (want_descendants) {
-            for (CorpusPos rp : deps.subtree(node_pos))
-                count_token(rp);
-        }
-
-        if (want_all_children) {
-            for (CorpusPos rp : deps.children(node_pos))
-                count_token(rp);
-        }
-
-        if (want_filtered_children) {
-            for (CorpusPos rp : deps.children(node_pos)) {
-                if (deprel_pa) {
-                    std::string dr(deprel_pa->value_at(rp));
-                    if (deprel_filter.count(dr)) count_token(rp);
-                }
-            }
-        }
+        counter.add_node(node_pos);
     };
-
     if (!ms.parallel_matches.empty()) {
         for (const auto& [s, t] : ms.parallel_matches)
             emit_one_dcoll(s, &t);
@@ -2163,6 +2073,36 @@ static void emit_dcoll(const Corpus& corpus, const MatchSet& ms,
         for (const auto& m : ms.matches)
             emit_one_dcoll(m, nullptr);
     }
+}
+
+static void emit_dcoll_result(const Corpus& corpus, const GroupCommand& cmd, const Options& opts,
+                              const CollCounts& cc, size_t dcoll_match_n);
+
+static void emit_dcoll(const Corpus& corpus, const MatchSet& ms,
+                       const GroupCommand& cmd, const Options& opts,
+                       const NameIndexMap& name_map,
+                       const NameIndexMap* target_name_map) {
+    if (!corpus.has_deps()) {
+        std::cerr << "Error: dcoll requires dependency index\n";
+        return;
+    }
+    const auto& pa = corpus.attr(coll_attr_of(corpus, cmd));
+    DcollCounter counter(corpus, pa, cmd.relations);
+    count_dcoll_hits(counter, ms, cmd, name_map, target_name_map);
+    const CollCounts cc = counter.finish();
+    emit_dcoll_result(corpus, cmd, opts, cc,
+                      !ms.parallel_matches.empty() ? ms.parallel_matches.size() : ms.matches.size());
+}
+
+static void emit_dcoll_result(const Corpus& corpus, const GroupCommand& cmd, const Options& opts,
+                              const CollCounts& cc, size_t dcoll_match_n) {
+    const std::string coll_attr = coll_attr_of(corpus, cmd);
+    const auto& pa = corpus.attr(coll_attr);
+    const auto stop_ids = build_stoplist_ids(pa, opts.coll_stoplist);
+    std::vector<std::string> measures = opts.coll_measures;
+    if (measures.empty()) measures = {"logdice"};
+    const auto& obs_counts = cc.items;
+    const size_t total_related = cc.total;
 
     // Build entries
     std::vector<CollEntry> entries;
@@ -2175,7 +2115,11 @@ static void emit_dcoll(const Corpus& corpus, const MatchSet& ms,
     }
 
     std::sort(entries.begin(), entries.end(), [&](const CollEntry& a, const CollEntry& b) {
-        return compute_measure(measures[0], a) > compute_measure(measures[0], b);
+        // ties: more observations first, then by value (deterministic order)
+        const double ma = compute_measure(measures[0], a), mb = compute_measure(measures[0], b);
+        if (ma != mb) return ma > mb;
+        if (a.obs != b.obs) return a.obs > b.obs;
+        return a.form < b.form;
     });
 
     size_t show = std::min(entries.size(), opts.coll_max_items);
@@ -2201,11 +2145,7 @@ static void emit_dcoll(const Corpus& corpus, const MatchSet& ms,
         std::cout << "],\n";
         if (!cmd.dcoll_anchor.empty())
             std::cout << "  \"anchor\": " << jstr(cmd.dcoll_anchor) << ",\n";
-        {
-            const size_t dcoll_match_n =
-                    !ms.parallel_matches.empty() ? ms.parallel_matches.size() : ms.matches.size();
-            std::cout << "  \"matches\": " << dcoll_match_n << ",\n";
-        }
+        std::cout << "  \"matches\": " << dcoll_match_n << ",\n";
         std::cout << "  \"stoplist\": " << opts.coll_stoplist << ",\n";
         std::cout << "  \"measures\": [";
         for (size_t i = 0; i < measures.size(); ++i) {
@@ -2505,6 +2445,15 @@ static void run_query(const Corpus& corpus, const std::string& input,
         }
     }
 
+    // P7.8: a coll / dcoll counted while its query ran (see below)
+    struct SinkState {
+        std::unique_ptr<CollCounter> coll;
+        std::unique_ptr<DcollCounter> dcoll;
+        std::unique_ptr<HitSink> sink;
+        size_t for_si = SIZE_MAX;   // the command statement it belongs to
+        size_t hits = 0;
+    } sink_state;
+
     for (size_t si = 0; si < prog.size(); ++si) {
         auto& stmt = prog[si];
         bool next_is_command = (si + 1 < prog.size() && prog[si + 1].has_command);
@@ -2634,9 +2583,62 @@ static void run_query(const Corpus& corpus, const std::string& input,
                 session.last_ms = executor.execute_dep_subtree_from_named(
                         stmt.query, *src_ms, source_nm, max_m, count_t, max_total_cap);
             } else {
+                // P7.8: `…; coll / dcoll` as the program's last use of these hits: count
+                // them in the executor instead of materialising them (not in the REPL,
+                // where `Last` has to stay usable)
+                const bool last_use = next_is_command && !opts.interactive && !stmt.is_parallel
+                    && stmt.name.empty() && !is_dep_subtree_prelude && opts.sample == 0
+                    && !opts.count_only && !opts.dump_matches && !opts.dump_page
+                    && (si + 2 >= prog.size() || !prog[si + 2].has_command);
+                // `…; tabulate [offset limit] fields`: only its rows (and the total)
+                if (last_use && prog[si + 1].command.type == CommandType::TABULATE
+                    && (prog[si + 1].command.query_name.empty() || prog[si + 1].command.query_name == "Last")) {
+                    const GroupCommand& t = prog[si + 1].command;
+                    max_m = t.tabulate_limit > SIZE_MAX - t.tabulate_offset
+                          ? 0 : std::max<size_t>(1, t.tabulate_offset + t.tabulate_limit);
+                    count_t = true;
+                }
+                if (last_use && executor.may_sink_hits(stmt.query)) {
+                    GroupCommand c = prog[si + 1].command;
+                    // `dcoll obj by lemma`: `obj` parsed as a set name (as at the command)
+                    if (c.type == CommandType::DCOLL && c.relations.empty() && !c.query_name.empty()
+                        && c.query_name != "Last" && !session.named_results.count(c.query_name)) {
+                        c.relations.push_back(c.query_name);
+                        c.query_name.clear();
+                    }
+                    const bool targets = c.query_name.empty() || c.query_name == "Last";
+                    const NameIndexMap nm = QueryExecutor::build_name_map_for_stripped_query(stmt.query);
+                    auto index_of = [&](const std::string& label, int missing) -> int {
+                        if (label.empty()) return -1;
+                        auto it = nm.find(label);
+                        return it == nm.end() ? missing : static_cast<int>(it->second);
+                    };
+                    if (targets && c.type == CommandType::COLL) {
+                        sink_state.coll = std::make_unique<CollCounter>(
+                                corpus.attr(coll_attr_of(corpus, c)), opts.coll_left, opts.coll_right,
+                                corpus.size());
+                        sink_state.sink = std::make_unique<CollHitSink>(*sink_state.coll,
+                                                                        index_of(c.coll_on_label, -2));
+                    } else if (targets && c.type == CommandType::DCOLL && corpus.has_deps()) {
+                        sink_state.dcoll = std::make_unique<DcollCounter>(
+                                corpus, corpus.attr(coll_attr_of(corpus, c)), c.relations);
+                        sink_state.sink = std::make_unique<DcollHitSink>(*sink_state.dcoll,
+                                                                         index_of(c.dcoll_anchor, -1));
+                    }
+                    if (sink_state.sink) {
+                        sink_state.for_si = si + 1;
+                        executor.set_hit_sink(sink_state.sink.get());
+                        max_m = 0;
+                        count_t = true;
+                    }
+                }
                 session.last_ms = executor.execute(stmt.query, max_m, count_t, max_total_cap,
                                           opts.sample, opts.sample_seed, opts.threads,
                                           aggregate_by);
+                if (sink_state.sink) {
+                    sink_state.hits = executor.sink_hits();
+                    executor.set_hit_sink(nullptr);
+                }
             }
             // a sample is shown in corpus order (the executor returns it in hash order)
             if (opts.sample > 0) sort_matches_by_position(session.last_ms.matches);
@@ -3259,12 +3261,25 @@ static void run_query(const Corpus& corpus, const std::string& input,
                     break;
 
                 case CommandType::COLL:
-                    if (should_emit_output)
+                    if (sink_state.for_si == si && sink_state.coll) {
+                        // counted in the executor; hits it could not take were materialised
+                        count_coll_hits(*sink_state.coll, *ms_to_use, cmd_to_run, *nm_to_use, nm_tgt_parallel);
+                        if (should_emit_output)
+                            emit_coll_result(corpus, cmd_to_run, opts, sink_state.coll->finish(),
+                                             sink_state.hits + ms_to_use->matches.size());
+                        sink_state = {};
+                    } else if (should_emit_output)
                         emit_coll(corpus, *ms_to_use, cmd_to_run, opts, *nm_to_use, nm_tgt_parallel);
                     break;
 
                 case CommandType::DCOLL:
-                    if (should_emit_output)
+                    if (sink_state.for_si == si && sink_state.dcoll) {
+                        count_dcoll_hits(*sink_state.dcoll, *ms_to_use, cmd_to_run, *nm_to_use, nm_tgt_parallel);
+                        if (should_emit_output)
+                            emit_dcoll_result(corpus, cmd_to_run, opts, sink_state.dcoll->finish(),
+                                              sink_state.hits + ms_to_use->matches.size());
+                        sink_state = {};
+                    } else if (should_emit_output)
                         emit_dcoll(corpus, *ms_to_use, cmd_to_run, opts, *nm_to_use, nm_tgt_parallel);
                     break;
 

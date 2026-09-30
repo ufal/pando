@@ -3052,6 +3052,16 @@ std::vector<CorpusPos> QueryExecutor::resolve_leaf(
     }
 }
 
+bool QueryExecutor::may_sink_hits(const TokenQuery& q) const {
+    for (const auto& tok : q.tokens)
+        if (tok.is_dep_subtree) return false;
+    return q.global_region_filters.empty()
+           && !(q.within_having && !q.within.empty() && corpus_.has_structure(q.within))
+           && !(q.not_within && !q.within.empty() && corpus_.has_structure(q.within))
+           && q.containing_clauses.empty() && q.position_orders.empty()
+           && q.global_alignment_filters.empty() && q.global_function_filters.empty();
+}
+
 std::vector<CorpusPos> QueryExecutor::resolve_conditions(
         const ConditionPtr& cond) const {
     if (!cond) {
@@ -4329,6 +4339,12 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
     auto flush_flat_agg = [&]() {
         if (agg_ptr) flat_agg.flush(*agg_ptr);
     };
+    // P7.8: hits straight to the caller's sink (coll / dcoll), same conditions as
+    // the aggregation sink: nothing to check per hit after the kernels
+    bool sink_on = false;
+    if (hit_sink_ && !agg_ptr && sample_size == 0 && fastpath_mode() == FastPathMode::On) {
+        sink_on = token_anchor_constraints.empty() && may_sink_hits(q);
+    }
 
 
     HitSample sampler(sample_size, random_seed);
@@ -4383,6 +4399,13 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
     };
 
     auto add_match = [&](std::vector<CorpusPos>&& positions) {
+        if (sink_on) {
+            hit_sink_->hit(positions.data(), positions.data() + n, n);
+            ++sink_hits_;
+            ++result.total_count;
+            progress_tick(positions[0] != NO_HEAD ? positions[0] : 0, result.total_count);
+            return;
+        }
         if (agg_sink) {
             // P7.3: count the hit from its token starts; no Match
             uint64_t fkey = 0;
@@ -7384,7 +7407,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
         if (auto r = execute_progressive_page(query, max_matches, random_seed, skip_name_validation))
             return std::move(*r);
     }
-    if (num_threads > 1 && !range_ && sample_size == 0) {
+    if (num_threads > 1 && !range_ && sample_size == 0 && !hit_sink_) {
         if (auto r = execute_partitioned(query, max_matches, count_total, max_total_cap,
                                          random_seed, num_threads, aggregate_by_fields,
                                          skip_name_validation))
