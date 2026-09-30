@@ -561,6 +561,12 @@ ServerResponse ServerApi::run(const std::string& body) {
 //   "total": "async"  page now; the exact total is counted in the background:
 //                     result.job = {id, state, finished, total, counted, progress,
 //                     estimate, …}; poll GET /status?job=<id>.
+//   "sample": N       a random N of the hits (KonText "random sample"), in corpus
+//                     order; page.total = the sample's size, result.sample =
+//                     {size, population, requested, shuffled, seed}
+//   "shuffle": true   the hits in a random order (with "sample": the sample);
+//                     "seed": the same seed gives the same sample / order on every
+//                     page (0: a new random one). Both enumerate every hit, synchronously.
 // With "session_id": the result is stored in that session as hit set "name"
 // (default: only Last) for later /run commands and pages. With "from": <set>
 // (and "session_id"), no query runs: the page comes from the stored set (sorted
@@ -592,6 +598,12 @@ ServerResponse ServerApi::query(const std::string& body) {
     opts.debug     = json_extract_bool(body, "debug", false);
     opts.sentence  = json_extract_bool(body, "sentence", false);
     opts.strict_quoted_strings = json_extract_bool(body, "strict_quoted_strings", false);
+    opts.sample    = json_extract_num(body, "sample", 0);
+    opts.shuffle   = json_extract_bool(body, "shuffle", false);
+    opts.seed      = static_cast<uint32_t>(json_extract_num(body, "seed", 0));
+    const bool sampled = opts.sample > 0 || opts.shuffle;
+    if (sampled && (!sid.empty() || !from.empty()))
+        return json_error(400, "'sample' / 'shuffle' are not stored in sessions (use them without session_id)");
     const RequestLimits rl = request_limits(body);
     opts.threads = rl.threads;
     const size_t timeout_ms = rl.timeout_ms;
@@ -645,6 +657,17 @@ ServerResponse ServerApi::query(const std::string& body) {
     };
 
     try {
+        if (sampled) {
+            // one pass over every hit: the page and its total (the sample's size, or
+            // all hits when shuffled) are exact; no background count
+            auto [ms, elapsed] = run_q(opts);
+            const std::string extra = "\"sample\": {\"size\": " + std::to_string(ms.total_count)
+                + ", \"population\": " + std::to_string(ms.sample_population)
+                + ", \"requested\": " + std::to_string(opts.sample)
+                + ", \"shuffled\": " + (opts.shuffle ? "true" : "false")
+                + ", \"seed\": " + std::to_string(opts.seed) + "}";
+            return ok(ms, elapsed, extra);
+        }
         if (!opts.total) {
             auto [ms, elapsed] = run_q(opts);
             return ok(ms, elapsed);

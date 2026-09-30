@@ -284,6 +284,58 @@ static SeqMergeOperand owned_postings(const std::vector<CorpusPos>& pos, int wid
     return o;
 }
 
+/// `--sample N` / /query "sample": the N hits with the smallest hash of (seed, the
+/// hit's positions) — a uniform random sample that does not depend on the order in
+/// which a path finds the hits, so the same seed gives the same sample on every
+/// path, page and thread count. take() returns them in hash order (a random order:
+/// the order of a shuffled concordance).
+class HitSample {
+public:
+    HitSample(size_t k, uint32_t seed)
+        : k_(k), seed_(mix(seed != 0 ? seed : static_cast<uint64_t>(std::random_device{}()) << 1 | 1)) {
+        heap_.reserve(std::min<size_t>(k, 1u << 16));
+    }
+    static uint64_t mix(uint64_t x) {   // splitmix64 finaliser
+        x += 0x9e3779b97f4a7c15ULL;
+        x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+        return x ^ (x >> 31);
+    }
+    uint64_t hash(const Match& m) const {
+        uint64_t h = seed_;
+        for (CorpusPos p : m.positions) h = mix(h ^ static_cast<uint64_t>(p));
+        for (CorpusPos p : m.span_ends) h = mix(h ^ (static_cast<uint64_t>(p) + 0x5bd1e995ULL));
+        return h;
+    }
+    void offer(Match&& m) {
+        if (k_ == 0) return;
+        const uint64_t h = hash(m);
+        auto cmp = [](const Item& a, const Item& b) { return a.first < b.first; };
+        if (heap_.size() < k_) {
+            heap_.emplace_back(h, std::move(m));
+            std::push_heap(heap_.begin(), heap_.end(), cmp);
+        } else if (h < heap_.front().first) {
+            std::pop_heap(heap_.begin(), heap_.end(), cmp);
+            heap_.back() = Item(h, std::move(m));
+            std::push_heap(heap_.begin(), heap_.end(), cmp);
+        }
+    }
+    std::vector<Match> take() {
+        std::sort(heap_.begin(), heap_.end(),
+                  [](const Item& a, const Item& b) { return a.first < b.first; });
+        std::vector<Match> out;
+        out.reserve(heap_.size());
+        for (auto& it : heap_) out.push_back(std::move(it.second));
+        heap_.clear();
+        return out;
+    }
+private:
+    using Item = std::pair<uint64_t, Match>;
+    size_t k_;
+    uint64_t seed_;
+    std::vector<Item> heap_;
+};
+
 static SeqMergeOperand seq_merge_operand(const Corpus& corpus, const ConditionPtr& cond) {
     SeqMergeOperand out;
     if (!cond) {
@@ -4261,9 +4313,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
     };
 
 
-    std::vector<Match> reservoir;
-    if (sample_size > 0) reservoir.reserve(sample_size);
-    std::mt19937 rng(random_seed != 0 ? random_seed : static_cast<uint32_t>(std::random_device{}()));
+    HitSample sampler(sample_size, random_seed);
 
     // Partial match vectors are of size 2*n: [0..n-1]=starts, [n..2n-1]=ends
     // For non-repeating tokens: pm[i] == pm[n+i]
@@ -4306,15 +4356,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
         ++result.total_count;
         progress_tick(m.first_pos(), result.total_count);
         if (sample_size > 0) {
-            if (reservoir.size() < sample_size) {
-                reservoir.push_back(std::move(m));
-            } else {
-                std::uniform_real_distribution<double> u(0, 1);
-                if (u(rng) < static_cast<double>(sample_size) / static_cast<double>(result.total_count)) {
-                    std::uniform_int_distribution<size_t> idx(0, sample_size - 1);
-                    reservoir[idx(rng)] = std::move(m);
-                }
-            }
+            sampler.offer(std::move(m));
         } else if (store_cap_ > 0 ? result.matches.size() < store_cap_
                                   : (max_matches == 0 || result.matches.size() < max_matches)) {
             result.matches.push_back(std::move(m));
@@ -4364,6 +4406,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
     // post-filters on the materialised hits. Fast paths used to return `result`
     // directly, which dropped the buckets (`[ADJ] [NOUN]; count by lemma` → 0).
     auto finish_query = [&]() -> MatchSet {
+        if (sample_size > 0) result.matches = sampler.take();
         if (agg_ptr) {
             flush_flat_agg();
             result.matches.clear();
@@ -6894,8 +6937,6 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
         return !reached_limit() && !reached_total_cap();
     });
 
-    if (sample_size > 0 && !reservoir.empty())
-        result.matches = std::move(reservoir);
     if (agg_ptr) {
         flush_flat_agg();
         result.matches.clear();
@@ -6904,7 +6945,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
         result.aggregate_buckets = std::move(agg_storage);
         return result;
     }
-    return finish_query();
+    return finish_query();   // (takes the sample)
 }
 
 // ── P4.1: query-time range partitioning ─────────────────────────────────
@@ -8437,9 +8478,7 @@ MatchSet QueryExecutor::execute_region_enumeration(const std::vector<AnchorConst
     const auto& sa = corpus_.structure(enum_ac->region);
     const size_t nreg = sa.region_count();
 
-    std::vector<Match> reservoir;
-    if (sample_size > 0) reservoir.reserve(sample_size);
-    std::mt19937 rng(random_seed != 0 ? random_seed : static_cast<uint32_t>(std::random_device{}()));
+    HitSample sampler(sample_size, random_seed);
 
     auto reached_total_cap = [&]() {
         return count_total && max_total_cap > 0 && result.total_count >= max_total_cap;
@@ -8482,15 +8521,7 @@ MatchSet QueryExecutor::execute_region_enumeration(const std::vector<AnchorConst
 
         ++result.total_count;
         if (sample_size > 0) {
-            if (reservoir.size() < sample_size) {
-                reservoir.push_back(std::move(m));
-            } else {
-                std::uniform_real_distribution<double> u(0, 1);
-                if (u(rng) < static_cast<double>(sample_size) / static_cast<double>(result.total_count)) {
-                    std::uniform_int_distribution<size_t> idx(0, sample_size - 1);
-                    reservoir[idx(rng)] = std::move(m);
-                }
-            }
+            sampler.offer(std::move(m));
         } else if (max_matches == 0 || result.matches.size() < max_matches) {
             result.matches.push_back(std::move(m));
         }
@@ -8499,8 +8530,7 @@ MatchSet QueryExecutor::execute_region_enumeration(const std::vector<AnchorConst
             break;
     }
 
-    if (sample_size > 0 && !reservoir.empty())
-        result.matches = std::move(reservoir);
+    if (sample_size > 0) result.matches = sampler.take();
 
     if (count_total && max_total_cap > 0 && result.total_count > max_total_cap)
         result.total_exact = false;
@@ -8973,5 +9003,16 @@ std::vector<CorpusPos> QueryExecutor::unite(
     out.erase(it, out.end());
     return out;
 }
+
+void sort_matches_by_position(std::vector<Match>& matches) {
+    std::stable_sort(matches.begin(), matches.end(), [](const Match& a, const Match& b) {
+        const CorpusPos fa = a.first_pos(), fb = b.first_pos();
+        if (fa != fb) return fa < fb;
+        const CorpusPos la = a.last_pos(), lb = b.last_pos();
+        if (la != lb) return la < lb;
+        return a.positions < b.positions;
+    });
+}
+
 
 } // namespace pando

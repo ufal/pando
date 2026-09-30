@@ -121,6 +121,21 @@ std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
     size_t max_total_cap = (opts.total && opts.max_total > 0) ? opts.max_total : 0;
 
     auto t0 = std::chrono::high_resolution_clock::now();
+    if (opts.sample > 0 || opts.shuffle) {
+        // the hits with the smallest hash of (seed, hit): a sample of N, or the first
+        // offset + limit of the shuffled order (HitSample)
+        size_t k = opts.sample;
+        if (opts.shuffle) k = opts.sample > 0 ? std::min(opts.sample, max_m) : max_m;
+        MatchSet ms = executor.execute(prog[0].query, 0, true, 0, std::max<size_t>(k, 1), opts.seed, 1);
+        if (k == 0) ms.matches.clear();
+        const size_t population = ms.total_count;
+        if (!opts.shuffle) sort_matches_by_position(ms.matches);
+        ms.sample_population = population;
+        ms.total_count = opts.sample > 0 ? std::min(opts.sample, population) : population;
+        ms.total_exact = true;
+        auto t1 = std::chrono::high_resolution_clock::now();
+        return {std::move(ms), std::chrono::duration<double, std::milli>(t1 - t0).count()};
+    }
     MatchSet ms = executor.execute(prog[0].query, max_m, count_t, max_total_cap, 0, 0,
                                    std::max(1u, opts.threads));
     auto t1 = std::chrono::high_resolution_clock::now();

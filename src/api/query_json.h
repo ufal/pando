@@ -29,6 +29,14 @@ struct QueryOptions {
     bool allow_empty_alignment = false;
     /// P4.1: count the total over this many position ranges in parallel (1 = one thread).
     unsigned threads = 1;
+    /// KonText "random sample" / "shuffle": `sample` N = a random N of the hits, shown
+    /// in corpus order; `shuffle` = the hits in a random order (with `sample`: the
+    /// sample in a random order). The same `seed` gives the same sample / order on
+    /// every page (0 = a new random one). Every hit is enumerated; the page holds
+    /// only offset + limit (shuffle) or N (sample) of them.
+    size_t sample = 0;
+    bool shuffle = false;
+    uint32_t seed = 0;
 };
 
 // Run a single query (one statement, no trailing command). Returns (MatchSet, elapsed_ms).

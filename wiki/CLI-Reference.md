@@ -34,7 +34,7 @@ Exact options change over time; always run **`pando --help`**, **`pando-index --
 | `--attrs A,B,...` | Token attributes in output (text: `/attr`; JSON: fields; defaults differ by mode) |
 | `--count-only` | Print only the match count |
 | `--timing` | Print timing on stderr (`open_sec`, `query_sec`, …) |
-| `--sample N` | Random sample of N matches (reservoir sampling) |
+| `--sample N` | Random sample of N matches, shown in corpus order; the same `--seed` gives the same sample on every path and thread count |
 | `--seed N` | RNG seed for `--sample` (reproducible runs) |
 | `--threads N` | Count a total (`--total`, `--count-only`) or a `count by` over N position ranges in parallel; same result as one thread, first page in the same order (default: 1). See [Parallel counting](#parallel-counting-threads) |
 | `--preload` | Load mmap pages eagerly at corpus open (slower open, can speed first queries) |
@@ -311,3 +311,20 @@ For KonText (the way Manatee concordances work there): `query_submit` sends
 sends the page request (same query → same job, `concsize` = `page.total`);
 `get_conc_cache_status` reads `/status` (`finished`, `concsize` = `total`) instead
 of re-running the query.
+
+### Random samples and shuffled concordances: `"sample"`, `"shuffle"`, `"seed"`
+
+* `"sample": N` — a random N of the hits (KonText's *Random sample*), shown in
+  corpus order and paged with `offset` / `limit`; `page.total` is the sample's
+  size. The result has `"sample": {"size", "population", "requested",
+  "shuffled", "seed"}` (`population` = all hits).
+* `"shuffle": true` — every hit in a random order (KonText's *Shuffle*);
+  `page.total` = all hits. With `"sample"`: the sample in a random order.
+* `"seed"` — the same seed gives the same sample and the same order on every
+  page, path and thread count (the hits with the smallest hash of seed and
+  position); 0 or absent picks a new random one, so a client that pages should
+  send one (kontext-pando derives it from the concordance's operations).
+
+Both go through every hit once per request (about the time of a total; memory
+for offset + limit, or N, hits), synchronously: `"total"` is ignored, and they
+are not stored in sessions (400 with `"session_id"`).

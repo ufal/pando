@@ -2638,6 +2638,8 @@ static void run_query(const Corpus& corpus, const std::string& input,
                                           opts.sample, opts.sample_seed, opts.threads,
                                           aggregate_by);
             }
+            // a sample is shown in corpus order (the executor returns it in hash order)
+            if (opts.sample > 0) sort_matches_by_position(session.last_ms.matches);
             session.has_last = true;
             if (!stmt.is_parallel
                 && !(stmt.query.tokens.size() == 1 && stmt.query.tokens[0].is_dep_subtree))
@@ -3579,7 +3581,7 @@ static Options parse_args(int argc, char* argv[]) {
                   << "  --print-all-steps  Multi-statement CQL: print hits for each query step, not only the last\n"
                   << "  --timing         Print open_sec, query_sec, fetch_sec, total, returned, path to stderr\n"
                   << "  --dump-matches   Print total and every match as `starts;ends` (testing)\n"
-                  << "  --sample N       Return N randomly sampled matches (reservoir sampling)\n"
+                  << "  --sample N       Return N randomly sampled matches, in corpus order (same seed = same sample)\n"
                   << "  --seed N         RNG seed for --sample (reproducible runs)\n"
                   << "  --threads N      Count totals / aggregations over N position ranges in parallel (default: 1)\n"
                   << "  --overlay DIR    Merge stand-off overlay index (repeatable); attrs are overlay-<layer>-…\n"

@@ -555,12 +555,20 @@ struct ResolvedRegionFilter {
     bool has_reverse = false;
 };
 
+struct Match;
+/// Order hits by position (first token, then the rest): a sample (HitSample) in
+/// corpus order.
+void sort_matches_by_position(std::vector<Match>& matches);
+
 struct MatchSet {
     std::vector<Match> matches;
     size_t num_tokens = 0;
 
     size_t total_count = 0;
     bool   total_exact = true;
+    /// run_single_query with QueryOptions::sample / shuffle: the number of hits the
+    /// sample was drawn from (0 otherwise).
+    size_t sample_population = 0;
 
     // #16: Source | Target: pairs (source_match, target_match) when parallel query
     std::vector<std::pair<Match, Match>> parallel_matches;
