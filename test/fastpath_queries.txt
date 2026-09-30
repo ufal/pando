@@ -172,6 +172,24 @@ a:[upos="VERB"] > b:[upos="NOUN"]; count by a.lemma, b.lemma
 [upos="VERB" & text_langcode="en"] > [upos="NOUN"]; count by lemma
 <s> [upos="DET"]; count by lemma
 [upos="ADJ"] [upos="NOUN"]; group by lemma
+# P7.4: grouped by the attribute the token restricts (counts from posting lengths)
+[upos="NOUN"|upos="VERB"]; count by upos
+[upos!="PUNCT"]; count by upos
+[upos!="PUNCT" & upos!="NOUN"]; count by upos
+[]; count by upos
+[lemma!="be" & lemma!="the"]; count by lemma
+[form="the" %c]; count by form
+[deprel="nsubj"|deprel="obj"]; group by deprel
+# P7.5: region attributes as flat-counter columns, region filters per region
+[upos="VERB"] > [upos="NOUN"]; count by text_lang
+a:[upos="ADJ"] b:[upos="NOUN"]; count by b.lemma, text_lang
+a:[upos="VERB"] > b:[upos="NOUN"]; count by b.text_lang
+[upos="DET"] []{0,2} [upos="NOUN"]; count by text_genre
+[upos="NOUN"]; count by lemma, text_lang
+[upos="NOUN"]; count by lemma, upos
+[upos="NOUN"]; count by text_lang, text_genre
+[upos="NOUN"] :: match.text_lang="English"; count by lemma
+[upos="NOUN"] :: match.text_lang!="English"; count by lemma, text_genre
 
 # ── Bitmap kernel (P3.2, seq_bitmap): on an index with <attr>.bm (pando-index --upgrade).
 # Modes nobm / bmforce compare it with the merge paths and force it for rare operands.

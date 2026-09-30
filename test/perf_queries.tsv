@@ -86,3 +86,23 @@ R6	[lemma!="shoe"]
 R7	[lemma!=".*e.*"]
 P1	[upos="NOUN"] within s having [upos="ADJ"]
 P2	a:[upos="NOUN"] []{0,3} b:[upos="NOUN"] :: distance(a,b) < 3
+# ── Phase 7 aggregation after a query (P7.9): mode `wall`, the output compared
+# (coll / dcoll ties were hash-ordered before P7.8: compare with later binaries)
+C1	[upos="NOUN"]; count by lemma
+C2	[upos="NOUN"|upos="VERB"]; count by upos
+C3	[upos!="PUNCT"]; count by upos
+C4	[lemma!="be" & lemma!="have"]; count by lemma
+C5	[upos="ADJ"] [upos="NOUN"]; count by lemma
+C6	a:[upos="VERB"] > b:[upos="NOUN"]; count by a.lemma, b.lemma
+C7	[upos="VERB"] > [upos="NOUN"]; count by text_langcode
+C8	a:[upos="ADJ"] b:[upos="NOUN"]; count by b.lemma, text_langcode
+C9	[upos="NOUN"]; count by lemma, text_langcode
+C10	[upos="NOUN"] :: match.text_langcode="en"; count by text_treebank
+C11	[upos="NOUN"] :: match.text_langcode!="en"; count by lemma
+C12	[upos="ADJ"]; freq by lemma
+C13	[upos="ADJ"] [upos="NOUN"]; sort by lemma; tabulate 0 20 match.lemma
+L1	[upos="ADJ"] [upos="NOUN"]; coll by lemma
+L2	a:[upos="DET"] []{0,2} b:[upos="NOUN"]; coll on a by form
+L3	[upos="VERB"]; dcoll obj by lemma
+L4	[upos="NOUN"]; dcoll by lemma
+L5	[upos="NOUN"]; tabulate 0 20 match.form, match.lemma

@@ -32,9 +32,16 @@ time, which includes opening the corpus files) next to the warm median.
 Query file: `id<TAB>query` per line; '#' comments and blank lines ignored.
 Modes (--modes, comma-separated): total = `--limit 20 --total` (KonText-style
 first page + exact total), count = `--count-only`, page = `--limit 20`.
+
+A query that ends in a command (`…; count by …`, `freq`, `coll`, `dcoll`,
+`tabulate`, `sort`, …; P7.9) always runs in mode `wall` instead: the program as
+is, timed on the wall clock (process start, corpus open, the command and its
+output included, so the aggregation after the query counts), and the binaries
+must print the same output (compared by hash, shown as the total column).
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -47,7 +54,9 @@ MODE_ARGS = {
     "total": ["--limit", "20", "--total"],
     "count": ["--count-only"],
     "page": ["--limit", "20"],
+    "wall": [],
 }
+COMMAND_RE = re.compile(r";\s*(count|group|freq|coll|dcoll|tabulate|sort|size|stats|describe|keyness)\b")
 
 
 def run_once(binary, corpus, query, mode, timeout, env):
@@ -59,10 +68,15 @@ def run_once(binary, corpus, query, mode, timeout, env):
             extra[k] = v
     if extra:
         env = dict(env, **extra)
+    t0 = time.monotonic()
     p = subprocess.run([binary, corpus, query, "--timing", *MODE_ARGS[mode]],
                        capture_output=True, text=True, timeout=timeout, env=env)
+    wall = time.monotonic() - t0
     if p.returncode != 0:
         raise RuntimeError(p.stderr.strip()[:300])
+    if mode == "wall":
+        path = re.search(r"path=(\S+)", p.stderr)
+        return wall, hashlib.md5(p.stdout.encode()).hexdigest()[:10], path.group(1) if path else "-"
     q = re.search(r"query_sec=([\d.]+)", p.stderr)
     t = re.search(r"\btotal=(\d+)", p.stderr)
     path = re.search(r"path=(\S+)", p.stderr)
@@ -95,7 +109,7 @@ def main():
         bins.append((label, path))
     modes = opts.modes.split(",")
     for m in modes:
-        if m not in MODE_ARGS:
+        if m not in MODE_ARGS or m == "wall":
             ap.error(f"unknown mode {m}")
     if opts.threads:
         for m in MODE_ARGS:
@@ -128,7 +142,7 @@ def main():
         hdr += f"  {'baseline':>9}"
     print(hdr + "  query")
     for qid, q in queries:
-        for mode in modes:
+        for mode in (["wall"] if COMMAND_RE.search(q) else modes):
             row = {"id": qid, "query": q, "mode": mode, "bins": {}}
             totals = set()
             cells = []

@@ -3174,6 +3174,276 @@ std::vector<ResolvedRegionFilter> QueryExecutor::resolve_region_filters(
 //
 // Returns true if the fast path was taken; false = fall back to standard path.
 
+/// P7.5: a region attribute as a flat-counter column: region → value id (1-based,
+/// the id the bucket keys and region_intern use; 0 = the position is in no region),
+/// one table per query so every partition keys the values alike. Positions arrive
+/// mostly in corpus order: a cursor, with a binary search when a hit goes back.
+struct FlatRegionCol {
+    static constexpr size_t kMaxValues = size_t{1} << 18;
+    const Region* regions = nullptr;
+    size_t n = 0, cur = 0;
+    std::vector<uint32_t> rid;
+    std::vector<std::string> values;   // value id - 1 → value
+
+    /// The region values as fill_aggregate_key reads them (region_value); false when
+    /// the attribute has no reverse index or too many values.
+    bool build(const StructuralAttr& sa, const std::string& attr) {
+        const LexiconId L = sa.region_attr_lex_size(attr);
+        if (L <= 0 || static_cast<size_t>(L) > kMaxValues) return false;
+        const std::vector<LexiconId> r2l = sa.precompute_region_to_lex(attr);
+        if (r2l.empty()) return false;
+        regions = sa.region_data();
+        n = sa.region_count();
+        values.reserve(static_cast<size_t>(L));
+        for (LexiconId i = 0; i < L; ++i) values.emplace_back(sa.region_attr_lex_get(attr, i));
+        rid.assign(n, 0);
+        std::unordered_map<std::string, uint32_t> extra;
+        for (size_t r = 0; r < n && r < r2l.size(); ++r) {
+            if (r2l[r] != UNKNOWN_LEX) { rid[r] = static_cast<uint32_t>(r2l[r]) + 1; continue; }
+            std::string v(sa.region_value(attr, r));
+            const LexiconId l = sa.region_attr_lex_lookup(attr, v);
+            if (l != UNKNOWN_LEX) { rid[r] = static_cast<uint32_t>(l) + 1; continue; }
+            auto it = extra.find(v);
+            if (it == extra.end()) {
+                if (values.size() >= kMaxValues) return false;
+                values.push_back(v);
+                it = extra.emplace(std::move(v), static_cast<uint32_t>(values.size())).first;
+            }
+            rid[r] = it->second;
+        }
+        return true;
+    }
+    uint32_t at(CorpusPos pos) {
+        if (cur < n && regions[cur].start <= pos) {
+            for (int k = 0; k < 4; ++k) {
+                if (pos <= regions[cur].end) return rid[cur];
+                if (cur + 1 >= n || regions[cur + 1].start > pos) return 0;   // a gap
+                ++cur;
+            }
+        }
+        const Region* it = std::upper_bound(regions, regions + n, pos,
+                                            [](CorpusPos p, const Region& r) { return p < r.start; });
+        if (it == regions) return 0;
+        cur = static_cast<size_t>(it - regions) - 1;
+        return pos <= regions[cur].end ? rid[cur] : 0;
+    }
+    uint64_t card() const { return values.size() + 1; }
+};
+
+// ── P7.2: flat counters for `count by` on positional attributes ─────────
+// One column: a dense array indexed by lexicon id; two columns: an open-
+// addressing table on the packed key id1 * |lexicon 2| + id2. Replaces one
+// std::vector<int64_t> key + unordered_map<vector> probe per hit. The compact
+// buckets are handed to AggregateBucketData (flat_*) when the query finishes and
+// read through for_each_bucket(), without converting them to vector keys.
+// One column over a large lexicon starts as a hash table and turns dense once it
+// holds 1/8 of the lexicon, so a rare query does not allocate and scan a
+// lexicon-sized array.
+struct FlatAggCounter {
+    bool on = false;
+    int ncols = 0;
+    int tok[2] = {-1, -1};                 // label's token index; -1 = match start (first_pos)
+    const PositionalAttr* pa[2] = {nullptr, nullptr};
+    std::unique_ptr<FlatRegionCol> reg[2];   // P7.5: a region attribute column
+    uint64_t v2 = 1;
+    bool dense_mode = false;
+    std::vector<uint64_t> dense;
+    std::vector<uint64_t> keys, vals;      // keys[i] == kEmpty: free
+    size_t used = 0;
+    uint64_t v1 = 0;
+    static constexpr uint64_t kEmpty = ~uint64_t{0};
+    static constexpr uint64_t kDenseAlways = uint64_t{1} << 20;   // 8 MB of counters
+    static constexpr uint64_t kDenseMax = uint64_t{1} << 24;
+
+    static uint64_t mix(uint64_t x) {
+        x ^= x >> 33; x *= 0xff51afd7ed558ccdULL; x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ULL; x ^= x >> 33;
+        return x;
+    }
+    void grow() {
+        if (ncols == 1 && v1 <= kDenseMax && used * 8 >= v1) {   // hash → dense
+            dense.assign(static_cast<size_t>(std::max<uint64_t>(1, v1)), 0);
+            for (size_t i = 0; i < keys.size(); ++i)
+                if (keys[i] != kEmpty) dense[static_cast<size_t>(keys[i])] += vals[i];
+            keys.clear(); keys.shrink_to_fit(); vals.clear(); vals.shrink_to_fit();
+            used = 0;
+            dense_mode = true;
+            return;
+        }
+        std::vector<uint64_t> ok = std::move(keys), ov = std::move(vals);
+        const size_t cap = ok.empty() ? 1024 : ok.size() * 2;
+        keys.assign(cap, kEmpty);
+        vals.assign(cap, 0);
+        used = 0;
+        for (size_t i = 0; i < ok.size(); ++i)
+            if (ok[i] != kEmpty) add_key(ok[i], ov[i]);
+    }
+    void add_key(uint64_t k, uint64_t c) {
+        if ((used + 1) * 10 > keys.size() * 7) {
+            grow();
+            if (dense_mode) { dense[static_cast<size_t>(k)] += c; return; }
+        }
+        const size_t mask = keys.size() - 1;
+        size_t i = static_cast<size_t>(mix(k)) & mask;
+        while (keys[i] != kEmpty && keys[i] != k) i = (i + 1) & mask;
+        if (keys[i] == kEmpty) { keys[i] = k; ++used; }
+        vals[i] += c;
+    }
+    static bool flat_structure(const Corpus& corpus, const StructuralAttr& sa) {
+        for (const std::string& st : corpus.structure_names())
+            if (corpus.has_structure(st) && &corpus.structure(st) == &sa)
+                return !corpus.is_nested(st) && !corpus.is_overlapping(st) && !corpus.is_zerowidth(st);
+        return false;
+    }
+    /// Set up for `agg` when every column is a plain positional attribute (at most
+    /// two, no date / strlen transform) whose label resolves to a query token.
+    /// P7.5: also a region attribute of a flat structure (`text_langcode`, or
+    /// `b.text_langcode` for a token label) when the hits carry no named regions.
+    bool init(const AggregateBucketData& agg, const NameIndexMap& name_map, size_t ntok,
+              const Corpus& corpus, bool named_regions) {
+        if (agg.columns.empty() || agg.columns.size() > 2) return false;
+        for (size_t c = 0; c < agg.columns.size(); ++c) {
+            const auto& col = agg.columns[c];
+            using K = AggregateBucketData::Column::Kind;
+            if (col.date_transform != AggregateBucketData::Column::DateTransform::None) return false;
+            if (col.kind == K::Positional) {
+                if (!col.pa) return false;
+            } else if (col.kind == K::Region) {
+                if (!col.sa || named_regions || !flat_structure(corpus, *col.sa)) return false;
+            } else {
+                return false;
+            }
+            if (!col.named_anchor.empty()) {
+                auto it = name_map.find(col.named_anchor);
+                if (it == name_map.end() || it->second >= ntok) return false;
+                tok[c] = static_cast<int>(it->second);
+            }
+            if (col.kind == K::Region) {
+                reg[c] = std::make_unique<FlatRegionCol>();
+                if (!reg[c]->build(*col.sa, col.region_attr_name)) return false;
+            }
+            pa[c] = col.pa;
+        }
+        ncols = static_cast<int>(agg.columns.size());
+        auto card = [&](int c) -> uint64_t {
+            return reg[c] ? reg[c]->card() : static_cast<uint64_t>(std::max<int64_t>(0, pa[c]->lexicon().size()));
+        };
+        if (ncols == 2) v2 = std::max<uint64_t>(1, card(1));
+        v1 = card(0);
+        dense_mode = ncols == 1 && v1 <= kDenseAlways;
+        if (dense_mode) dense.assign(static_cast<size_t>(std::max<uint64_t>(1, v1)), 0);
+        on = true;
+        return true;
+    }
+    /// Key of one hit from its token starts `starts[0..n)`; false = not counted
+    /// (a labelled token that did not take part, as fill_aggregate_key).
+    bool key_of(const CorpusPos* starts, size_t n, uint64_t& key) {
+        CorpusPos first = NO_HEAD;
+        uint64_t id[2] = {0, 0};
+        for (int c = 0; c < ncols; ++c) {
+            CorpusPos pos;
+            if (tok[c] >= 0) {
+                if (static_cast<size_t>(tok[c]) >= n) return false;
+                pos = starts[tok[c]];
+                if (pos == NO_HEAD) return false;
+            } else {
+                if (first == NO_HEAD) {
+                    for (size_t i = 0; i < n; ++i)
+                        if (starts[i] != NO_HEAD && (first == NO_HEAD || starts[i] < first)) first = starts[i];
+                    if (first == NO_HEAD) first = 0;   // as Match::first_pos()
+                }
+                pos = first;
+            }
+            if (reg[c]) {
+                id[c] = reg[c]->at(pos);
+                if (!id[c]) return false;   // in no region (as fill_aggregate_key)
+            } else {
+                id[c] = static_cast<uint64_t>(pa[c]->id_at(pos));
+            }
+        }
+        key = ncols == 1 ? id[0] : id[0] * v2 + id[1];
+        return true;
+    }
+    void inc(uint64_t key) {
+        if (dense_mode) ++dense[static_cast<size_t>(key)];
+        else add_key(key, 1);
+    }
+    /// Hand the compact buckets to `agg` (read through AggregateBucketData::for_each_bucket).
+    void flush(AggregateBucketData& agg) {
+        if (!on) return;
+        agg.flat_ncols = ncols;
+        agg.flat_v2 = v2;
+        // region columns: the keys are value ids of the full table (the same in every
+        // partition, so merge_aggregate_into re-keys nothing)
+        if (agg.region_intern.size() < agg.columns.size()) agg.region_intern.resize(agg.columns.size());
+        for (int c = 0; c < ncols; ++c) {
+            if (!reg[c]) continue;
+            auto& ri = agg.region_intern[static_cast<size_t>(c)];
+            ri.str_to_id.clear();
+            ri.id_to_str = std::move(reg[c]->values);
+            for (size_t j = 0; j < ri.id_to_str.size(); ++j)
+                ri.str_to_id.emplace(ri.id_to_str[j], static_cast<int64_t>(j + 1));
+            reg[c].reset();
+        }
+        if (dense_mode) {
+            agg.flat_dense = std::move(dense);
+        } else {
+            static_assert(kEmpty == AggregateBucketData::kFlatEmpty, "same empty marker");
+            agg.flat_keys = std::move(keys);
+            agg.flat_vals = std::move(vals);
+        }
+        on = false;
+    }
+};
+
+bool QueryExecutor::condition_ids_on_attr(const ConditionPtr& c, const PositionalAttr& pa,
+                                          std::vector<char>& ids) const {
+    const size_t V = static_cast<size_t>(std::max<LexiconId>(0, pa.lexicon().size()));
+    if (!c) {
+        ids.assign(V, 1);
+        return true;
+    }
+    if (!c->is_leaf) {
+        if (c->is_structural || c->is_count || !c->left || !c->right) return false;
+        std::vector<char> r;
+        if (!condition_ids_on_attr(c->left, pa, ids) || !condition_ids_on_attr(c->right, pa, r))
+            return false;
+        if (c->bool_op == BoolOp::AND)
+            for (size_t i = 0; i < V; ++i) ids[i] = ids[i] && r[i];
+        else
+            for (size_t i = 0; i < V; ++i) ids[i] = ids[i] || r[i];
+        return true;
+    }
+    // as check_leaf on a plain positional attribute, per lexicon entry
+    const AttrCondition& ac = c->leaf;
+    if (ac.op == CompOp::IN || ac.is_nvals || ac.plain_attr != &pa || ac.plain_attr_corpus != &corpus_)
+        return false;
+    if (ac.resolved_id >= 0) {
+        ids.assign(V, 0);
+        if (static_cast<size_t>(ac.resolved_id) < V) ids[static_cast<size_t>(ac.resolved_id)] = 1;
+        return true;
+    }
+    if (ac.id_set_resolved) {
+        const bool neq = ac.op == CompOp::NEQ;
+        ids.assign(V, neq ? 1 : 0);
+        for (int32_t id : ac.id_set)
+            if (id >= 0 && static_cast<size_t>(id) < V) ids[static_cast<size_t>(id)] = neq ? 0 : 1;
+        return true;
+    }
+    const Lexicon& lex = pa.lexicon();
+    ids.assign(V, 0);
+    if (ac.neq_regex) {
+        for (size_t i = 0; i < V; ++i) ids[i] = !leaf_regex_eval(lex.get(static_cast<LexiconId>(i)), ac);
+        return true;
+    }
+    // an unresolved EQ is rare (its tokens are found faster from the postings); NEQ
+    // is the common `!=` over (nearly) every token
+    if (ac.case_insensitive || ac.diacritics_insensitive || ac.op != CompOp::NEQ)
+        return false;
+    for (size_t i = 0; i < V; ++i)
+        ids[i] = !multivalue_eq(lex.get(static_cast<LexiconId>(i)), ac.value);
+    return true;
+}
+
 bool QueryExecutor::try_fast_aggregate(
         const TokenQuery& q,
         AggregateBucketData& agg,
@@ -3307,16 +3577,36 @@ bool QueryExecutor::try_fast_aggregate(
         const ResolvedRegionFilter* rf = nullptr;
         RegionCursor cursor;
         bool valid = false;
+        bool is_mv = false;
+        std::vector<char> ok;   // P7.5: the filter's verdict per region, when precomputed
     };
 
     std::vector<FilterCursor> filter_cursors;
     filter_cursors.reserve(resolved_filters.size());
+    const size_t est_seeds = resolved_filters.empty() ? 0 : estimate_cardinality(q.tokens[0].conditions);
     for (const auto& rf : resolved_filters) {
         FilterCursor fc;
         fc.rf = &rf;
         if (rf.sa) {
             fc.cursor = RegionCursor(*rf.sa);
             fc.valid = true;
+            fc.is_mv = region_attr_is_multivalue(corpus_, rf.sa, rf.attr_name);
+            // one verdict per region instead of a lexicon lookup + posting search
+            // (or a string compare) per seed, when there are more seeds than regions
+            const size_t nr = rf.sa->region_count();
+            if (est_seeds >= nr / 4) {
+                fc.ok.assign(nr, 0);
+                if (rf.op == CompOp::EQ && rf.has_reverse && !fc.is_mv) {
+                    const int64_t* regs = nullptr;
+                    size_t cnt = 0;
+                    if (rf.sa->regions_for_value(rf.attr_name, rf.value, regs, cnt))
+                        for (size_t k = 0; k < cnt; ++k)
+                            if (regs[k] >= 0 && static_cast<size_t>(regs[k]) < nr) fc.ok[static_cast<size_t>(regs[k])] = 1;
+                }
+                for (size_t r = 0; r < nr; ++r)
+                    if (!fc.ok[r])
+                        fc.ok[r] = compare_value_maybe_mv(rf.op, rf.sa->region_value(rf.attr_name, r), rf.value, fc.is_mv);
+            }
         }
         filter_cursors.push_back(std::move(fc));
     }
@@ -3338,6 +3628,37 @@ bool QueryExecutor::try_fast_aggregate(
         LexiconId lex_sz = pa.lexicon().size();
         std::vector<uint64_t> flat(static_cast<size_t>(std::max<LexiconId>(1, lex_sz)), 0);
         size_t total = 0;
+
+        // P7.4: grouped by the attribute the token restricts (`[lemma=".*ness"];
+        // count by lemma`, `[upos!="PUNCT"]; count by upos`): the counts are the
+        // posting lengths of the ids that satisfy it (in a partition: the part of
+        // each posting list in its range), no hit enumerated
+        std::vector<char> ids;
+        if (max_total_cap == 0 && q.within.empty() && fastpath_mode() == FastPathMode::On
+            && condition_ids_on_attr(q.tokens[0].conditions, pa, ids)) {
+            for (size_t id = 0; id < ids.size(); ++id) {
+                if (!ids[id]) continue;
+                size_t c;
+                if (range_) {
+                    const RevSpan sp = pa.rev_span_of_id(static_cast<LexiconId>(id));
+                    const size_t a = gallop_rev(sp, 0, range_->lo);
+                    c = gallop_rev(sp, a, range_->hi) - a;
+                } else {
+                    c = pa.count_of_id(static_cast<LexiconId>(id));
+                }
+                flat[id] = c;
+                total += c;
+            }
+            if (range_) result.range_ok = true;
+            agg.total_hits = total;
+            agg.flat_ncols = 1;
+            agg.flat_v2 = 1;
+            agg.flat_dense = std::move(flat);
+            result.total_count = total;
+            result.total_exact = true;
+            result.plan_path = "single_agg_ids";
+            return true;
+        }
         auto count_pos = [&](CorpusPos pos) -> bool {
             if (max_total_cap > 0 && total >= max_total_cap) return false;
             ++flat[static_cast<size_t>(pa.id_at(pos))];
@@ -3428,6 +3749,37 @@ bool QueryExecutor::try_fast_aggregate(
     size_t total = 0;
     bool capped = false;
 
+    // P7.5: one or two columns counted on a packed id key (FlatAggCounter's table)
+    // instead of a vector key per hit in `counts`
+    auto card_of = [&](size_t i) -> uint64_t {
+        return col_info[i].is_positional
+            ? static_cast<uint64_t>(std::max<LexiconId>(1, col_info[i].pa->lexicon().size()))
+            : static_cast<uint64_t>(std::max<LexiconId>(1, col_info[i].lex_size));
+    };
+    // Region values are keyed 1-based (lex id + 1) over their whole lexicon, which
+    // then goes to region_intern as is: the buckets stay packed (flat_*), as the
+    // general path's FlatAggCounter hands them over, and partitions key alike.
+    FlatAggCounter packed;
+    bool packed_ok = ncols >= 1 && ncols <= 2;
+    for (size_t i = 0; i < ncols && packed_ok; ++i)
+        packed_ok = col_info[i].is_positional
+                    || static_cast<size_t>(std::max<LexiconId>(0, col_info[i].lex_size)) <= FlatRegionCol::kMaxValues;
+    auto packed_id = [&](size_t i, int64_t id) -> uint64_t {
+        return static_cast<uint64_t>(id) + (col_info[i].is_positional ? 0 : 1);
+    };
+    const uint64_t card1 = ncols == 2 ? card_of(1) + 1 : 1;
+    if (packed_ok) {
+        const uint64_t card0 = card_of(0) + 1;
+        if (card0 <= ~uint64_t{0} / card1 / 2) {
+            packed.on = true;
+            packed.ncols = static_cast<int>(ncols);
+            packed.v1 = card0;
+            packed.v2 = card1;
+            packed.dense_mode = ncols == 1 && card0 <= FlatAggCounter::kDenseAlways;
+            if (packed.dense_mode) packed.dense.assign(static_cast<size_t>(card0), 0);
+        }
+    }
+
     // Per-seed scratch: region row resolved for each anchor constraint. Filled by
     // pass_anchors and consumed by RegionFromBinding column extraction.
     std::vector<size_t> anchor_region_rows(anchor_infos.size(), 0);
@@ -3459,8 +3811,12 @@ bool QueryExecutor::try_fast_aggregate(
             if (!fc.valid) return false;
             int64_t rgn = fc.cursor.find(pos);
             if (rgn < 0) return false;
+            if (!fc.ok.empty()) {
+                if (!fc.ok[static_cast<size_t>(rgn)]) return false;
+                continue;
+            }
             const auto& rf = *fc.rf;
-            const bool is_mv = region_attr_is_multivalue(corpus_, rf.sa, rf.attr_name);
+            const bool is_mv = fc.is_mv;
             if (rf.op == CompOp::EQ && rf.has_reverse && !is_mv) {
                 if (rf.sa->region_matches_attr_eq_rev(rf.attr_name,
                         static_cast<size_t>(rgn), rf.value))
@@ -3503,9 +3859,30 @@ bool QueryExecutor::try_fast_aggregate(
             }
         }
         ++total;
-        ++agg.counts[key_buf];
+        if (packed.on) packed.inc(ncols == 1 ? packed_id(0, key_buf[0])
+                                             : packed_id(0, key_buf[0]) * card1 + packed_id(1, key_buf[1]));
+        else ++agg.counts[key_buf];
         return true;
     });
+
+    if (packed.on) {
+        packed.flush(agg);
+        agg.region_intern.resize(ncols);
+        for (size_t i = 0; i < ncols; ++i) {
+            if (col_info[i].is_positional) continue;
+            auto& ri = agg.region_intern[i];
+            ri.str_to_id.clear();
+            ri.id_to_str.clear();
+            for (LexiconId l = 0; l < col_info[i].lex_size; ++l) {
+                ri.id_to_str.emplace_back(col_info[i].sa->region_attr_lex_get(col_info[i].attr_name, l));
+                ri.str_to_id.emplace(ri.id_to_str.back(), static_cast<int64_t>(l) + 1);
+            }
+        }
+        agg.total_hits = total;
+        result.total_count = total;
+        result.total_exact = !capped;
+        return true;
+    }
 
     agg.total_hits = total;
 
@@ -3554,131 +3931,6 @@ bool QueryExecutor::try_fast_aggregate(
     result.total_exact = !capped;
     return true;
 }
-
-// ── P7.2: flat counters for `count by` on positional attributes ─────────
-// One column: a dense array indexed by lexicon id; two columns: an open-
-// addressing table on the packed key id1 * |lexicon 2| + id2. Replaces one
-// std::vector<int64_t> key + unordered_map<vector> probe per hit. The compact
-// buckets are handed to AggregateBucketData (flat_*) when the query finishes and
-// read through for_each_bucket(), without converting them to vector keys.
-// One column over a large lexicon starts as a hash table and turns dense once it
-// holds 1/8 of the lexicon, so a rare query does not allocate and scan a
-// lexicon-sized array.
-struct FlatAggCounter {
-    bool on = false;
-    int ncols = 0;
-    int tok[2] = {-1, -1};                 // label's token index; -1 = match start (first_pos)
-    const PositionalAttr* pa[2] = {nullptr, nullptr};
-    uint64_t v2 = 1;
-    bool dense_mode = false;
-    std::vector<uint64_t> dense;
-    std::vector<uint64_t> keys, vals;      // keys[i] == kEmpty: free
-    size_t used = 0;
-    uint64_t v1 = 0;
-    static constexpr uint64_t kEmpty = ~uint64_t{0};
-    static constexpr uint64_t kDenseAlways = uint64_t{1} << 20;   // 8 MB of counters
-    static constexpr uint64_t kDenseMax = uint64_t{1} << 24;
-
-    static uint64_t mix(uint64_t x) {
-        x ^= x >> 33; x *= 0xff51afd7ed558ccdULL; x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ULL; x ^= x >> 33;
-        return x;
-    }
-    void grow() {
-        if (ncols == 1 && v1 <= kDenseMax && used * 8 >= v1) {   // hash → dense
-            dense.assign(static_cast<size_t>(std::max<uint64_t>(1, v1)), 0);
-            for (size_t i = 0; i < keys.size(); ++i)
-                if (keys[i] != kEmpty) dense[static_cast<size_t>(keys[i])] += vals[i];
-            keys.clear(); keys.shrink_to_fit(); vals.clear(); vals.shrink_to_fit();
-            used = 0;
-            dense_mode = true;
-            return;
-        }
-        std::vector<uint64_t> ok = std::move(keys), ov = std::move(vals);
-        const size_t cap = ok.empty() ? 1024 : ok.size() * 2;
-        keys.assign(cap, kEmpty);
-        vals.assign(cap, 0);
-        used = 0;
-        for (size_t i = 0; i < ok.size(); ++i)
-            if (ok[i] != kEmpty) add_key(ok[i], ov[i]);
-    }
-    void add_key(uint64_t k, uint64_t c) {
-        if ((used + 1) * 10 > keys.size() * 7) {
-            grow();
-            if (dense_mode) { dense[static_cast<size_t>(k)] += c; return; }
-        }
-        const size_t mask = keys.size() - 1;
-        size_t i = static_cast<size_t>(mix(k)) & mask;
-        while (keys[i] != kEmpty && keys[i] != k) i = (i + 1) & mask;
-        if (keys[i] == kEmpty) { keys[i] = k; ++used; }
-        vals[i] += c;
-    }
-    /// Set up for `agg` when every column is a plain positional attribute (at most
-    /// two, no date / strlen transform) whose label resolves to a query token.
-    bool init(const AggregateBucketData& agg, const NameIndexMap& name_map, size_t ntok) {
-        if (agg.columns.empty() || agg.columns.size() > 2) return false;
-        for (size_t c = 0; c < agg.columns.size(); ++c) {
-            const auto& col = agg.columns[c];
-            if (col.kind != AggregateBucketData::Column::Kind::Positional || !col.pa
-                || col.date_transform != AggregateBucketData::Column::DateTransform::None)
-                return false;
-            if (!col.named_anchor.empty()) {
-                auto it = name_map.find(col.named_anchor);
-                if (it == name_map.end() || it->second >= ntok) return false;
-                tok[c] = static_cast<int>(it->second);
-            }
-            pa[c] = col.pa;
-        }
-        ncols = static_cast<int>(agg.columns.size());
-        if (ncols == 2) v2 = static_cast<uint64_t>(std::max<int64_t>(1, pa[1]->lexicon().size()));
-        v1 = static_cast<uint64_t>(std::max<int64_t>(0, pa[0]->lexicon().size()));
-        dense_mode = ncols == 1 && v1 <= kDenseAlways;
-        if (dense_mode) dense.assign(static_cast<size_t>(std::max<uint64_t>(1, v1)), 0);
-        on = true;
-        return true;
-    }
-    /// Key of one hit from its token starts `starts[0..n)`; false = not counted
-    /// (a labelled token that did not take part, as fill_aggregate_key).
-    bool key_of(const CorpusPos* starts, size_t n, uint64_t& key) const {
-        CorpusPos first = NO_HEAD;
-        uint64_t id[2] = {0, 0};
-        for (int c = 0; c < ncols; ++c) {
-            CorpusPos pos;
-            if (tok[c] >= 0) {
-                if (static_cast<size_t>(tok[c]) >= n) return false;
-                pos = starts[tok[c]];
-                if (pos == NO_HEAD) return false;
-            } else {
-                if (first == NO_HEAD) {
-                    for (size_t i = 0; i < n; ++i)
-                        if (starts[i] != NO_HEAD && (first == NO_HEAD || starts[i] < first)) first = starts[i];
-                    if (first == NO_HEAD) first = 0;   // as Match::first_pos()
-                }
-                pos = first;
-            }
-            id[c] = static_cast<uint64_t>(pa[c]->id_at(pos));
-        }
-        key = ncols == 1 ? id[0] : id[0] * v2 + id[1];
-        return true;
-    }
-    void inc(uint64_t key) {
-        if (dense_mode) ++dense[static_cast<size_t>(key)];
-        else add_key(key, 1);
-    }
-    /// Hand the compact buckets to `agg` (read through AggregateBucketData::for_each_bucket).
-    void flush(AggregateBucketData& agg) {
-        if (!on) return;
-        agg.flat_ncols = ncols;
-        agg.flat_v2 = v2;
-        if (dense_mode) {
-            agg.flat_dense = std::move(dense);
-        } else {
-            static_assert(kEmpty == AggregateBucketData::kFlatEmpty, "same empty marker");
-            agg.flat_keys = std::move(keys);
-            agg.flat_vals = std::move(vals);
-        }
-        on = false;
-    }
-};
 
 // ── Main execution ──────────────────────────────────────────────────────
 
@@ -4330,7 +4582,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
     // straight into them (agg_sink) without building a Match.
     FlatAggCounter flat_agg;
     bool agg_sink = false;
-    if (agg_ptr && fastpath_mode() == FastPathMode::On && flat_agg.init(*agg_ptr, name_map, n)) {
+    if (agg_ptr && fastpath_mode() == FastPathMode::On && flat_agg.init(*agg_ptr, name_map, n, corpus_, !anchor_constraints.empty())) {
         bool any_dep_subtree = false;
         for (const auto& tok : q.tokens) any_dep_subtree |= tok.is_dep_subtree;
         agg_sink = !agg_per_match_post && token_anchor_constraints.empty()

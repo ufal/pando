@@ -1088,6 +1088,10 @@ private:
     const Regex& regex_for(const std::string& pattern) const;
     /// A REGEX / `!= /re/` leaf's pattern against one value.
     bool leaf_regex_eval(std::string_view val, const AttrCondition& ac) const;
+    /// P7.4: when `c` reads only `pa` (AND / OR of plain leaves on it; null = every
+    /// token), `ids[id]` = whether the tokens with lexicon id `id` satisfy it.
+    bool condition_ids_on_attr(const ConditionPtr& c, const PositionalAttr& pa,
+                               std::vector<char>& ids) const;
 };
 
 } // namespace pando
