@@ -231,3 +231,15 @@ a:[upos="ADJ"] b:[upos="NOUN"]; count by a.lemma, text_langcode
 <s> [word!="the"] [word=".*e.*"]
 [word=".*e.*"]{1,2} [upos="VERB" | upos="AUX"]
 [word=".*e.*"] [upos="ADJ"]{0,1} [upos="NOUN"] within s
+# dense `!=` / `[]` without bitmaps: lexicon truth tables and NOT of postings (seq_bitmap)
+[lemma!="the"]
+[form!="the" & lemma!="be"]
+[lemma!="the" | upos="NOUN"]
+[]
+[] :: match.text_langcode="en"
+[lemma!="the"] :: match.text_langcode="en"
+[lemma!="the"] [lemma!="of"]
+[lemma!="the"] []{0,2} [upos="NOUN"]
+[word=".*[aeiou].*"] [lemma!="of"]
+[lemma=".*[aeiou].*" & upos!="NOUN"]
+[lemma!="the"] within s

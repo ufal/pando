@@ -39,6 +39,9 @@ public:
 
     // Position → value
     LexiconId id_at(CorpusPos pos) const;
+    /// Raw `.dat` ids (dat_width() bytes each: 1 = uint8, 2 = uint16, 4 = int32).
+    const void* dat_data() const { return corpus_.data(); }
+    int dat_width() const { return dat_width_; }
     std::string_view value_at(CorpusPos pos) const;
 
     // Value → count (O(1) via rev.idx — no position data touched)

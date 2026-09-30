@@ -4,6 +4,7 @@
 #include "core/mmap_file.h"
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace pando {
 
@@ -16,6 +17,10 @@ public:
     LexiconId lookup(std::string_view value) const;
     std::string_view get(LexiconId id) const;
     LexiconId size() const;
+
+    /// Sorted ids of the entries that contain byte `c` (one memchr pass over the
+    /// string data; e.g. the `|`-joined values that multivalue matching splits).
+    std::vector<LexiconId> ids_containing(char c) const;
 
 private:
     MmapFile strings_;       // .lex

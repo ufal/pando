@@ -239,6 +239,66 @@ private:
     size_t i_ = 0;
 };
 
+/// A condition on a positional attribute without a bitmap (`[lemma!="shoe"]`,
+/// `[lemma=/.*e.*/]` with a large id set): a per-id truth table over the lexicon,
+/// applied to the `.dat` ids of each chunk. One table lookup per position — the
+/// dense case, where materialising or probing positions costs far more.
+class BmTable final : public BmExpr {
+public:
+    BmTable(const PositionalAttr& pa, std::shared_ptr<const std::vector<uint8_t>> tab,
+            size_t count, CorpusPos corpus_size)
+        : dat_(pa.dat_data()), width_(pa.dat_width()), tab_(std::move(tab)), n_(corpus_size) {
+        estimate = count;
+    }
+    BmChunk load(size_t c) override {
+        const CorpusPos base = static_cast<CorpusPos>(c) << BitmapIndex::kChunkShift;
+        const CorpusPos end = std::min<CorpusPos>(base + BitmapIndex::kChunk, n_);
+        const CorpusPos xend = std::min<CorpusPos>(base + BitmapIndex::kChunk + 64 * kBmExtra, n_);
+        uint64_t any = fill(base, end, buf_.data(), BitmapIndex::kWords);
+        std::fill(nbuf_, nbuf_ + kBmExtra, 0);
+        if (xend > base + BitmapIndex::kChunk)
+            fill(base + BitmapIndex::kChunk, xend, nbuf_, kBmExtra);
+        BmChunk r;
+        r.w = buf_.data();
+        r.nx = nbuf_;
+        r.zero = any == 0 && nzero();
+        return r;
+    }
+private:
+    /// Bits for positions [a, b) into out (nw words, cleared first); returns the OR.
+    uint64_t fill(CorpusPos a, CorpusPos b, uint64_t* out, size_t nw) const {
+        std::fill(out, out + nw, 0);
+        if (b <= a) return 0;
+        const uint8_t* t = tab_->data();
+        const size_t tn = tab_->size();
+        auto run = [&](auto ptr) {
+            uint64_t orr = 0;
+            const size_t len = static_cast<size_t>(b - a);
+            for (size_t w = 0; w * 64 < len; ++w) {
+                const size_t k1 = std::min<size_t>(64, len - w * 64);
+                uint64_t x = 0;
+                const auto* d = ptr + a + static_cast<CorpusPos>(w * 64);
+                for (size_t k = 0; k < k1; ++k) {
+                    const size_t id = static_cast<size_t>(d[k]);
+                    x |= static_cast<uint64_t>(id < tn ? t[id] : 0) << k;
+                }
+                out[w] = x;
+                orr |= x;
+            }
+            return orr;
+        };
+        switch (width_) {
+            case 1: return run(static_cast<const uint8_t*>(dat_));
+            case 2: return run(static_cast<const uint16_t*>(dat_));
+            default: return run(static_cast<const int32_t*>(dat_));
+        }
+    }
+    const void* dat_;
+    int width_;
+    std::shared_ptr<const std::vector<uint8_t>> tab_;
+    CorpusPos n_;
+};
+
 class BmAnd final : public BmExpr {
 public:
     BmAnd(std::unique_ptr<BmExpr> a, std::unique_ptr<BmExpr> b) : a_(std::move(a)), b_(std::move(b)) {

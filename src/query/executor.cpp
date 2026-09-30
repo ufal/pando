@@ -4473,9 +4473,29 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
             *dense = true;
             return std::make_unique<BmNot>(std::move(e), static_cast<size_t>(corpus_.size()));
         };
+        // No bitmap and too many ids for an OR of postings: a truth table over the
+        // lexicon, applied to the `.dat` ids chunk by chunk (dense `!=`, big regexes)
+        auto table_expr = [&](const auto& ids, bool negated, int64_t known) -> std::unique_ptr<BmExpr> {
+            const size_t V = static_cast<size_t>(pa.lexicon().size());
+            auto tab = std::make_shared<std::vector<uint8_t>>(V, negated ? 1 : 0);
+            size_t cnt = 0;
+            for (auto id : ids) {
+                if (id < 0 || static_cast<size_t>(id) >= V) continue;
+                (*tab)[static_cast<size_t>(id)] = negated ? 0 : 1;
+                if (known < 0) cnt += id_count(static_cast<int64_t>(id));
+            }
+            if (known >= 0) cnt = static_cast<size_t>(known);
+            const size_t N = static_cast<size_t>(corpus_.size());
+            if (negated) cnt = N > cnt ? N - cnt : 0;
+            *dense = true;
+            return std::make_unique<BmTable>(pa, std::move(tab), cnt, corpus_.size());
+        };
         if (ac.id_set_resolved
             && (ac.op == CompOp::EQ || ac.op == CompOp::NEQ || ac.op == CompOp::REGEX)) {
-            if (!bi && ac.id_set.size() > 64) return from_merge_operand();
+            if (!bi && ac.id_set.size() > 64) {
+                if (auto e = from_merge_operand()) return e;
+                return table_expr(ac.id_set, ac.op == CompOp::NEQ, ac.id_set_total);
+            }
             std::vector<int64_t> ids(ac.id_set.begin(), ac.id_set.end());
             auto e = set_expr(ids, ac.id_set_total);
             if (!e) return from_merge_operand();
@@ -4488,16 +4508,43 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
             }
             return std::make_unique<BmPostings>(pa.rev_span_of_id(static_cast<LexiconId>(ac.resolved_id)));
         }
-        // Unresolved EQ / NEQ on a small (bitmap) lexicon: the ids whose value
-        // matches like check_leaf does (multivalue_eq: whole value or a `|` part).
-        if ((ac.op == CompOp::EQ || ac.op == CompOp::NEQ) && bi
-            && !ac.case_insensitive && !ac.diacritics_insensitive) {
+        // Unresolved EQ / NEQ: the ids whose value matches like check_leaf does
+        // (multivalue_eq: the whole value, or one part of a `|`-joined value) —
+        // the exact entry plus the matching `|` entries (found once per attribute).
+        auto mv_eq_ids = [&]() {
             std::vector<int64_t> ids;
             const Lexicon& lex = pa.lexicon();
-            for (LexiconId id = 0; id < lex.size(); ++id)
-                if (multivalue_eq(lex.get(id), ac.value)) ids.push_back(id);
-            auto e = set_expr(ids);
+            const LexiconId exact = lex.lookup(ac.value);
+            if (exact != UNKNOWN_LEX) ids.push_back(exact);
+            const std::string key = name + "\x1f|entries";
+            auto pipes = corpus_.cached_id_set(key);
+            if (!pipes) {
+                auto v = lex.ids_containing('|');
+                auto set = std::make_shared<Corpus::IdSet>(v.begin(), v.end());
+                corpus_.cache_id_set(key, set);
+                pipes = set;
+            }
+            for (int32_t id : *pipes)
+                if (id != exact && multivalue_eq(lex.get(id), ac.value)) ids.push_back(id);
+            std::sort(ids.begin(), ids.end());
+            return ids;
+        };
+        if ((ac.op == CompOp::EQ || ac.op == CompOp::NEQ) && bi
+            && !ac.case_insensitive && !ac.diacritics_insensitive) {
+            auto e = set_expr(mv_eq_ids());
             return ac.op == CompOp::NEQ ? negate(std::move(e)) : std::move(e);
+        }
+        // The same without a bitmap (`[lemma!="shoe"]`): few ids → NOT of their
+        // postings, many → a lexicon truth table.
+        if ((ac.op == CompOp::EQ || ac.op == CompOp::NEQ) && !bi
+            && !ac.case_insensitive && !ac.diacritics_insensitive) {
+            if (auto e = from_merge_operand()) return e;
+            std::vector<int64_t> ids = mv_eq_ids();
+            if (ids.size() <= 64) {
+                auto e = set_expr(ids);
+                return ac.op == CompOp::NEQ ? negate(std::move(e)) : std::move(e);
+            }
+            return table_expr(ids, ac.op == CompOp::NEQ, -1);
         }
         return from_merge_operand();
     };
@@ -4535,8 +4582,12 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                                                        >> BitmapIndex::kChunkShift);
             // Merge / gallop wins while the rarest token has only a few hits per
             // chunk (a chunk costs ~1024 word ANDs per token).
-            const bool use_bm = compiled && !bt.empty()
-                && (bitmap_mode() == BitmapMode::Force || (dense && min_est >= 8 * nchunks));
+            // a lone `[]` (every position) is a popcount of the start masks
+            const bool all_free = compiled && bt.empty() && n == 1;
+            const bool use_bm = compiled
+                && ((!bt.empty()
+                     && (bitmap_mode() == BitmapMode::Force || (dense && min_est >= 8 * nchunks)))
+                    || all_free);
             if (use_bm) {
                 result.plan_path = "seq_bitmap";
                 std::stable_sort(bt.begin(), bt.end(), [](const BmTok& a, const BmTok& b) {
@@ -4587,6 +4638,10 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                     }
                     // AND of the shifted token bitmaps
                     bool any = false;
+                    if (all_free) {
+                        std::fill(acc.begin(), acc.begin() + static_cast<std::ptrdiff_t>(nw), ~uint64_t{0});
+                        any = true;
+                    }
                     for (size_t t = 0; t < bt.size(); ++t) {
                         const BmChunk v = bt[t].e->load(c);
                         if (v.zero) { any = false; break; }
@@ -4717,8 +4772,8 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
         // `[upos="NOUN" & deprel="nsubj"]`): per-chunk AND / OR / NOT + popcount
         // instead of materialising or probing every position. Plain EQ / id-set
         // leaves keep their O(1) / k-way paths below.
-        if (tok_cond && min_rep == 1 && max_rep == 1 && !q.tokens[0].is_dep_subtree
-            && (!tok_cond->is_leaf || tok_cond->leaf.op == CompOp::NEQ)
+        if (min_rep == 1 && max_rep == 1 && !q.tokens[0].is_dep_subtree
+            && (!tok_cond || !tok_cond->is_leaf || tok_cond->leaf.op == CompOp::NEQ)
             && fastpath_mode() == FastPathMode::On && bitmap_mode() != BitmapMode::Off) {
             const std::string eff_within = q.within.empty() ? corpus_.default_within() : q.within;
             const StructuralAttr* wsa = (!eff_within.empty() && corpus_.has_structure(eff_within))
