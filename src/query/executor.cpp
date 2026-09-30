@@ -878,6 +878,26 @@ static void collect_token_and_region_labels(const TokenQuery& q,
     }
 }
 
+/// `count / freq / group by L.attr`: `L` must label a token or region of the query
+/// (an unknown label used to give no buckets at all). `text.langcode` with no `text`
+/// label is the common case: the attribute of the containing region is `text_langcode`.
+static void check_aggregate_labels(const Corpus& corpus, const TokenQuery& q,
+                                   const std::vector<std::string>& fields) {
+    std::unordered_set<std::string> t, r;
+    collect_token_and_region_labels(q, &t, &r);
+    for (const std::string& field : fields) {
+        if (field.find('(') != std::string::npos) continue;   // tcnt(…), year(…), …
+        const size_t dot = field.find('.');
+        if (dot == std::string::npos || dot == 0) continue;
+        const std::string label = field.substr(0, dot);
+        if (label == "match" || t.count(label) || r.count(label)) continue;
+        std::string msg = "by " + field + ": '" + label + "' is not a label in the query";
+        if (corpus.has_structure(label))
+            msg += "; for the " + label + " containing the hit use " + label + "_" + field.substr(dot + 1);
+        throw std::runtime_error(msg);
+    }
+}
+
 static void expect_token_label(const std::string& name, const std::string& ctx,
                                const std::unordered_set<std::string>& token_labels,
                                const std::unordered_set<std::string>& region_labels) {
@@ -7654,6 +7674,8 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
             c->operands.clear();
         }
     } operand_scope(*caches_, !range_);
+    if (!range_ && aggregate_by_fields && !aggregate_by_fields->empty())
+        check_aggregate_labels(corpus_, query, *aggregate_by_fields);
     if (!range_ && !windowed() && max_matches > 0 && !count_total && sample_size == 0
         && !(aggregate_by_fields && !aggregate_by_fields->empty())) {
         if (auto r = execute_progressive_page(query, max_matches, random_seed, skip_name_validation))
