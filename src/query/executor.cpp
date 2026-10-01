@@ -2,6 +2,7 @@
 #include "core/regex_engine.h"
 #include "query/bitmap_expr.h"
 #include "query/flat_agg_counter.h"
+#include "index/head_attr.h"
 #include <tuple>
 #include <algorithm>
 #include <cctype>
@@ -1702,6 +1703,10 @@ std::string normalize_query_attr_name(const Corpus& corpus, const std::string& a
             if (corpus.has_attr(legacy)) return legacy;
             return attr;
         }
+    }
+    if (attr.size() > 5 && attr.compare(0, 5, "head/") == 0) {   // head/lemma = head#lemma
+        std::string h = "head#" + normalize_query_attr_name(corpus, attr.substr(5));
+        if (corpus.has_attr(h)) return h;
     }
     if (attr.size() > 6 && attr.compare(0, 6, "feats#") == 0 && corpus.has_attr(attr))
         return attr;
@@ -7448,6 +7453,164 @@ static bool simplify_bare_strings(const Corpus& corpus, const TokenQuery& q, Tok
     return true;
 }
 
+// Head attributes (head#A, HeadAttr): [P] > [C] (or [C] < [P]) is the one-token
+// [C & P'] on the dependent, P' = P with every attribute A read as head#A — so the
+// one-token fast paths (bitmaps, posting merges, counts) answer it. Only when every
+// leaf of P has a head attribute and nothing else refers to the two tokens apart
+// (labels in aggregates, function / alignment filters, …). PANDO_HEADATTR=off
+// (or PANDO_FASTPATH other than on) keeps the dependency paths.
+static bool head_attrs_enabled() {
+    static const bool on = [] {
+        const char* v = std::getenv("PANDO_HEADATTR");
+        return !(v && (std::string(v) == "off" || std::string(v) == "0"));
+    }();
+    return on && fastpath_mode() == FastPathMode::On;
+}
+
+// A region attribute (`text_lang`) of s / text / doc / the default `within`: equal
+// for a token and its head (same sentence).
+static bool sentence_region_attr(const Corpus& corpus, const std::string& a) {
+    if (corpus.has_attr(a)) return false;
+    for (const auto& ra : corpus.region_attr_names()) {
+        if (ra != a) continue;
+        const std::string sn = ra.substr(0, ra.find('_'));
+        return (sn == "s" || sn == "text" || sn == "doc" || sn == corpus.default_within())
+            && corpus.has_structure(sn) && !corpus.is_nested(sn) && !corpus.is_overlapping(sn);
+    }
+    return false;
+}
+
+static ConditionPtr head_condition(const Corpus& corpus, const ConditionPtr& c, bool& ok) {
+    if (!c || !ok) return nullptr;
+    if (c->is_leaf) {
+        const AttrCondition& ac = c->leaf;
+        const std::string a = normalize_query_attr_name(corpus, ac.attr);
+        const std::string h = HeadAttr::name_for(a);
+        // a region attribute of a structure that holds whole sentences: the head
+        // (same sentence) has the dependent's value, so the leaf stays as it is
+        if (ac.op != CompOp::IN && !ac.is_nvals && sentence_region_attr(corpus, a)) return c;
+        if (ac.op == CompOp::IN || ac.is_nvals || !HeadAttr::source_of(a).empty() || !corpus.has_attr(a)
+            || corpus.is_multivalue(a) || !corpus.has_attr(h)) {
+            ok = false;
+            return nullptr;
+        }
+        AttrCondition m;   // the query's text of the leaf, read on head#A (ids are resolved again)
+        m.attr = h;
+        m.op = ac.op;
+        m.value = ac.value;
+        m.case_insensitive = ac.case_insensitive;
+        m.diacritics_insensitive = ac.diacritics_insensitive;
+        m.regex_full_match = ac.regex_full_match;
+        m.neq_regex = ac.neq_regex;
+        return ConditionNode::make_leaf(std::move(m));
+    }
+    if (c->is_structural || c->is_count || !c->left || !c->right) {
+        ok = false;
+        return nullptr;
+    }
+    auto l = head_condition(corpus, c->left, ok);
+    auto r = head_condition(corpus, c->right, ok);
+    return ok ? ConditionNode::make_branch(c->bool_op, std::move(l), std::move(r)) : nullptr;
+}
+
+// False when the condition cannot hold on a token without a head (head#A = kNoHead
+// for every A): it requires a literal value other than kNoHead.
+static bool may_match_no_head(const ConditionPtr& c) {
+    if (!c) return true;
+    if (c->is_leaf) {
+        const AttrCondition& ac = c->leaf;
+        if (ac.op != CompOp::EQ) return true;
+        std::string v = ac.value, n = HeadAttr::kNoHead;
+        if (ac.case_insensitive) {
+            for (auto& ch : v) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            for (auto& ch : n) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        }
+        return v == n || ac.diacritics_insensitive;
+    }
+    if (c->bool_op == BoolOp::AND) return may_match_no_head(c->left) && may_match_no_head(c->right);
+    return may_match_no_head(c->left) || may_match_no_head(c->right);
+}
+
+// `count by` fields of [P] > [C] for the rewritten one-token query: C.X → X,
+// P.X → head#X, region attributes of sentence-holding structures as they are. An
+// unlabeled positional field (read at the match start, min(P, C)) has no
+// equivalent: false.
+static bool head_attr_fields(const Corpus& corpus, const std::vector<std::string>& in,
+                             const std::string& pname, const std::string& cname,
+                             std::vector<std::string>& out) {
+    out.clear();
+    for (const auto& f : in) {
+        if (f.find('(') != std::string::npos) return false;
+        std::string label, rest = f;
+        if (const size_t dot = f.find('.'); dot != std::string::npos) {
+            label = f.substr(0, dot);
+            rest = f.substr(dot + 1);
+            if (label.empty() || (label != pname && label != cname)) return false;
+        }
+        if (sentence_region_attr(corpus, rest)) {
+            out.push_back(rest);
+            continue;
+        }
+        if (label.empty()) return false;
+        if (label == cname) {
+            out.push_back(rest);
+            continue;
+        }
+        const std::string a = normalize_query_attr_name(corpus, rest);
+        if (!corpus.has_attr(a) || !corpus.has_attr(HeadAttr::name_for(a))) return false;
+        out.push_back(HeadAttr::name_for(a));
+    }
+    return true;
+}
+
+static bool rewrite_head_attrs(const Corpus& corpus, const TokenQuery& q, TokenQuery& out,
+                               bool& parent_first) {
+    if (q.tokens.size() != 2 || q.relations.size() != 1) return false;
+    const RelationType rt = q.relations[0].type;
+    if (rt != RelationType::GOVERNS && rt != RelationType::GOVERNED_BY) return false;
+    if (!corpus.has_deps() || !corpus.deps().head_rel_data()) return false;
+    for (const auto& t : q.tokens)
+        if (t.has_repetition() || t.is_anchor() || t.is_dep_subtree || t.bare_string || !t.where_refs.empty())
+            return false;
+    if (q.not_within || q.within_having || !q.containing_clauses.empty()
+        || !q.global_alignment_filters.empty() || !q.global_function_filters.empty()
+        || !q.position_orders.empty())
+        return false;
+    parent_first = rt == RelationType::GOVERNS;
+    const QueryToken& P = q.tokens[parent_first ? 0 : 1];
+    const QueryToken& C = q.tokens[parent_first ? 1 : 0];
+    if (!P.name.empty() && P.name == C.name) return false;
+    bool ok = true;
+    ConditionPtr hp = head_condition(corpus, P.conditions, ok);
+    if (!ok) return false;
+    if (may_match_no_head(P.conditions)) {
+        std::string guard;   // any head attribute: head#A != kNoHead = "has a head"
+        for (const auto& a : corpus.attr_names())
+            if (!HeadAttr::source_of(a).empty()) { guard = a; break; }
+        if (guard.empty()) return false;
+        AttrCondition g;
+        g.attr = guard;
+        g.op = CompOp::NEQ;
+        g.value = HeadAttr::kNoHead;
+        auto gn = ConditionNode::make_leaf(std::move(g));
+        hp = hp ? ConditionNode::make_branch(BoolOp::AND, std::move(hp), std::move(gn)) : std::move(gn);
+    }
+    out = TokenQuery{};
+    QueryToken t = C;
+    t.conditions = t.conditions ? ConditionNode::make_branch(BoolOp::AND, t.conditions, hp) : hp;
+    out.tokens.push_back(std::move(t));
+    out.within = q.within;
+    // region filters: the head shares the dependent's sentence (as on the dep paths)
+    for (auto f : q.global_region_filters) {
+        if (!f.anchor_name.empty()) {
+            if (f.anchor_name != P.name && f.anchor_name != C.name) return false;
+            f.anchor_name = C.name;
+        }
+        out.global_region_filters.push_back(std::move(f));
+    }
+    return true;
+}
+
 MatchSet QueryExecutor::execute(const TokenQuery& query,
                                 size_t max_matches,
                                 bool count_total,
@@ -7460,6 +7623,30 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
     if (TokenQuery simple; simplify_bare_strings(corpus_, query, simple))
         return execute(simple, max_matches, count_total, max_total_cap, sample_size, random_seed, num_threads,
                        aggregate_by_fields, skip_name_validation);
+    if (head_attrs_enabled() && !hit_sink_) {
+        TokenQuery one;
+        bool parent_first = true;
+        std::vector<std::string> fields;
+        const bool agg = aggregate_by_fields && !aggregate_by_fields->empty();
+        if (rewrite_head_attrs(corpus_, query, one, parent_first)
+            && (!agg || head_attr_fields(corpus_, *aggregate_by_fields,
+                                         query.tokens[parent_first ? 0 : 1].name,
+                                         query.tokens[parent_first ? 1 : 0].name, fields))) {
+            MatchSet r = execute(one, max_matches, count_total, max_total_cap, sample_size, random_seed,
+                                 num_threads, agg ? &fields : nullptr, skip_name_validation);
+            const int16_t* hrel = corpus_.deps().head_rel_data();
+            for (auto& m : r.matches) {
+                const CorpusPos c = m.positions[0];
+                const CorpusPos h = c + hrel[c];
+                m.positions = parent_first ? PosVec{h, c} : PosVec{c, h};
+                m.span_ends = m.positions;
+            }
+            r.num_tokens = 2;
+            r.seed_token = parent_first ? 1 : 0;
+            r.plan_path = "head_attr:" + r.plan_path;
+            return r;
+        }
+    }
     // Materialised merge operands (regex / %c / AND postings) are kept for the
     // whole query: several fast paths are tried in turn and each asked for the
     // same operands (a two-regex sequence built each list twice), and the ranges

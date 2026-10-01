@@ -3,6 +3,7 @@
 #include "index/dependency_index.h"
 #include "index/structural_attr.h"
 #include "index/fold_index.h"
+#include "index/head_attr.h"
 #include "index/dep_pair_index.h"
 #include "index/bitmap_index.h"
 #include "corpus/corpus.h"
@@ -297,7 +298,8 @@ static void record_upgrade(const std::string& dir) {
 static int upgrade_index(const std::string& dir, bool quiet = false,
                          const std::string& dep_pairs = kDefaultDepPairs,
                          const std::string& bitmaps = kDefaultBitmaps,
-                         const std::string& packed = "none", bool drop_rev = false) {
+                         const std::string& packed = "none", bool drop_rev = false,
+                         const std::string& head_attrs = "none") {
     auto t0 = std::chrono::steady_clock::now();
     auto secs = [&] {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -319,6 +321,29 @@ static int upgrade_index(const std::string& dir, bool quiet = false,
         }
     }
     try {
+        if (head_attrs != "none" && !head_attrs.empty()) {
+            // before the corpus is opened for folds / bitmaps / packed postings,
+            // which then cover the head attributes too
+            pando::Corpus src;
+            src.open(dir);
+            if (!src.has_deps() || !src.deps().head_rel_data()) {
+                std::cerr << "Error: --head-attrs: the corpus has no dependency index\n";
+                return 1;
+            }
+            for (const auto& a : split_list(head_attrs)) {
+                if (pando::HeadAttr::up_to_date(src, a)) {
+                    if (!quiet) std::cerr << "Head attribute " << pando::HeadAttr::name_for(a) << " up to date\n";
+                    continue;
+                }
+                std::string err;
+                if (!pando::HeadAttr::build(src, a, &err)) {
+                    std::cerr << "Error: " << err << "\n";
+                    return 1;
+                }
+                if (!quiet)
+                    std::cerr << "Wrote " << dir << "/" << pando::HeadAttr::name_for(a) << " (" << secs() << " s)\n";
+            }
+        }
         pando::Corpus corpus;
         corpus.open(dir);
         const pando::FoldMode modes[] = {pando::FoldMode::Lower, pando::FoldMode::NoAccents,
@@ -396,12 +421,15 @@ int main(int argc, char* argv[]) {
         std::string bitmaps = kDefaultBitmaps;
         std::string packed = "none";
         bool drop_rev = false;
+        std::string head_attrs = "none";
         for (int i = 3; i < argc; ++i) {
             const std::string a = argv[i];
             if (a == "--packed-rev" && i + 1 < argc && argv[i + 1][0] != '-') { packed = argv[++i]; continue; }
             if (a == "--packed-rev") { packed = "auto"; continue; }
             if (a.rfind("--packed-rev=", 0) == 0) { packed = a.substr(13); continue; }
             if (a == "--drop-rev") { drop_rev = true; continue; }
+            if (a == "--head-attrs" && i + 1 < argc) { head_attrs = argv[++i]; continue; }
+            if (a.rfind("--head-attrs=", 0) == 0) { head_attrs = a.substr(13); continue; }
             if (a == "--dep-pairs" && i + 1 < argc) pairs = argv[++i];
             else if (a.rfind("--dep-pairs=", 0) == 0) pairs = a.substr(12);
             else if (a == "--bitmaps" && i + 1 < argc) bitmaps = argv[++i];
@@ -412,7 +440,7 @@ int main(int argc, char* argv[]) {
             }
         }
         if (drop_rev && packed == "none") packed = "auto";
-        return upgrade_index(argv[2], false, pairs, bitmaps, packed, drop_rev);
+        return upgrade_index(argv[2], false, pairs, bitmaps, packed, drop_rev, head_attrs);
     }
     bool split_feats = false;
     bool format_vertical = false;
@@ -472,7 +500,10 @@ int main(int argc, char* argv[]) {
                   << "    --packed-rev [auto|none|A[,B...]]  block-compressed postings (<attr>.rev.pfb,\n"
                   << "                    P4.2; auto = every single-valued attribute; default none)\n"
                   << "    --drop-rev      remove the plain <attr>.rev once its packed postings are\n"
-                  << "                    verified (implies --packed-rev auto; queries then decode)\n";
+                  << "                    verified (implies --packed-rev auto; queries then decode)\n"
+                  << "    --head-attrs A[,B...]  head attributes head#A (A of each token's\n"
+                  << "                    dependency head, e.g. head#upos, head#lemma): [X] > [Y]\n"
+                  << "                    becomes a one-token query on the dependent (default none)\n";
         return 1;
     }
 

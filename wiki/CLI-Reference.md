@@ -79,6 +79,10 @@ for `--upgrade`:
 - `--packed-rev [auto|none|A[,B...]]` — also write block-compressed postings
   (`<attr>.rev.pfb`) for every single-valued positional attribute (`auto`, the
   value when the option is given without one) or the ones listed. Default `none`.
+- `--head-attrs A[,B...]` — head attributes `head#A` (the attribute of each
+  token's dependency head; see
+  [Dependency queries](Dependency-Queries.md#head-attributes-headlemma)), built
+  before folds, bitmaps and packed postings so these cover them too. Default none.
 - `--drop-rev` — after verifying that the packed postings decode to the same
   positions, remove the plain `<attr>.rev` files (implies `--packed-rev auto`).
   Saves disk space; queries then decode postings (see
@@ -87,7 +91,8 @@ for `--upgrade`:
 Environment for `pando`, `pando-server` and embedders: `PANDO_REV=auto|raw|packed`
 (`auto`: `.rev` when present, otherwise `.rev.pfb`; `packed`: `.rev.pfb` whenever
 it is present and up to date) and `PANDO_REV_CACHE_MB` (cache of decoded long
-lists, default 256).
+lists, default 256). `PANDO_HEADATTR=off`: dependency queries do not use head
+attributes.
 
 ## `pando-check`
 
