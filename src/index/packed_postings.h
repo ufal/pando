@@ -121,7 +121,8 @@ public:
     }
 
     /// Decode block b of `id`'s list into out[0..n); returns n (<= kBlock).
-    size_t decode_block(int64_t id, size_t count, size_t b, CorpusPos* out) const {
+    template <typename T = CorpusPos>
+    size_t decode_block(int64_t id, size_t count, size_t b, T* out) const {
         const uint8_t* p = data_of(id);
         if (count <= kBlock) {
             const CorpusPos first = static_cast<CorpusPos>(read_varint(p));
@@ -154,17 +155,19 @@ private:
             s += 7;
         }
     }
-    /// n positions from `first` and the gaps at `g` (width w) into out.
-    static void unpack(CorpusPos first, uint32_t w, const uint8_t* g, size_t n, CorpusPos* out) {
+    /// n positions from `first` and the gaps at `g` (width w) into out (T: the
+    /// position type, or the 2 / 4-byte `.rev` width the lazy lists keep).
+    template <typename T>
+    static void unpack(CorpusPos first, uint32_t w, const uint8_t* g, size_t n, T* out) {
         CorpusPos p = first;
-        out[0] = p;
+        out[0] = static_cast<T>(p);
         if (w == 0) {
-            for (size_t i = 1; i < n; ++i) out[i] = ++p;
+            for (size_t i = 1; i < n; ++i) out[i] = static_cast<T>(++p);
         } else if (w == kRawWidth) {
             for (size_t i = 1; i < n; ++i) {
                 int64_t v;
                 std::memcpy(&v, g + (i - 1) * 8, 8);
-                out[i] = v;
+                out[i] = static_cast<T>(v);
             }
         } else {
             const uint64_t mask = (uint64_t{1} << w) - 1;
@@ -173,7 +176,7 @@ private:
                 uint64_t x;
                 std::memcpy(&x, g + (bit >> 3), 8);   // little endian
                 p += static_cast<CorpusPos>((x >> (bit & 7)) & mask) + 1;
-                out[i] = p;
+                out[i] = static_cast<T>(p);
             }
         }
     }

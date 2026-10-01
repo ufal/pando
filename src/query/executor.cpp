@@ -417,10 +417,46 @@ struct FlatRegionCursor {
     }
 };
 
+/// gallop_ptr on a lazily decoded list: the skip table finds the block.
+template<typename T>
+static inline size_t gallop_ptr(const LazyAcc<T>& a, size_t n, size_t lo, CorpusPos target) {
+    return a.lp->lower_bound(a.base + lo, a.base + n, target) - a.base;
+}
+
+/// One list 8x longer than the other: the kernels gallop into the long one, so
+/// it is read sparsely (with_accs `sparse`).
+static inline bool skewed_lists(const RevSpan& a, const RevSpan& b) {
+    return a.count > (b.count << 3) || b.count > (a.count << 3);
+}
+
+/// f(a, b) with element accessors of the two spans (same width; false if not).
+/// sparse: packed postings as LazyAcc<T> (P4.2b: the kernel decodes only the
+/// blocks it reads — region intervals, gallops); otherwise, for kernels that read
+/// every posting (often several times), the decoded arrays (`const T*`, whole()):
+/// a block-state test per read costs more than decoding everything once.
+template <typename F>
+static bool with_accs(const RevSpan& A, const RevSpan& B, bool sparse, F&& f) {
+    if (A.width != B.width) return false;
+    auto go = [&](auto tag) {
+        using T = decltype(tag);
+        if (!sparse) {
+            f(static_cast<const T*>(A.whole()), static_cast<const T*>(B.whole()));
+            return;
+        }
+        A.template with_acc<T>([&](const auto& a) { B.template with_acc<T>([&](const auto& b) { f(a, b); }); });
+    };
+    switch (A.width) {
+        case 2: go(int16_t{}); return true;
+        case 4: go(int32_t{}); return true;
+        case 8: go(int64_t{}); return true;
+        default: return false;
+    }
+}
+
 /// Balanced two-pointer shift-merge on typed posting arrays (width dispatched once
 /// by the caller instead of a switch per element in RevSpan::at).
-template<typename T, typename Emit>
-static bool shift_merge_typed(const T* a, size_t na, const T* b, size_t nb, int64_t delta,
+template<typename AccA, typename AccB, typename Emit>
+static bool shift_merge_typed(const AccA& a, size_t na, const AccB& b, size_t nb, int64_t delta,
                               Emit& emit) {
     size_t ia = 0, ib = 0;
     while (ia < na && ib < nb) {
@@ -480,16 +516,10 @@ static bool shift_merge_rev(const RevSpan& A, const RevSpan& B, int64_t delta, E
         return true;
     }
     // Balanced two-pointer merge
-    if (A.width == B.width) {
-        switch (A.width) {
-            case 2: return shift_merge_typed(static_cast<const int16_t*>(A.whole()), na,
-                                             static_cast<const int16_t*>(B.whole()), nb, delta, emit);
-            case 4: return shift_merge_typed(static_cast<const int32_t*>(A.whole()), na,
-                                             static_cast<const int32_t*>(B.whole()), nb, delta, emit);
-            case 8: return shift_merge_typed(static_cast<const int64_t*>(A.whole()), na,
-                                             static_cast<const int64_t*>(B.whole()), nb, delta, emit);
-            default: break;
-        }
+    {
+        bool r = true;
+        if (with_accs(A, B, false, [&](const auto& a, const auto& b) { r = shift_merge_typed(a, na, b, nb, delta, emit); }))
+            return r;
     }
     while (ia < na && ib < nb) {
         CorpusPos a = A.at(ia);
@@ -513,7 +543,7 @@ static void rev_span_to_bitset(const RevSpan& span, std::vector<uint64_t>& bits,
                                CorpusPos corpus_size) {
     bits.assign(static_cast<size_t>((corpus_size + 63) / 64), 0);
     uint64_t* b = bits.data();
-    auto fill = [&](const auto* p, size_t n) {
+    auto fill = [&](const auto& p, size_t n) {
         for (size_t i = 0; i < n; ++i) {
             const CorpusPos v = static_cast<CorpusPos>(p[i]);
             if (v < 0 || v >= corpus_size) continue;
@@ -6653,7 +6683,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                     auto bit = [](const std::vector<uint64_t>& b, CorpusPos p) -> bool {
                         return (b[static_cast<size_t>(p) >> 6] >> (static_cast<size_t>(p) & 63)) & 1u;
                     };
-                    auto run = [&](const auto* cp, size_t cn, const auto* pp, size_t pn) {
+                    auto run = [&](const auto& cp, size_t cn, const auto& pp, size_t pn) {
                         SlidingBitset par;
                         size_t pi = 0;            // next parent posting to load
                         size_t cnt = 0;
@@ -6871,14 +6901,9 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                         if (max_total_cap > 0 && result.total_count > max_total_cap)
                             result.total_count = max_total_cap;
                     } else if (child_span.width == parent_span.width) {
-                        switch (child_span.width) {
-                            case 2: run(static_cast<const int16_t*>(child_span.whole()), child_span.count,
-                                        static_cast<const int16_t*>(parent_span.whole()), parent_span.count); break;
-                            case 4: run(static_cast<const int32_t*>(child_span.whole()), child_span.count,
-                                        static_cast<const int32_t*>(parent_span.whole()), parent_span.count); break;
-                            default: run(static_cast<const int64_t*>(child_span.whole()), child_span.count,
-                                         static_cast<const int64_t*>(parent_span.whole()), parent_span.count); break;
-                        }
+                        with_accs(child_span, parent_span, mask_iv || skewed_lists(child_span, parent_span), [&](const auto& c, const auto& p) {
+                            run(c, child_span.count, p, parent_span.count);
+                        });
                     } else {
                         std::vector<int64_t> c64(child_span.count), p64(parent_span.count);
                         for (size_t i = 0; i < child_span.count; ++i) c64[i] = child_span.at(i);
@@ -6984,7 +7009,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                     };
 
                     size_t cnt = 0;           // hits counted after the page is full
-                    auto run = [&](const auto* Dp, const auto* Op) {
+                    auto run = [&](const auto& Dp, const auto& Op) {
                         const size_t nd = D.count, no = O.count;
                         const bool gallop_other = no > (nd << 3);
                         size_t id = 0, io = 0, si = 0;
@@ -7067,11 +7092,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                             io = jo;
                         }
                     };
-                    switch (D.width) {
-                        case 2: run(static_cast<const int16_t*>(D.whole()), static_cast<const int16_t*>(O.whole())); break;
-                        case 4: run(static_cast<const int32_t*>(D.whole()), static_cast<const int32_t*>(O.whole())); break;
-                        default: run(static_cast<const int64_t*>(D.whole()), static_cast<const int64_t*>(O.whole())); break;
-                    }
+                    with_accs(D, O, mask_iv || skewed_lists(D, O), [&](const auto& d, const auto& o) { run(d, o); });
                     result.total_count += cnt;
                     if (max_total_cap > 0 && result.total_count > max_total_cap)
                         result.total_count = max_total_cap;
@@ -7203,7 +7224,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                         return !(reached_limit() || reached_total_cap());
                     };
                     size_t cnt = 0;
-                    auto run = [&](const auto* Gp, size_t gn, const auto* Dp, size_t dn) {
+                    auto run = [&](const auto& Gp, size_t gn, const auto& Dp, size_t dn) {
                         bool counting = false, stop = false;
                         size_t i = 0, ds = 0;
                         while (i < gn && !stop) {
@@ -7244,14 +7265,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                         }
                     };
                     if (G.width == Dd.width) {
-                        switch (G.width) {
-                            case 2: run(static_cast<const int16_t*>(G.whole()), G.count,
-                                        static_cast<const int16_t*>(Dd.whole()), Dd.count); break;
-                            case 4: run(static_cast<const int32_t*>(G.whole()), G.count,
-                                        static_cast<const int32_t*>(Dd.whole()), Dd.count); break;
-                            default: run(static_cast<const int64_t*>(G.whole()), G.count,
-                                         static_cast<const int64_t*>(Dd.whole()), Dd.count); break;
-                        }
+                        with_accs(G, Dd, mask_iv || skewed_lists(G, Dd), [&](const auto& g, const auto& d) { run(g, G.count, d, Dd.count); });
                     } else {
                         std::vector<int64_t> g64(G.count), d64(Dd.count);
                         for (size_t k = 0; k < G.count; ++k) g64[k] = G.at(k);

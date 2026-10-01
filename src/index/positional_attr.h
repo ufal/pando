@@ -12,6 +12,20 @@
 
 namespace pando {
 
+class LazyPostings;
+
+/// P4.2b: typed element access to a lazily decoded list from index `base`: the
+/// block of an element is decoded on first touch. Used like a `const T*` by the
+/// posting kernels (operator[]), so they need not decode the whole list first.
+template <typename T>
+struct LazyAcc {
+    const LazyPostings* lp;
+    const T* buf;
+    const std::atomic<uint8_t>* st;
+    size_t base;
+    inline T operator[](size_t i) const;
+};
+
 /// P4.2b: one id's packed postings (`.rev.pfb`), decoded block by block (128
 /// positions) on first access into a buffer of the attribute's width — a page,
 /// a gallop or a count over intervals decode only the blocks they touch. Safe for
@@ -39,10 +53,15 @@ public:
     /// finds the block, so only that block is decoded.
     size_t lower_bound(size_t lo, size_t end, CorpusPos target) const;
     size_t bytes() const { return count_ * static_cast<size_t>(width_); }
+    /// Typed accessor from index `base` (T of the list's width).
+    template <typename T>
+    LazyAcc<T> acc(size_t base) const {
+        return LazyAcc<T>{this, reinterpret_cast<const T*>(buf_.get()), state_.get(), base};
+    }
+    static constexpr uint8_t kNone = 0, kBusy = 1, kReady = 2;
+    void ensure(size_t b) const;   // decode block b (once; concurrent callers wait)
 
 private:
-    static constexpr uint8_t kNone = 0, kBusy = 1, kReady = 2;
-    void ensure(size_t b) const;
     CorpusPos block_first(size_t b) const { return pk_->block_first(id_, count_, b); }
 
     std::shared_ptr<const PackedPostings> pk_;
@@ -54,6 +73,14 @@ private:
     std::unique_ptr<std::atomic<uint8_t>[]> state_;
     mutable std::atomic<bool> all_{false};
 };
+
+template <typename T>
+inline T LazyAcc<T>::operator[](size_t i) const {
+    const size_t j = base + i;
+    const size_t b = j / PackedPostings::kBlock;
+    if (st[b].load(std::memory_order_acquire) != LazyPostings::kReady) lp->ensure(b);
+    return buf[j];
+}
 
 /// Zero-copy view of one lexicon id's sorted `.rev` postings (Manatee-style merge
 /// operand): a typed array (`data`, the mmapped `.rev` or a materialised list),
@@ -86,6 +113,13 @@ struct RevSpan {
     size_t lower_bound(size_t lo, CorpusPos target) const;
     /// Sub-span [lo, hi) (zero-copy).
     RevSpan slice(size_t lo, size_t hi) const;
+    /// f(acc) with an element accessor of type T (the span's width): `const T*` for
+    /// an array, LazyAcc<T> for packed postings (blocks decoded as they are read).
+    template <typename T, typename F>
+    decltype(auto) with_acc(F&& f) const {
+        if (lazy) return f(lazy->acc<T>(base));
+        return f(static_cast<const T*>(data));
+    }
     bool empty() const { return count == 0 || (data == nullptr && lazy == nullptr); }
 };
 
