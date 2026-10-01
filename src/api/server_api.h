@@ -16,6 +16,7 @@
 // cancels its background counts and joins their workers; it must not race with
 // a handle() still running (see busy()).
 
+#include "api/corpus_warm.h"
 #include "api/query_jobs.h"
 #include "api/limits.h"
 #include "api/query_json.h"
@@ -63,6 +64,10 @@ struct ServerConfig {
     /// Raw JSON members added to /health, /version and /info "server" (no braces,
     /// no leading comma), e.g. `"embedded_in": "fqs 0.4"`.
     std::string extra_server_fields;
+    /// Read the index files most queries touch (WarmLevel::Hot) or all of them
+    /// into the page cache in the background when the server starts; POST /warm
+    /// starts it later (e.g. when a front-end selects the corpus).
+    WarmLevel warm = WarmLevel::None;
 };
 
 struct ServerResponse {
@@ -74,7 +79,7 @@ struct ServerResponse {
 /// Server options as JSON (the C ABI's options_json, pando-server --limits FILE):
 /// preload, total_workers, result_cache, result_ttl, abandon_after, query_timeout_ms, cache_mb,
 /// threads, query_threads, session_ttl, max_sessions, session_memory_mb,
-/// session_max_hits, embedded_in, debug_total_delay_ms, and
+/// session_max_hits, embedded_in, debug_total_delay_ms, warm ("hot" / "all"), and
 /// "tiers": {"<name>": {limits.h members}, …}, "default_tier", "trust_tier".
 /// Members that are absent keep the values of `base`.
 ServerConfig parse_server_options(const std::string& json, ServerConfig base = {});
@@ -130,6 +135,7 @@ private:
     ServerResponse status(const std::map<std::string, std::string>& params);
     ServerResponse cancel(const std::map<std::string, std::string>& params, const std::string& body);
     ServerResponse list_jobs();
+    ServerResponse warm(const std::string& body, bool start);
     std::string server_fields() const;
 
     /// The tier of a request and what it may do (ServerConfig::tiers).
@@ -169,6 +175,7 @@ private:
     std::multimap<std::chrono::steady_clock::time_point, Deadline*> deadlines_;
     bool wd_stop_ = false;
     std::thread watchdog_;
+    CorpusWarmer warmer_{corpus_};   // last: stopped first
 };
 
 } // namespace pando

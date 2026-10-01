@@ -365,6 +365,47 @@ def check_concurrent(srv, queries, label, offsets):
         check(v == want[q], f"{label} concurrent answers differ: {q} #{k}")
 
 
+def check_warm(exe, corpus, label):
+    """--warm hot reads the hot index files in the background; POST /warm all
+    extends it to every file; the answers are the same as without."""
+    def wait_done(srv):
+        w = {}
+        for _ in range(400):
+            st, r = srv.get("/warm")
+            w = r.get("warm", {})
+            if w.get("state") != "running":
+                break
+            time.sleep(0.05)
+        return w
+    plain = Server(exe, corpus)
+    srv = Server(exe, corpus, "--warm", "hot")
+    try:
+        w = wait_done(srv)
+        check(w.get("state") == "done" and w.get("level") == "hot" and w.get("files", 0) > 5
+              and w.get("bytes_done") == w.get("bytes"), f"{label}: --warm hot: {w}")
+        hot_files = w.get("files", 0)
+        st, h = srv.get("/health")
+        check(h.get("warm", {}).get("state") == "done", f"{label}: /health warm: {h.get('warm')}")
+        st, r = srv.post("/warm", {"level": "all"})
+        check(st == 200 and r.get("warm", {}).get("level") == "all", f"{label}: POST /warm all: {st} {r}")
+        w = wait_done(srv)
+        check(w.get("state") == "done" and w.get("files", 0) > hot_files and w.get("bytes_done") == w.get("bytes"),
+              f"{label}: warm all: {w}")
+        st, r = srv.post("/warm", {"level": "lukewarm"})
+        check(st == 400, f"{label}: bad level: {st} {r}")
+        st, r = plain.get("/warm")
+        check(st == 200 and r.get("warm", {}).get("state") == "idle", f"{label}: no warm: {r}")
+        for q in ('[upos="NOUN"]', '[upos="VERB"] > [deprel="nsubj"]', '[upos="DET"] [upos="NOUN"]'):
+            body = {"query": q, "limit": 5, "total": True}
+            a, b = plain.post("/query", body), srv.post("/query", body)
+            check(a[0] == b[0] == 200 and a[1].get("result", {}).get("hits") == b[1].get("result", {}).get("hits")
+                  and a[1]["result"]["page"]["total"] == b[1]["result"]["page"]["total"],
+                  f"{label}: {q} differs after warming")
+    finally:
+        srv.close()
+        plain.close()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--server", required=True)
@@ -398,6 +439,7 @@ def main():
         finally:
             srv.close()
         check_limits(opts.server, corpus, "limits", big_q)
+        check_warm(opts.server, corpus, "warm")
 
     print(f"{'OK' if not FAILS else 'FAILED'}: {len(FAILS)} failures")
     return 1 if FAILS else 0

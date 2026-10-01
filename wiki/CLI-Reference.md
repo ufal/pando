@@ -112,6 +112,7 @@ pando-server <corpus_dir> [port] [threads] [--preload] [options]
 | --- | --- |
 | `port`, `threads` | Listen port (default 8765) and request threads |
 | `--preload` | Read all index pages at startup (default: lazy mmap) |
+| `--warm hot\|all\|none` | Read the index files most queries touch (`hot`) or all of them into the page cache in the background after startup (default `none`; `POST /warm` later; see [Embedding the server](Embedding-the-Server.md)) |
 | `--total-workers N` | Concurrent background counts (default 2) |
 | `--result-cache N` | Cached query results / totals (default 512; unused finished ones evicted first) |
 | `--cache-mb MB` | Memory for recent results reused by repeated requests (default 128 per corpus; 0 = off): pages of `/query` and of stored sets, `count / group / freq / coll / dcoll / tabulate / size` results, sort indexes and sorted pages (blocks of 1024 sorted hits). Shared by all requests and sessions, keyed on the query text, the parser options and the options a result depends on; queries that use the session (labels of earlier statements, `where` sets, `dep_subtree` sources) are not cached. `/health` reports `cache` (entries, bytes, hits, misses) |
@@ -180,6 +181,7 @@ default 2^20 tokens) override, for tests. `--timing` reports the ranges as
 | `GET /session?session_id=` | The session's hit sets (query, materialised, hits, total, bytes, sort steps, aliases) |
 | `POST /session/close` | Close a session (`session_id` in the body or the query string) |
 | `GET /sessions` | Open sessions, their memory, the budget |
+| `POST /warm`, `GET /warm` | Start reading the hot (`{"level": "hot"}`, default) or all (`"all"`) index files into the page cache in the background, e.g. when a front-end selects the corpus; the warm-up status |
 | `GET /info`, `/values/ATTR`, `/regions/TYPE`, `/context?pos=`, `/health` | Corpus description, values, regions, KWIC context |
 
 ### Sessions: stored hit sets (P6.1)

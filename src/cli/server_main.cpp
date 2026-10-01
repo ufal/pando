@@ -57,7 +57,9 @@ int main(int argc, char* argv[]) {
                   << "    --limits FILE           JSON server options: {\"tiers\": {\"visitor\": {\"timeout_ms\": …,\n"
                   << "                            \"max_count_hits\": …, \"deny\": [\"transitive\"]}, …},\n"
                   << "                            \"default_tier\": \"visitor\", \"trust_tier\": true} (wiki: CLI reference)\n"
-                  << "    --trust-tier            honour the request's \"tier\" (only behind a front-end that sets it)\n";
+                  << "    --trust-tier            honour the request's \"tier\" (only behind a front-end that sets it)\n"
+                  << "    --warm hot|all|none     read the index files most queries touch (hot) or all\n"
+                  << "                            into the page cache in the background (POST /warm later)\n";
         return 1;
     }
     std::string corpus_dir = argv[1];
@@ -72,6 +74,8 @@ int main(int argc, char* argv[]) {
     size_t cache_bytes = ServerConfig{}.cache_bytes;
     std::string limits_file;
     bool trust_tier = false;
+    WarmLevel warm = WarmLevel::None;
+    bool warm_given = false;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
         auto num_arg = [&](long long& out) -> bool {
@@ -106,6 +110,15 @@ int main(int argc, char* argv[]) {
         }
         if (a == "--preload") {
             preload = true;
+            continue;
+        }
+        if (a == "--warm") {
+            if (i + 1 >= argc || !parse_warm_level(argv[i + 1], warm)) {
+                std::cerr << "--warm needs hot, all or none\n";
+                return 1;
+            }
+            ++i;
+            warm_given = true;
             continue;
         }
         if (a == "--limits") {
@@ -164,6 +177,7 @@ int main(int argc, char* argv[]) {
         cfg = parse_server_options(buf.str(), cfg);
     }
     if (trust_tier) cfg.trust_tier = true;
+    if (warm_given) cfg.warm = warm;
     for (const auto& [name, lim] : cfg.tiers)
         for (const auto& f : lim.deny)
             if (std::find(limit_features().begin(), limit_features().end(), f) == limit_features().end())

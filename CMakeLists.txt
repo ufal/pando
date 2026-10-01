@@ -176,7 +176,7 @@ add_executable(cwb-import src/cli/cwb_import_main.cpp)
 target_link_libraries(cwb-import PRIVATE pando_core)
 
 # API layer: query execution + JSON (used by CLI and server)
-add_library(pando_api STATIC src/api/query_json.cpp src/api/program_api.cpp src/api/query_jobs.cpp src/api/group_counts.cpp src/api/coll_counts.cpp src/api/result_cache.cpp
+add_library(pando_api STATIC src/api/query_json.cpp src/api/program_api.cpp src/api/query_jobs.cpp src/api/group_counts.cpp src/api/coll_counts.cpp src/api/result_cache.cpp src/api/corpus_warm.cpp
     src/api/server_api.cpp src/api/server_capi.cpp src/api/sessions.cpp
     src/api/limits.cpp)
 target_include_directories(pando_api PUBLIC src)

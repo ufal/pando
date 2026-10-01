@@ -173,6 +173,10 @@ ServerConfig parse_server_options(const std::string& json_in, ServerConfig cfg) 
     if (has("session_memory_mb")) cfg.sessions.memory_budget = json_extract_num(opts, "session_memory_mb", 2048) << 20;
     if (has("session_max_hits")) cfg.sessions.max_hits = json_extract_num(opts, "session_max_hits", 5000000);
     if (has("cache_mb")) cfg.cache_bytes = json_extract_num(opts, "cache_mb", 128) << 20;
+    if (has("warm")) {
+        WarmLevel w;
+        if (parse_warm_level(json_extract_str(opts, "warm"), w)) cfg.warm = w;
+    }
     const std::string emb = json_extract_str(opts, "embedded_in");
     if (!emb.empty()) cfg.extra_server_fields = "\"embedded_in\": " + jstr(emb);
     if (has("default_tier")) cfg.default_tier = json_extract_str(opts, "default_tier");
@@ -231,6 +235,7 @@ ServerApi::ServerApi(Corpus& corpus, ServerConfig cfg)
     started_iso_ = buf;
     program_session_.set_result_cache(cache_.max_bytes() ? &cache_ : nullptr);
     watchdog_ = std::thread([this] { watchdog_loop(); });
+    warmer_.start(cfg_.warm);
 }
 
 ServerApi::~ServerApi() {
@@ -249,6 +254,7 @@ const std::vector<ServerApi::Route>& ServerApi::routes() {
         {"GET", "/regions/*"}, {"GET", "/context"}, {"POST", "/run"}, {"POST", "/query"},
         {"GET", "/status"},  {"POST", "/cancel"}, {"GET", "/jobs"},
         {"POST", "/session"}, {"GET", "/session"}, {"POST", "/session/close"}, {"GET", "/sessions"},
+        {"GET", "/warm"}, {"POST", "/warm"},
     };
     return r;
 }
@@ -269,6 +275,7 @@ const std::vector<std::string>& ServerApi::features() {
         "sessions",         // POST /session; "session_id" on /run, /query ("name", "from") (P6.1)
         "tiers",            // "tier" per request: timeouts, hit limits, denied features (limits.h)
         "page_cache",       // pages, command results and sort indexes reused across requests (P6.4)
+        "warm",             // GET / POST /warm: index files read into the page cache in the background
     };
     return f;
 }
@@ -306,6 +313,7 @@ std::string ServerApi::server_fields() const {
         + ", \"max_sessions\": " + std::to_string(cfg_.sessions.max_sessions)
         + ", \"memory_budget\": " + std::to_string(cfg_.sessions.memory_budget)
         + ", \"max_hits\": " + std::to_string(cfg_.sessions.max_hits) + "}";
+    s += ", \"warm\": " + warmer_.status_json();
     {
         const ResultCache::Stats cs = cache_.stats();
         s += ", \"cache\": {\"entries\": " + std::to_string(cs.entries) + ", \"bytes\": " + std::to_string(cs.bytes)
@@ -404,6 +412,10 @@ ServerResponse ServerApi::handle(std::string_view method_in, std::string_view pa
         }
         else if ((r = route_is("POST", "/session/close"))) { if (r > 0) return session_close(params, body); }
         else if ((r = route_is("GET", "/sessions"))) { if (r > 0) return list_sessions(); }
+        else if (path == "/warm") {
+            if (post || get) return warm(body, post);
+            r = -1;
+        }
         else {
             for (const char* prefix : {"/values/", "/regions/"}) {
                 const std::string_view pre(prefix);
@@ -431,6 +443,20 @@ ServerResponse ServerApi::handle(std::string_view method_in, std::string_view pa
 }
 
 // ── routes ───────────────────────────────────────────────────────────────
+
+// GET /warm: warm-up status. POST /warm {"level": "hot" (default) | "all"}: read
+// those index files into the page cache in the background (a front-end calls it
+// when the corpus is selected); answers at once with the status.
+ServerResponse ServerApi::warm(const std::string& body, bool start) {
+    if (start) {
+        std::string lv = body.empty() ? "" : json_extract_str(body, "level");
+        WarmLevel w = WarmLevel::Hot;
+        if (!lv.empty() && (!parse_warm_level(lv, w) || w == WarmLevel::None))
+            return json_error(400, "level must be \"hot\" or \"all\"");
+        warmer_.start(w);
+    }
+    return json_ok("{\"ok\":true, \"warm\": " + warmer_.status_json() + "}\n");
+}
 
 ServerResponse ServerApi::health() {
     return json_ok("{\"ok\":true,\"status\":\"ok\", " + server_fields() + "}\n");

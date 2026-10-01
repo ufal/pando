@@ -47,7 +47,9 @@ pando_server_free(js); pando_server_free(st);
 pando_server_close(s);
 ```
 
-Open options (JSON, all optional): `preload`, `total_workers`, `result_cache`,
+Open options (JSON, all optional): `preload`, `warm` (`"hot"` / `"all"`: read the index
+files most queries touch, or all of them, into the page cache in a background
+thread when the handle opens; see below), `total_workers`, `result_cache`,
 `result_ttl`, `abandon_after`, `cache_mb` (recent pages / command results / sort
 indexes reused across requests, default 128 MB per open corpus, 0 = off), `query_timeout_ms`, `query_threads` (position ranges
 counted in parallel per counting query, default 1 — see the CLI reference),
@@ -91,8 +93,23 @@ on ud_demo (38 M tokens) a whole CLI run with a warm page cache takes about 4 ms
 speed of a warm corpus is in the OS page cache, which a handle neither holds nor frees.
 Its RSS is mostly reclaimable file pages, so an RSS budget measures the wrong thing. What a
 long-lived handle keeps is state: cached totals and running jobs, so `/query` and
-`/status` share one count, and the `/run` session. Use `"preload": true`, or a read of
-the hot files, when "warm" should mean "in memory". Keep that separate from keeping a handle open.
+`/status` share one count, and the `/run` session. Use `"warm": "hot"` (or
+`"preload": true`, which reads everything before the open returns) when "warm" should
+mean "in memory". Keep that separate from keeping a handle open.
+
+**Warming up.** `"warm": "hot"` reads, in a background thread, the files that most
+queries touch: lexicons and their indexes, `.rev.idx`, bitmaps (`.bm`, `.bnd.bm`),
+fold permutations, region files and their value postings, `dep.head_rel` and the
+indexes of packed and edge postings — on ud_demo (38 M tokens) about 560 MB, about
+15 bytes per token. The per-position `.dat` files and the large posting lists are left
+to the queries that need them. `"all"` reads every file. A front-end can do what
+KonText does — load a corpus when the user selects it, before the first search — with
+`POST /warm` (`{"level": "hot"}`, the default, or `"all"`), which answers at once;
+`GET /warm` and `/health` (`"warm"`) report `state` (`idle` / `running` / `done`),
+`level`, `files` / `files_done`, `bytes` / `bytes_done` and `seconds` (since the first
+start). Queries are answered while it runs (they then read what they need themselves).
+In fqs, `"pando": {"warm": "hot"}` in the limits file (or a corpus' `settings.limits`)
+warms every corpus as it is opened.
 
 **Memory per request.** Most queries stream. Commands that materialise every hit do not.
 `sort by` over a large result is the main one: `[upos="VERB"]; sort by lemma`
