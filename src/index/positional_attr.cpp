@@ -204,7 +204,9 @@ void PositionalAttr::open(const std::string& base, CorpusPos corpus_size, bool p
     base_path_ = base;
     serial_ = ++g_attr_serial;
     lexicon_.open(base, preload);
-    corpus_  = MmapFile::open(base + ".dat", preload);
+    derived_ = false;
+    // P5.6: a head attribute (head#A) may have no .dat: set_head_source() follows
+    if (fs::exists(base + ".dat")) corpus_ = MmapFile::open(base + ".dat", preload);
     rev_idx_ = MmapFile::open(base + ".rev.idx", preload);
     const bool have_rev = fs::exists(base + ".rev");
     const RevMode mode = rev_mode();
@@ -222,7 +224,7 @@ void PositionalAttr::open(const std::string& base, CorpusPos corpus_size, bool p
     }
 
     // Infer .dat element width from file size
-    if (corpus_size_ > 0) {
+    if (corpus_size_ > 0 && corpus_.size() > 0) {
         dat_width_ = static_cast<int>(corpus_.size() / static_cast<size_t>(corpus_size_));
         if (dat_width_ != 1 && dat_width_ != 2 && dat_width_ != 4)
             throw std::runtime_error("Invalid .dat element width (" +
@@ -238,7 +240,26 @@ void PositionalAttr::open(const std::string& base, CorpusPos corpus_size, bool p
     }
 }
 
+void PositionalAttr::set_head_source(const PositionalAttr* src, const int16_t* hrel, LexiconId none_id) {
+    derived_ = true;
+    src_ = src;
+    hrel_ = hrel;
+    none_id_ = none_id;
+    shift_ = lexicon_.size() == src->lexicon().size() + 1;
+    dat_width_ = 4;
+}
+
+LexiconId PositionalAttr::head_id_at(CorpusPos pos) const {
+    const int16_t d = hrel_[pos];
+    if (d == 0) return none_id_;
+    const CorpusPos h = pos + d;
+    if (h < 0 || h >= corpus_size_) return none_id_;
+    const LexiconId id = src_->id_at(h);
+    return shift_ && id >= none_id_ ? id + 1 : id;
+}
+
 LexiconId PositionalAttr::id_at(CorpusPos pos) const {
+    if (derived_) return head_id_at(pos);
     switch (dat_width_) {
         case 1: return static_cast<LexiconId>(corpus_.as<uint8_t>()[pos]);
         case 2: return static_cast<LexiconId>(corpus_.as<uint16_t>()[pos]);

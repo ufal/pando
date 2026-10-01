@@ -181,34 +181,10 @@ bool HeadAttr::build(const Corpus& corpus, const std::string& attr, std::string*
         return new_id(A.id_at(h));
     };
 
-    // .dat (width from the lexicon size) and counts per value
-    const int dat_width = nh < 256 ? 1 : (nh < 65536 ? 2 : 4);
+    // counts per value (no .dat: the attribute is read through A at the head,
+    // PositionalAttr::set_head_source)
     std::vector<int64_t> idx(static_cast<size_t>(nh) + 1, 0);
-    {
-        FILE* f = std::fopen((base + ".dat.tmp").c_str(), "wb");
-        if (!f) return fail("cannot write " + base + ".dat.tmp");
-        constexpr size_t kChunk = 1 << 20;
-        std::vector<uint8_t> buf;
-        buf.reserve(kChunk * 4);
-        for (CorpusPos c = 0; c < n; ++c) {
-            const LexiconId v = head_value(c);
-            ++idx[static_cast<size_t>(v) + 1];
-            if (dat_width == 1) buf.push_back(static_cast<uint8_t>(v));
-            else if (dat_width == 2) {
-                const uint16_t x = static_cast<uint16_t>(v);
-                buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&x), reinterpret_cast<const uint8_t*>(&x) + 2);
-            } else {
-                const int32_t x = v;
-                buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&x), reinterpret_cast<const uint8_t*>(&x) + 4);
-            }
-            if (buf.size() >= kChunk * 4) {
-                std::fwrite(buf.data(), 1, buf.size(), f);
-                buf.clear();
-            }
-        }
-        std::fwrite(buf.data(), 1, buf.size(), f);
-        if (std::fclose(f) != 0) return fail("write failed: " + base + ".dat.tmp");
-    }
+    for (CorpusPos c = 0; c < n; ++c) ++idx[static_cast<size_t>(head_value(c)) + 1];
     for (size_t i = 1; i < idx.size(); ++i) idx[i] += idx[i - 1];
     if (!write_vec_ok(base + ".rev.idx.tmp", idx)) return fail("cannot write " + base + ".rev.idx.tmp");
 
@@ -242,7 +218,7 @@ bool HeadAttr::build(const Corpus& corpus, const std::string& attr, std::string*
         ::close(fd);
     }
     // .rev.idx last: it dates the attribute (packed postings / up_to_date compare to it)
-    for (const char* ext : {".lex", ".lex.idx", ".dat", ".rev", ".rev.idx"}) {
+    for (const char* ext : {".lex", ".lex.idx", ".rev", ".rev.idx"}) {
         std::error_code ec;
         fs::rename(base + ext + ".tmp", base + ext, ec);
         if (ec) return fail("cannot rename " + base + ext + ".tmp: " + ec.message());

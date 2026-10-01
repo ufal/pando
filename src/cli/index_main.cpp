@@ -369,6 +369,13 @@ static int upgrade_index(const std::string& dir, bool quiet = false,
         if (!quiet) std::cerr << "Fold indexes up to date (" << secs() << " s)\n";
         if (upgrade_bitmaps(corpus, bitmaps, quiet, secs) != 0) return 1;
         if (upgrade_packed(corpus, packed, drop_rev, quiet, secs) != 0) return 1;
+        // P5.6: head attributes keep only packed postings (verified; their plain
+        // .rev is 4 bytes per token, the packed lists 20-50% of that)
+        if (!corpus.head_attr_names().empty()) {
+            std::string hs;
+            for (const auto& h : corpus.head_attr_names()) hs += (hs.empty() ? "" : ",") + h;
+            if (upgrade_packed(corpus, hs, true, quiet, secs) != 0) return 1;
+        }
         if (!quiet && !corpus.has_deps())
             std::cerr << "No dependency index: no dep.head_rel / edge postings\n";
         if (corpus.has_deps() && corpus.deps().head_rel_data() && dep_pairs != "none") {

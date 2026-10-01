@@ -174,13 +174,6 @@ void Corpus::open(const std::string& dir, bool preload,
 
     for (const auto& name : info_.positional_attrs)
         open_positional_into(dir, name, name, is_multivalue(name));
-    head_attr_names_.clear();
-    for (const auto& a : info_.head_attrs) {
-        const std::string name = "head#" + a;
-        if (attrs_.count(name) || !std::ifstream(dir + "/" + name + ".rev.idx").good()) continue;
-        open_positional_into(dir, name, name, false);
-        head_attr_names_.push_back(name);
-    }
 
     for (const auto& name : info_.structural_attrs) {
         auto sa = std::make_unique<StructuralAttr>();
@@ -206,6 +199,23 @@ void Corpus::open(const std::string& dir, bool preload,
             deps_.open(dir, *structs_.at("s"), preload);
             has_deps_ = true;
         }
+    }
+
+    // P5.6 head attributes (after the dependency index: one without .dat reads its
+    // source attribute at p + head_rel[p])
+    head_attr_names_.clear();
+    for (const auto& a : info_.head_attrs) {
+        const std::string name = "head#" + a;
+        if (attrs_.count(name) || !attrs_.count(a) || !std::ifstream(dir + "/" + name + ".rev.idx").good())
+            continue;
+        const bool has_dat = std::ifstream(dir + "/" + name + ".dat").good();
+        if (!has_dat && !(has_deps_ && deps_.head_rel_data())) continue;
+        open_positional_into(dir, name, name, false);
+        if (!has_dat) {
+            PositionalAttr& h = *attrs_.at(name);
+            h.set_head_source(attrs_.at(a).get(), deps_.head_rel_data(), h.lexicon().lookup("<root>"));
+        }
+        head_attr_names_.push_back(name);
     }
 
     for (const std::string& odir : overlay_dirs) {

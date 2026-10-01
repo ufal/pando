@@ -35,7 +35,11 @@ PML-TQ-style restrictions embed a subtree on the token, e.g.:
 listed attribute A, the value of A on every token's dependency head
 (KonText / Manatee corpora often carry the same as `p_lemma`, `p_upos`). These
 are storage only: they are not listed with the attributes, not shown in hits
-and not named in queries (`head#lemma` is refused). The engine uses them to
+and not named in queries (`head#lemma` is refused). A head attribute has no per-token
+file of its own (its value at a token is A's at the token's head, through
+`dep.head_rel`): it is a lexicon, packed postings (`.rev.pfb`, verified, the
+plain `.rev` dropped) and, for upos / deprel, bitmaps — on the 38M demo 287 MB
+for upos, deprel and lemma together (about 7.5 bytes per token). The engine uses them to
 answer the head's conditions on the dependent itself:
 
 - `[deprel="nsubj" & parent [upos="VERB"]]`: a `parent [P]` restriction (not

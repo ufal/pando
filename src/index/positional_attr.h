@@ -143,8 +143,15 @@ public:
 
     // Position → value
     LexiconId id_at(CorpusPos pos) const;
-    /// Raw `.dat` ids (dat_width() bytes each: 1 = uint8, 2 = uint16, 4 = int32).
-    const void* dat_data() const { return corpus_.data(); }
+    /// Raw `.dat` ids (dat_width() bytes each: 1 = uint8, 2 = uint16, 4 = int32);
+    /// nullptr for a derived attribute (no `.dat`: read it with id_at).
+    const void* dat_data() const { return derived_ ? nullptr : corpus_.data(); }
+    /// P5.6: an attribute without `.dat` whose value at p is that of `src` at the
+    /// token's dependency head (head#A, HeadAttr): p + hrel[p], or `none_id` for a
+    /// token without a head. Its lexicon is src's with the none value inserted at
+    /// none_id when src has no such value (ids at or above it shifted by one).
+    void set_head_source(const PositionalAttr* src, const int16_t* hrel, LexiconId none_id);
+    bool derived() const { return derived_; }
     int dat_width() const { return dat_width_; }
     std::string_view value_at(CorpusPos pos) const;
 
@@ -251,7 +258,13 @@ public:
 private:
     std::string base_path_;
     Lexicon  lexicon_;
-    MmapFile corpus_;      // .dat  — int8/int16/int32 per position
+    MmapFile corpus_;      // .dat  — int8/int16/int32 per position (absent when derived_)
+    bool derived_ = false;   // P5.6 head attribute read through src_ at the head
+    const PositionalAttr* src_ = nullptr;
+    const int16_t* hrel_ = nullptr;
+    LexiconId none_id_ = 0;
+    bool shift_ = false;     // src_ lacks the none value: ids >= none_id_ move up by one
+    LexiconId head_id_at(CorpusPos pos) const;
     MmapFile rev_;         // .rev  — int16/int32/int64 sorted positions per lex id
     MmapFile rev_idx_;     // .rev.idx — int64[lex_size+1] element offsets
 

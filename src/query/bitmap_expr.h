@@ -249,7 +249,7 @@ class BmTable final : public BmExpr {
 public:
     BmTable(const PositionalAttr& pa, std::shared_ptr<const std::vector<uint8_t>> tab,
             size_t count, CorpusPos corpus_size)
-        : dat_(pa.dat_data()), width_(pa.dat_width()), tab_(std::move(tab)), n_(corpus_size) {
+        : pa_(&pa), dat_(pa.dat_data()), width_(pa.dat_width()), tab_(std::move(tab)), n_(corpus_size) {
         estimate = count;
     }
     BmChunk load(size_t c) override {
@@ -289,12 +289,28 @@ private:
             }
             return orr;
         };
+        if (!dat_) {   // a derived attribute (head#A): ids through id_at
+            uint64_t orr = 0;
+            const size_t len = static_cast<size_t>(b - a);
+            for (size_t w = 0; w * 64 < len; ++w) {
+                const size_t k1 = std::min<size_t>(64, len - w * 64);
+                uint64_t x = 0;
+                for (size_t k = 0; k < k1; ++k) {
+                    const size_t id = static_cast<size_t>(pa_->id_at(a + static_cast<CorpusPos>(w * 64 + k)));
+                    x |= static_cast<uint64_t>(id < tn ? t[id] : 0) << k;
+                }
+                out[w] = x;
+                orr |= x;
+            }
+            return orr;
+        }
         switch (width_) {
             case 1: return run(static_cast<const uint8_t*>(dat_));
             case 2: return run(static_cast<const uint16_t*>(dat_));
             default: return run(static_cast<const int32_t*>(dat_));
         }
     }
+    const PositionalAttr* pa_;
     const void* dat_;
     int width_;
     std::shared_ptr<const std::vector<uint8_t>> tab_;

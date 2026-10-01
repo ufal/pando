@@ -10,11 +10,14 @@
 // head#upos="VERB"]. N head attributes cover every head × child combination
 // (dep.pair.H.C needs one file per pair).
 //
-// Storage only: files `head#A.{dat,lex,lex.idx,rev,rev.idx}` (A's lexicon plus
-// kNoHead), `head_attrs=A,…` in corpus.info (Corpus::head_attr_names(), not among
+// Storage only: files `head#A.{lex,lex.idx,rev,rev.idx}` (A's lexicon plus
+// kNoHead; no `.dat`: the value at p is A's at p + dep.head_rel[p], see
+// PositionalAttr::set_head_source), `head_attrs=A,…` in corpus.info (Corpus::head_attr_names(), not among
 // attr_names()); the lexer refuses `head#…` in queries. Built by
 // `pando-index --upgrade --head-attrs A[,B...]` before folds / bitmaps / packed
 // postings, which then cover them like any attribute.
+// The upgrade then keeps only their packed postings (the plain .rev verified and
+// removed).
 
 #include <string>
 
