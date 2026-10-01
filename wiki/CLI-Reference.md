@@ -184,6 +184,23 @@ default 2^20 tokens) override, for tests. `--timing` reports the ranges as
 | `POST /warm`, `GET /warm` | Start reading the hot (`{"level": "hot"}`, default) or all (`"all"`) index files into the page cache in the background, e.g. when a front-end selects the corpus; the warm-up status |
 | `GET /info`, `/values/ATTR`, `/regions/TYPE`, `/context?pos=`, `/health` | Corpus description, values, regions, KWIC context |
 
+### Counts by several fields (`count by A, B`)
+
+With one field `count by` returns `rows` (the top `group_limit` values, default
+1000). With several fields the JSON is a tree, `hierarchy`: the top `group_limit`
+values of the first field by count, under each of them the top `child_limit`
+values of the second field within it (default 20), and so on; equal counts are
+ordered by value. Every non-leaf node has `groups`, the number of distinct values
+under it (also those not returned), and the result has `groups` (distinct
+combinations), `top_groups` (distinct values of the first field),
+`groups_returned` and `child_limit`. Set them per request (`/run`
+`"group_limit"`, `"child_limit"`; 0 = all) or in a program (`set group_limit 50;
+set child_limit 10`). Only the returned values are decoded to strings: on the 38M
+demo `a:[upos="VERB"] > b:[upos="NOUN"]; count by a.lemma, b.lemma` (2.6M
+combinations) answers in 2.1 s with 2.3 MB of JSON, where it took 13.7 s and 70 MB
+with every child returned. The text output of `pando` lists the top
+`group_limit` combinations as rows.
+
 ### Sessions: stored hit sets (P6.1)
 
 Without a session every request runs its query again. A client session keeps

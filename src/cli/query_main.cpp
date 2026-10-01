@@ -5,7 +5,6 @@
 #include "api/query_json.h"
 #include "api/coll_counts.h"
 #include "core/json_utils.h"
-#include "core/count_hierarchy_json.h"
 #include "query/ast.h"
 #include "query/parser.h"
 #include "query/dialect/cwb/cwb_translate.h"
@@ -93,6 +92,7 @@ struct Options {
     bool strict_quoted_strings = false;
     // For aggregation commands (count/group/freq), cap number of output rows; 0 = no cap.
     size_t group_limit = 1000;
+    size_t child_limit = 20;    // P6.6: values of the next fields under each group
     // When true, count/freq keep pipe-joined multivalue keys (lexicon strings) instead of RG-5f explode.
     bool no_mv_explode = false;
     // API mode: like --json but with cleaner, single-object responses for programmatic use
@@ -909,15 +909,30 @@ static void emit_count(const Corpus& corpus, const MatchSet& ms,
         return;
     }
 
-    // P7.1: only the shown rows are decoded (top group_limit by count); the JSON
-    // hierarchy for several fields still needs every group.
+    if (opts.json && cmd.fields.size() >= 2) {
+        // P6.6: top group_limit values of the first field, child_limit below each
+        const GroupTree tree = group_tree(corpus, ms, cmd.fields, name_map, opts.group_limit, opts.child_limit);
+        std::cout << "{\"ok\": true, \"operation\": \"count\", \"last_command\": \"count\", \"result\": {\n";
+        std::cout << "  \"total_matches\": " << tree.total << ",\n";
+        std::cout << "  \"groups\": " << tree.groups << ",\n";
+        std::cout << "  \"top_groups\": " << tree.top_groups << ",\n";
+        std::cout << "  \"groups_returned\": " << tree.top.size() << ",\n";
+        std::cout << "  \"child_limit\": " << opts.child_limit << ",\n";
+        std::cout << "  \"fields\": [";
+        for (size_t i = 0; i < cmd.fields.size(); ++i) {
+            if (i > 0) std::cout << ", ";
+            std::cout << jstr(cmd.fields[i]);
+        }
+        std::cout << "],\n";
+        emit_group_tree_json(std::cout, cmd.fields, tree);
+        std::cout << "\n}}\n";
+        return;
+    }
+    // P7.1: only the shown rows are decoded (top group_limit by count)
     const bool explode = !opts.no_mv_explode && cmd.fields.size() == 1 && corpus.is_multivalue(cmd.fields[0]);
-    const bool need_all = opts.json && cmd.fields.size() >= 2;
-    GroupRows gr = group_rows(corpus, ms, cmd.fields, name_map, need_all ? 0 : opts.group_limit, explode);
+    GroupRows gr = group_rows(corpus, ms, cmd.fields, name_map, opts.group_limit, explode);
     const auto& sorted = gr.rows;
     const size_t total = gr.total;
-    std::map<std::string, size_t> counts;
-    if (need_all) counts.insert(gr.rows.begin(), gr.rows.end());
 
     // Pagination for groups: default to opts.group_limit (1000) when set; else all.
     size_t g_start = 0;
@@ -936,10 +951,7 @@ static void emit_count(const Corpus& corpus, const MatchSet& ms,
             std::cout << jstr(cmd.fields[i]);
         }
         std::cout << "],\n";
-        if (cmd.fields.size() >= 2) {
-            emit_count_result_hierarchy_json(std::cout, cmd.fields, counts, total, opts.group_limit);
-            std::cout << "\n}}\n";
-        } else {
+        {
             std::cout << "  \"rows\": [\n";
             for (size_t i = g_start; i < g_end; ++i) {
                 if (i > g_start) std::cout << ",\n";
@@ -2831,6 +2843,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                 else if (name == "min-freq" || name == "min_freq")    to_size(opts.coll_min_freq);
                 else if (name == "stoplist") to_size(opts.coll_stoplist);
                 else if (name == "group-limit" || name == "group_limit") to_size(opts.group_limit);
+                else if (name == "child-limit" || name == "child_limit") to_size(opts.child_limit);
                 else if (name == "no-mv-explode" || name == "no_mv_explode")
                     opts.no_mv_explode = (val == "true" || val == "1" || val == "on");
                 else if (name == "max-gap" || name == "max_gap")      to_int(opts.max_gap);
@@ -2884,6 +2897,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                     std::cout << "  \"min_freq\": " << opts.coll_min_freq << ",\n";
                     std::cout << "  \"stoplist\": " << opts.coll_stoplist << ",\n";
                     std::cout << "  \"group_limit\": " << opts.group_limit << ",\n";
+                    std::cout << "  \"child_limit\": " << opts.child_limit << ",\n";
                     std::cout << "  \"no_mv_explode\": " << (opts.no_mv_explode ? "true" : "false") << ",\n";
                     std::cout << "  \"max_gap\": " << opts.max_gap << ",\n";
                     std::cout << "  \"total\": " << (opts.total ? "true" : "false") << ",\n";
@@ -2908,6 +2922,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                     std::cout << "min-freq    = " << opts.coll_min_freq << "\n";
                     std::cout << "stoplist    = " << opts.coll_stoplist << "\n";
                     std::cout << "group-limit = " << opts.group_limit << "\n";
+                    std::cout << "child-limit = " << opts.child_limit << "\n";
                     std::cout << "no-mv-explode = " << (opts.no_mv_explode ? "on" : "off") << "\n";
                     std::cout << "max-gap     = " << opts.max_gap << "\n";
                     std::cout << "total       = " << (opts.total ? "on" : "off") << "\n";

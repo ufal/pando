@@ -542,6 +542,7 @@ ServerResponse ServerApi::run(const std::string& body) {
     opts.context    = static_cast<int>(json_extract_num(body, "context", 5));
     opts.total      = json_extract_bool(body, "total", false);
     opts.group_limit = json_extract_num(body, "group_limit", 1000);
+    opts.child_limit = json_extract_num(body, "child_limit", 20);
     opts.strict_quoted_strings = json_extract_bool(body, "strict_quoted_strings", false);
     const RequestLimits rl = request_limits(body);
     opts.threads = rl.threads;

@@ -1,11 +1,14 @@
 #include "api/group_counts.h"
+#include "core/json_utils.h"
 
 #include <algorithm>
 #include <cctype>
 #include <climits>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <numeric>
+#include <unordered_map>
 
 namespace pando {
 
@@ -104,6 +107,157 @@ std::string make_group_key(const Corpus& corpus, const Match& m, const NameIndex
         key += read_tabulate_field(corpus, m, name_map, fields[i]);
     }
     return key;
+}
+
+// ── P6.6: count by several fields as a limited tree ─────────────────────
+
+namespace {
+
+/// Buckets as id rows (kl ids each) + counts, and per column a decoder.
+struct IdTable {
+    size_t kl = 0;
+    std::vector<int64_t> keys;      // row r: keys[r*kl .. r*kl+kl)
+    std::vector<size_t> counts;
+    std::function<std::string(size_t col, int64_t id)> decode;
+};
+
+std::string decode_bucket_column(const AggregateBucketData& d, size_t i, int64_t id) {
+    const auto& col = d.columns[i];
+    if (col.date_transform == AggregateBucketData::Column::DateTransform::None
+        && col.kind == AggregateBucketData::Column::Kind::Positional)
+        return std::string(col.pa->lexicon().get(static_cast<LexiconId>(id)));
+    const auto& st = d.region_intern[i];
+    if (id >= 1 && static_cast<size_t>(id) <= st.id_to_str.size()) return st.id_to_str[static_cast<size_t>(id - 1)];
+    return std::string();
+}
+
+void build_level(const IdTable& t, const std::vector<size_t>& order, size_t lo, size_t hi, size_t level,
+                 size_t limit, size_t child_limit, std::vector<GroupNode>& out, size_t& groups) {
+    struct Run { size_t count, lo, hi; int64_t id; };
+    std::vector<Run> runs;
+    for (size_t i = lo; i < hi;) {
+        const int64_t id = t.keys[order[i] * t.kl + level];
+        size_t j = i, c = 0;
+        while (j < hi && t.keys[order[j] * t.kl + level] == id) c += t.counts[order[j++]];
+        runs.push_back({c, i, j, id});
+        i = j;
+    }
+    groups = runs.size();
+    const size_t want = (limit == 0 || limit >= runs.size()) ? runs.size() : limit;
+    size_t keep = runs.size();
+    if (want < runs.size()) {   // the top `want` by count, plus the ties at the cut (ordered by value below)
+        auto desc = [](const Run& a, const Run& b) { return a.count > b.count; };
+        std::nth_element(runs.begin(), runs.begin() + static_cast<std::ptrdiff_t>(want - 1), runs.end(), desc);
+        const size_t cut = runs[want - 1].count;
+        keep = static_cast<size_t>(std::partition(runs.begin(), runs.end(),
+                                                  [cut](const Run& r) { return r.count >= cut; }) - runs.begin());
+    }
+    std::vector<std::pair<std::string, size_t>> vals;   // (value, run index)
+    vals.reserve(keep);
+    for (size_t k = 0; k < keep; ++k) vals.emplace_back(t.decode(level, runs[k].id), k);
+    std::sort(vals.begin(), vals.end(), [&](const auto& a, const auto& b) {
+        if (runs[a.second].count != runs[b.second].count) return runs[a.second].count > runs[b.second].count;
+        return compare_sort_values(a.first, b.first);
+    });
+    if (vals.size() > want) vals.resize(want);
+    out.reserve(vals.size());
+    for (auto& [v, k] : vals) {
+        GroupNode n;
+        n.value = std::move(v);
+        n.count = runs[k].count;
+        if (level + 1 < t.kl)
+            build_level(t, order, runs[k].lo, runs[k].hi, level + 1, child_limit, child_limit, n.children, n.groups);
+        out.push_back(std::move(n));
+    }
+}
+
+void emit_nodes(std::ostream& out, const std::vector<std::string>& fields, const std::vector<GroupNode>& nodes,
+                size_t depth, size_t total, double parent, int indent) {
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        const GroupNode& n = nodes[i];
+        if (i) out << ",\n";
+        for (int s = 0; s < indent; ++s) out << ' ';
+        const double pct = total ? 100.0 * static_cast<double>(n.count) / static_cast<double>(total) : 0.0;
+        out << "{\"field\": " << jstr(fields[depth]) << ", \"value\": " << jstr(n.value) << ", \"count\": " << n.count
+            << ", \"pct\": " << pct;
+        if (depth > 0)
+            out << ", \"pct_of_parent\": " << (parent > 0 ? 100.0 * static_cast<double>(n.count) / parent : 0.0);
+        if (depth + 1 < fields.size()) {
+            out << ", \"groups\": " << n.groups << ", \"children\": [";
+            if (!n.children.empty()) {
+                out << "\n";
+                emit_nodes(out, fields, n.children, depth + 1, total, static_cast<double>(n.count), indent + 2);
+                out << "\n";
+                for (int s = 0; s < indent; ++s) out << ' ';
+            }
+            out << "]";
+        }
+        out << "}";
+    }
+}
+
+}  // namespace
+
+GroupTree group_tree(const Corpus& corpus, const MatchSet& ms, const std::vector<std::string>& fields,
+                     const NameIndexMap& name_map, size_t top_limit, size_t child_limit) {
+    GroupTree tree;
+    IdTable t;
+    t.kl = fields.size();
+    const AggregateBucketData* agg = ms.aggregate_buckets.get();
+    tree.total = agg ? agg->total_hits : ms.matches.size();
+    std::vector<std::vector<std::string>> interned;   // the per-match path: values per column
+    if (agg && agg->columns.size() == t.kl) {
+        agg->for_each_bucket([&](const int64_t* key, size_t len, size_t c) {
+            for (size_t i = 0; i < t.kl; ++i) t.keys.push_back(i < len ? key[i] : 0);
+            t.counts.push_back(c);
+        });
+        t.decode = [agg](size_t col, int64_t id) { return decode_bucket_column(*agg, col, id); };
+    } else {
+        // hits kept: intern each field's values, count per id row
+        interned.resize(t.kl);
+        std::vector<std::unordered_map<std::string, int64_t>> ids(t.kl);
+        std::unordered_map<std::string, size_t> row_of;   // id row (bytes) -> row
+        std::vector<int64_t> row(t.kl);
+        std::vector<std::string> parts;
+        for (const auto& m : ms.matches) {
+            const std::string key = make_group_key(corpus, m, name_map, fields);
+            parts.clear();
+            size_t a = 0;
+            for (size_t i = 0; i <= key.size(); ++i)
+                if (i == key.size() || key[i] == '\t') { parts.emplace_back(key, a, i - a); a = i + 1; }
+            if (parts.size() != t.kl) continue;
+            for (size_t i = 0; i < t.kl; ++i) {
+                auto [it, fresh] = ids[i].emplace(parts[i], static_cast<int64_t>(interned[i].size()));
+                if (fresh) interned[i].push_back(parts[i]);
+                row[i] = it->second;
+            }
+            std::string rk(reinterpret_cast<const char*>(row.data()), row.size() * sizeof(int64_t));
+            auto [it, fresh] = row_of.emplace(std::move(rk), t.counts.size());
+            if (fresh) {
+                t.keys.insert(t.keys.end(), row.begin(), row.end());
+                t.counts.push_back(0);
+            }
+            ++t.counts[it->second];
+        }
+        t.decode = [&interned](size_t col, int64_t id) { return interned[col][static_cast<size_t>(id)]; };
+    }
+    tree.groups = t.counts.size();
+    std::vector<size_t> order(t.counts.size());
+    std::iota(order.begin(), order.end(), size_t{0});
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+        return std::lexicographical_compare(t.keys.begin() + static_cast<std::ptrdiff_t>(a * t.kl),
+                                            t.keys.begin() + static_cast<std::ptrdiff_t>(a * t.kl + t.kl),
+                                            t.keys.begin() + static_cast<std::ptrdiff_t>(b * t.kl),
+                                            t.keys.begin() + static_cast<std::ptrdiff_t>(b * t.kl + t.kl));
+    });
+    if (t.kl > 0) build_level(t, order, 0, order.size(), 0, top_limit, child_limit, tree.top, tree.top_groups);
+    return tree;
+}
+
+void emit_group_tree_json(std::ostream& out, const std::vector<std::string>& fields, const GroupTree& tree) {
+    out << "  \"hierarchy\": [\n";
+    emit_nodes(out, fields, tree.top, 0, tree.total, static_cast<double>(tree.total), 4);
+    out << "\n  ]";
 }
 
 GroupRows group_rows(const Corpus& corpus, const MatchSet& ms, const std::vector<std::string>& fields,

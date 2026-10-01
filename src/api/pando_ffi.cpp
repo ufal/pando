@@ -106,6 +106,7 @@ pando::ProgramOptions parse_program_opts(const char* opts_json) {
     if (v == "true" || v == "1")
         opts.strict_quoted_strings = true;
     v = json_get(j, "group_limit");     if (!v.empty()) try { opts.group_limit = std::stoull(v); } catch (...) {}
+    v = json_get(j, "child_limit");     if (!v.empty()) try { opts.child_limit = std::stoull(v); } catch (...) {}
     v = json_get(j, "coll_left");       if (!v.empty()) try { opts.coll_left = std::stoi(v); } catch (...) {}
     v = json_get(j, "coll_right");      if (!v.empty()) try { opts.coll_right = std::stoi(v); } catch (...) {}
     v = json_get(j, "coll_min_freq");   if (!v.empty()) try { opts.coll_min_freq = std::stoull(v); } catch (...) {}

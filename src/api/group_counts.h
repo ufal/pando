@@ -6,6 +6,7 @@
 #include "corpus/corpus.h"
 #include "query/executor.h"
 
+#include <ostream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -27,6 +28,29 @@ struct GroupRows {
     size_t groups = 0;   // distinct groups in the whole result (not only `rows`)
     size_t total = 0;    // hits counted
 };
+
+/// P6.6: `count by A, B, …` as a tree: the top `top_limit` values of A by count,
+/// under each the top `child_limit` values of B within it, and so on (0 = all).
+/// Built on the id keys of streamed buckets (only the returned values are decoded
+/// to strings); order: count descending, then value (numbers numerically).
+struct GroupNode {
+    std::string value;
+    size_t count = 0;
+    size_t groups = 0;                 // distinct values of the next field under this one
+    std::vector<GroupNode> children;   // the top child_limit of them
+};
+struct GroupTree {
+    std::vector<GroupNode> top;
+    size_t top_groups = 0;   // distinct values of the first field
+    size_t groups = 0;       // distinct combinations of all fields
+    size_t total = 0;        // hits counted
+};
+GroupTree group_tree(const Corpus& corpus, const MatchSet& ms, const std::vector<std::string>& fields,
+                     const NameIndexMap& name_map, size_t top_limit, size_t child_limit);
+
+/// The `"hierarchy": [...]` member of a multi-field count (JSON, no trailing comma):
+/// {"field", "value", "count", "pct", ["pct_of_parent"], ["groups", "children": [...]]}.
+void emit_group_tree_json(std::ostream& out, const std::vector<std::string>& fields, const GroupTree& tree);
 
 /// Group `ms` by `fields`. Only the first `limit` rows are built (0 = all): with
 /// streamed buckets (`ms.aggregate_buckets`) the counts stay on their id keys and

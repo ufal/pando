@@ -7,7 +7,6 @@
 #include "api/group_counts.h"
 #include "api/result_cache.h"
 #include "core/json_utils.h"
-#include "core/count_hierarchy_json.h"
 #include "query/parser.h"
 #include "query/executor.h"
 #include "index/positional_attr.h"
@@ -1040,20 +1039,33 @@ static double compute_measure(const std::string& name, const CollEntry& e) {
 // ── JSON emitters (write to ostream, always JSON) ───────────────────────
 
 static void emit_count_json(std::ostream& out, const Corpus& corpus, const MatchSet& ms,
-                            const GroupCommand& cmd, const NameIndexMap& name_map, size_t group_limit) {
+                            const GroupCommand& cmd, const NameIndexMap& name_map, size_t group_limit,
+                            size_t child_limit) {
     if (cmd.fields.empty() && cmd.query_name.empty()) {
         out << "{\"ok\": false, \"error\": \"count/group requires 'by' clause\"}\n";
         return;
     }
     try {
-    // P7.1: only the returned rows are decoded (top group_limit by count); the
-    // hierarchy for several fields still needs every group.
-    const bool need_all = cmd.fields.size() >= 2;
-    GroupRows gr = group_rows(corpus, ms, cmd.fields, name_map, need_all ? 0 : group_limit,
+    if (cmd.fields.size() >= 2) {
+        // P6.6: top group_limit values of the first field, child_limit below each
+        const GroupTree tree = group_tree(corpus, ms, cmd.fields, name_map, group_limit, child_limit);
+        out << "{\"ok\": true, \"operation\": \"count\", \"last_command\": \"count\", \"result\": {\n";
+        out << "  \"total_matches\": " << tree.total << ",\n";
+        out << "  \"groups\": " << tree.groups << ",\n";
+        out << "  \"top_groups\": " << tree.top_groups << ",\n";
+        out << "  \"groups_returned\": " << tree.top.size() << ",\n";
+        out << "  \"child_limit\": " << child_limit << ",\n";
+        out << "  \"fields\": [";
+        for (size_t i = 0; i < cmd.fields.size(); ++i) { if (i > 0) out << ", "; out << jstr(cmd.fields[i]); }
+        out << "],\n";
+        emit_group_tree_json(out, cmd.fields, tree);
+        out << "\n}}\n";
+        return;
+    }
+    // P7.1: only the returned rows are decoded (top group_limit by count)
+    GroupRows gr = group_rows(corpus, ms, cmd.fields, name_map, group_limit,
                               cmd.fields.size() == 1 && corpus.is_multivalue(cmd.fields[0]));
     const auto& sorted = gr.rows;
-    std::map<std::string, size_t> counts;
-    if (need_all) counts.insert(gr.rows.begin(), gr.rows.end());
     size_t total = gr.total;
     size_t g_end = (group_limit > 0 && group_limit < sorted.size()) ? group_limit : sorted.size();
 
@@ -1064,10 +1076,7 @@ static void emit_count_json(std::ostream& out, const Corpus& corpus, const Match
     out << "  \"fields\": [";
     for (size_t i = 0; i < cmd.fields.size(); ++i) { if (i > 0) out << ", "; out << jstr(cmd.fields[i]); }
     out << "],\n";
-    if (cmd.fields.size() >= 2) {
-        emit_count_result_hierarchy_json(out, cmd.fields, counts, total, group_limit);
-        out << "\n}}\n";
-    } else {
+    {
         out << "  \"rows\": [\n";
         for (size_t i = 0; i < g_end; ++i) {
             if (i > 0) out << ",\n";
@@ -2013,7 +2022,7 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                 return {};
         }
         std::string o;
-        for (size_t v : {opts.limit, opts.offset, opts.max_total, opts.group_limit, opts.coll_min_freq,
+        for (size_t v : {opts.limit, opts.offset, opts.max_total, opts.group_limit, opts.child_limit, opts.coll_min_freq,
                          opts.coll_max_items, opts.coll_stoplist, opts.max_count_hits})
             o += std::to_string(v) + ",";
         o += std::to_string(opts.context) + "," + std::to_string(opts.coll_left) + "," + std::to_string(opts.coll_right)
@@ -2170,6 +2179,7 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                 else if (name == "min-freq" || name == "min_freq")    to_size(opts.coll_min_freq);
                 else if (name == "stoplist") to_size(opts.coll_stoplist);
                 else if (name == "group-limit" || name == "group_limit") to_size(opts.group_limit);
+                else if (name == "child-limit" || name == "child_limit") to_size(opts.child_limit);
                 else if (name == "measures")  opts.coll_measures = split_csv(val);
                 else if (name == "attrs") {
                     if (val == "all" || val == "*" || val.empty()) opts.attrs.clear();
@@ -2200,6 +2210,7 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                 out << "  \"min_freq\": " << opts.coll_min_freq << ",\n";
                 out << "  \"stoplist\": " << opts.coll_stoplist << ",\n";
                 out << "  \"group_limit\": " << opts.group_limit << ",\n";
+                out << "  \"child_limit\": " << opts.child_limit << ",\n";
                 out << "  \"total\": " << (opts.total ? "true" : "false") << ",\n";
                 out << "  \"measures\": " << jstr(join(opts.coll_measures.empty()
                     ? std::vector<std::string>{"logdice"} : opts.coll_measures)) << ",\n";
@@ -2275,7 +2286,7 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
             switch (stmt.command.type) {
                 case CommandType::COUNT:
                 case CommandType::GROUP:
-                    emit_count_json(out, corpus, counting(), stmt.command, nm_to_use, opts.group_limit);
+                    emit_count_json(out, corpus, counting(), stmt.command, nm_to_use, opts.group_limit, opts.child_limit);
                     break;
                 case CommandType::STATS:
                     emit_stats_json(out, corpus, full(), stmt.command, nm_to_use);

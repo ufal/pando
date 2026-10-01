@@ -208,6 +208,8 @@ struct ProgramOptions {
     bool strict_quoted_strings = false;
     bool allow_empty_alignment = false;
     size_t group_limit = 1000;
+    /// P6.6: `count by A, B`: values of B (and further fields) under each A (0 = all).
+    size_t child_limit = 20;
     std::vector<std::string> attrs;
     // Collocation settings
     int coll_left = 5;
