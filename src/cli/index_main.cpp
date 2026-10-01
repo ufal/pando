@@ -136,8 +136,10 @@ static int upgrade_bitmaps(const pando::Corpus& corpus, const std::string& spec,
     if (spec == "none") return 0;
     const bool is_auto = spec == "auto";
     std::vector<std::string> names = is_auto ? corpus.attr_names() : split_list(spec);
-    if (is_auto)
+    if (is_auto) {
+        for (const auto& h : corpus.head_attr_names()) names.push_back(h);
         for (const auto& st : corpus.structure_names()) names.push_back(st);
+    }
     for (const auto& name : names) {
         // P3.6: flat structures → <dir>/<name>.bnd.bm (covered positions + region ends)
         if (!corpus.has_attr(name) && corpus.has_structure(name)) {
@@ -207,6 +209,7 @@ static int upgrade_packed(const pando::Corpus& corpus, const std::string& spec, 
     if (spec == "auto") {
         for (const auto& n : corpus.attr_names())
             if (corpus.has_attr(n) && !corpus.is_multivalue(n)) names.push_back(n);
+        for (const auto& h : corpus.head_attr_names()) names.push_back(h);
     } else {
         names = split_list(spec);
     }
@@ -348,7 +351,9 @@ static int upgrade_index(const std::string& dir, bool quiet = false,
         corpus.open(dir);
         const pando::FoldMode modes[] = {pando::FoldMode::Lower, pando::FoldMode::NoAccents,
                                          pando::FoldMode::LowerNoAccents};
-        for (const auto& name : corpus.attr_names()) {
+        std::vector<std::string> fold_names = corpus.attr_names();
+        for (const auto& h : corpus.head_attr_names()) fold_names.push_back(h);
+        for (const auto& name : fold_names) {
             if (corpus.is_multivalue(name)) continue;
             const auto& pa = corpus.attr(name);
             for (auto m : modes) {

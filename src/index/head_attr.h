@@ -1,20 +1,20 @@
 #pragma once
 
-// Head attributes: for a positional attribute A, `head#A` is an ordinary
-// positional attribute whose value at token c is A of c's dependency head
-// (KonText / Manatee corpora often carry the same idea as `p_lemma`, `p_upos`, …).
-// Tokens without a head (the root, tokens outside the dependency layer) get
-// kNoHead. Every query fast path then applies to the head's attributes on the
-// child's position: [upos="VERB"] > [deprel="nsubj"] is the one-token
-// [deprel="nsubj" & head#upos="VERB"] (QueryExecutor rewrites it), so N head
-// attributes cover every head × child combination (dep.pair.H.C needs one file
-// per pair).
+// Head attributes: for a positional attribute A, `head#A` is a positional
+// attribute whose value at token c is A of c's dependency head (KonText / Manatee
+// corpora often carry the same as `p_lemma`, `p_upos`, …). Tokens without a head
+// (the root, tokens outside the dependency layer) get kNoHead. The head's
+// conditions then become conditions on the dependent, where every one-token fast
+// path applies: QueryExecutor reads `parent [P]` as head#P', and
+// [upos="VERB"] > [deprel="nsubj"] as the one-token [deprel="nsubj" &
+// head#upos="VERB"]. N head attributes cover every head × child combination
+// (dep.pair.H.C needs one file per pair).
 //
-// Files: `head#A.{dat,lex,lex.idx,rev,rev.idx}` (A's lexicon plus kNoHead), the
-// name added to `positional=` in corpus.info; built by
-// `pando-index --upgrade --head-attrs A[,B...]` (before folds / bitmaps / packed
-// postings, which then treat them like any attribute). Query syntax:
-// `head#lemma` or `head/lemma`.
+// Storage only: files `head#A.{dat,lex,lex.idx,rev,rev.idx}` (A's lexicon plus
+// kNoHead), `head_attrs=A,…` in corpus.info (Corpus::head_attr_names(), not among
+// attr_names()); the lexer refuses `head#…` in queries. Built by
+// `pando-index --upgrade --head-attrs A[,B...]` before folds / bitmaps / packed
+// postings, which then cover them like any attribute.
 
 #include <string>
 

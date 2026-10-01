@@ -35,6 +35,12 @@ struct CorpusInfo {
     // REQ-TOKEN-GROUPS: structural names routed to standoff (no .rgn index).
     std::vector<std::string> token_group_structs;
 
+    // Head attributes (HeadAttr, `head_attrs=A,B`): the attributes A that have a
+    // `head#A` (A of the token's dependency head). Storage only: not listed with
+    // the positional attributes, not nameable in queries; the executor reads
+    // [P] > [C] through them.
+    std::vector<std::string> head_attrs;
+
     // Build identity of the pando-index that built the index / last ran --upgrade
     // (build_string(); empty for indexes from before this was recorded).
     std::string indexed_with;
@@ -78,6 +84,11 @@ public:
     const PositionalAttr& attr(const std::string& name) const;
     bool has_attr(const std::string& name) const;
     const std::vector<std::string>& attr_names() const { return info_.positional_attrs; }
+    /// Opened head attributes (`head#A`, see CorpusInfo::head_attrs): open like any
+    /// positional attribute (attr / has_attr), but not among attr_names().
+    const std::vector<std::string>& head_attr_names() const { return head_attr_names_; }
+    /// A name users cannot give: an internal head attribute (`head#…`).
+    static bool is_internal_attr_name(const std::string& name) { return name.rfind("head#", 0) == 0; }
 
     // Structural attributes
     const StructuralAttr& structure(const std::string& name) const;
@@ -129,6 +140,7 @@ public:
 
 private:
     std::string dir_;
+    std::vector<std::string> head_attr_names_;
     CorpusInfo info_;
     std::unordered_map<std::string, std::unique_ptr<PositionalAttr>> attrs_;
     std::unordered_map<std::string, std::unique_ptr<StructuralAttr>> structs_;

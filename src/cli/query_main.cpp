@@ -145,7 +145,7 @@ static void emit_json(const Corpus& corpus, const std::string& query_text,
                 first_tok = false;
                 out << "{\"pos\": " << p;
                 for (const auto& attr_name : attr_names) {
-                    if (!corpus.has_attr(attr_name)) continue;
+                    if (!corpus.has_attr(attr_name) || Corpus::is_internal_attr_name(attr_name)) continue;
                     auto val = corpus.attr(attr_name).value_at(p);
                     if (val == "_") continue;
                     out << ", " << jstr(attr_name) << ": " << jstr(val);

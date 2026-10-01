@@ -204,7 +204,7 @@ std::string to_query_result_json(const Corpus& corpus,
                 first_tok = false;
                 out << "{\"pos\": " << p;
                 for (const auto& attr_name : attr_names) {
-                    if (!corpus.has_attr(attr_name)) continue;
+                    if (!corpus.has_attr(attr_name) || Corpus::is_internal_attr_name(attr_name)) continue;
                     auto val = corpus.attr(attr_name).value_at(p);
                     if (val == "_") continue;
                     out << ", " << jstr(attr_name) << ": " << jstr(val);
@@ -405,6 +405,7 @@ std::string index_status_json_fields(const Corpus& corpus) {
 
 std::string to_values_json(const Corpus& corpus, const std::string& attr_name, size_t limit) {
     std::ostringstream out;
+    if (Corpus::is_internal_attr_name(attr_name)) return "";   // head#A: storage only
 
     // Try positional attribute first
     if (corpus.has_attr(attr_name)) {

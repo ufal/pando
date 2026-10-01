@@ -1704,10 +1704,6 @@ std::string normalize_query_attr_name(const Corpus& corpus, const std::string& a
             return attr;
         }
     }
-    if (attr.size() > 5 && attr.compare(0, 5, "head/") == 0) {   // head/lemma = head#lemma
-        std::string h = "head#" + normalize_query_attr_name(corpus, attr.substr(5));
-        if (corpus.has_attr(h)) return h;
-    }
     if (attr.size() > 6 && attr.compare(0, 6, "feats#") == 0 && corpus.has_attr(attr))
         return attr;
     if (attr.size() > 6 && attr.compare(0, 6, "feats_") == 0 && corpus.has_attr(attr))
@@ -7563,6 +7559,59 @@ static bool head_attr_fields(const Corpus& corpus, const std::vector<std::string
     return true;
 }
 
+// `parent [P]` in a token's condition (not negated, unnamed, not nested in another
+// restriction) is head#P' & has-head on the token itself: an ordinary condition,
+// so it works in any query, any token.
+// Returns `c` itself when nothing changed.
+static ConditionPtr rewrite_parent_restrictions(const Corpus& corpus, const ConditionPtr& c,
+                                                bool& changed) {
+    if (!c || c->is_leaf || c->is_count) return c;
+    if (c->is_structural) {
+        if (c->struct_rel == StructRelType::PARENT && !c->struct_negated && c->nested_name.empty()) {
+            bool ok = true;
+            ConditionPtr hp = head_condition(corpus, c->nested_conditions, ok);
+            if (ok && may_match_no_head(c->nested_conditions)) {
+                if (corpus.head_attr_names().empty()) return c;
+                AttrCondition g;
+                g.attr = corpus.head_attr_names().front();
+                g.op = CompOp::NEQ;
+                g.value = HeadAttr::kNoHead;
+                auto gn = ConditionNode::make_leaf(std::move(g));
+                hp = hp ? ConditionNode::make_branch(BoolOp::AND, std::move(hp), std::move(gn)) : std::move(gn);
+            }
+            if (ok && hp) {
+                changed = true;
+                return hp;
+            }
+            return c;
+        }
+        // not inside other restrictions (child [… parent […]]): their nested
+        // conditions are checked per related token, where the leaf costs more
+        return c;
+    }
+    bool l = false, r = false;
+    auto nl = rewrite_parent_restrictions(corpus, c->left, l);
+    auto nr = rewrite_parent_restrictions(corpus, c->right, r);
+    if (!l && !r) return c;
+    changed = true;
+    return ConditionNode::make_branch(c->bool_op, std::move(nl), std::move(nr));
+}
+
+static bool rewrite_parent_query(const Corpus& corpus, const TokenQuery& q, TokenQuery& out) {
+    if (corpus.head_attr_names().empty()) return false;
+    bool any = false;
+    std::vector<ConditionPtr> conds;
+    for (const auto& t : q.tokens) {
+        bool ch = false;
+        conds.push_back(rewrite_parent_restrictions(corpus, t.conditions, ch));
+        any |= ch;
+    }
+    if (!any) return false;
+    out = q;
+    for (size_t i = 0; i < out.tokens.size(); ++i) out.tokens[i].conditions = conds[i];
+    return true;
+}
+
 static bool rewrite_head_attrs(const Corpus& corpus, const TokenQuery& q, TokenQuery& out,
                                bool& parent_first) {
     if (q.tokens.size() != 2 || q.relations.size() != 1) return false;
@@ -7585,8 +7634,7 @@ static bool rewrite_head_attrs(const Corpus& corpus, const TokenQuery& q, TokenQ
     if (!ok) return false;
     if (may_match_no_head(P.conditions)) {
         std::string guard;   // any head attribute: head#A != kNoHead = "has a head"
-        for (const auto& a : corpus.attr_names())
-            if (!HeadAttr::source_of(a).empty()) { guard = a; break; }
+        for (const auto& a : corpus.head_attr_names()) { guard = a; break; }
         if (guard.empty()) return false;
         AttrCondition g;
         g.attr = guard;
@@ -7623,6 +7671,10 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
     if (TokenQuery simple; simplify_bare_strings(corpus_, query, simple))
         return execute(simple, max_matches, count_total, max_total_cap, sample_size, random_seed, num_threads,
                        aggregate_by_fields, skip_name_validation);
+    if (head_attrs_enabled())
+        if (TokenQuery pq; rewrite_parent_query(corpus_, query, pq))
+            return execute(pq, max_matches, count_total, max_total_cap, sample_size, random_seed,
+                           num_threads, aggregate_by_fields, skip_name_validation);
     if (head_attrs_enabled() && !hit_sink_) {
         TokenQuery one;
         bool parent_first = true;

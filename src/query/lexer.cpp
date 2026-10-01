@@ -157,6 +157,10 @@ Token Lexer::next() {
             ++pos_;
             read_segment();
         }
+        // head#A (HeadAttr) is storage only: the engine reads [P] > [C] through it
+        if (text.rfind("head#", 0) == 0)
+            throw std::runtime_error("Unknown attribute '" + text + "' at position " + std::to_string(start)
+                                     + " (the head's attributes: [X] > [Y] or parent [X])");
         return {TokType::IDENT, text, start};
     }
 

@@ -54,6 +54,11 @@ static CorpusInfo read_info(const std::string& path) {
             std::string tok;
             while (std::getline(ss, tok, ','))
                 if (!tok.empty()) info.overlapping_structs.push_back(tok);
+        } else if (key == "head_attrs") {
+            std::istringstream ss(val);
+            std::string tok;
+            while (std::getline(ss, tok, ','))
+                if (!tok.empty()) info.head_attrs.push_back(tok);
         } else if (key == "zerowidth") {
             std::istringstream ss(val);
             std::string tok;
@@ -169,6 +174,13 @@ void Corpus::open(const std::string& dir, bool preload,
 
     for (const auto& name : info_.positional_attrs)
         open_positional_into(dir, name, name, is_multivalue(name));
+    head_attr_names_.clear();
+    for (const auto& a : info_.head_attrs) {
+        const std::string name = "head#" + a;
+        if (attrs_.count(name) || !std::ifstream(dir + "/" + name + ".rev.idx").good()) continue;
+        open_positional_into(dir, name, name, false);
+        head_attr_names_.push_back(name);
+    }
 
     for (const auto& name : info_.structural_attrs) {
         auto sa = std::make_unique<StructuralAttr>();

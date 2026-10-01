@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <filesystem>
+#include <algorithm>
 #include <fstream>
 #include <vector>
 #include <fcntl.h>
@@ -28,23 +29,37 @@ bool newer_or_same(const std::string& a, const std::string& b) {
     return ec || ta >= tb;
 }
 
-bool listed_in_info(const std::string& dir, const std::string& name) {
-    std::ifstream in(dir + "/corpus.info");
-    for (std::string line; std::getline(in, line);) {
-        if (line.rfind("positional=", 0) != 0) continue;
-        size_t from = 11;
-        while (from <= line.size()) {
-            size_t to = line.find(',', from);
-            if (to == std::string::npos) to = line.size();
-            if (line.compare(from, to - from, name) == 0) return true;
-            from = to + 1;
-        }
+std::vector<std::string> split_csv(const std::string& v) {
+    std::vector<std::string> out;
+    size_t from = 0;
+    while (from <= v.size()) {
+        size_t to = v.find(',', from);
+        if (to == std::string::npos) to = v.size();
+        if (to > from) out.push_back(v.substr(from, to - from));
+        from = to + 1;
     }
+    return out;
+}
+
+std::string join_csv(const std::vector<std::string>& v) {
+    std::string s;
+    for (const auto& x : v) s += (s.empty() ? "" : ",") + x;
+    return s;
+}
+
+/// `attr` listed on corpus.info's head_attrs= line.
+bool listed_in_info(const std::string& dir, const std::string& attr) {
+    std::ifstream in(dir + "/corpus.info");
+    for (std::string line; std::getline(in, line);)
+        if (line.rfind("head_attrs=", 0) == 0)
+            for (const auto& a : split_csv(line.substr(11)))
+                if (a == attr) return true;
     return false;
 }
 
-bool add_to_info(const std::string& dir, const std::string& name, std::string* err) {
-    if (listed_in_info(dir, name)) return true;
+/// Add `attr` to head_attrs= (and drop `head#attr` from positional=, where the
+/// first prototype listed it).
+bool add_to_info(const std::string& dir, const std::string& attr, std::string* err) {
     const std::string path = dir + "/corpus.info", tmp = path + ".tmp";
     std::ifstream in(path);
     if (!in) {
@@ -54,14 +69,21 @@ bool add_to_info(const std::string& dir, const std::string& name, std::string* e
     std::vector<std::string> lines;
     bool done = false;
     for (std::string line; std::getline(in, line);) {
-        if (!done && line.rfind("positional=", 0) == 0) {
-            line += (line.size() > 11 ? "," : "") + name;
+        if (line.rfind("positional=", 0) == 0) {
+            std::vector<std::string> keep;
+            for (const auto& a : split_csv(line.substr(11)))
+                if (!Corpus::is_internal_attr_name(a)) keep.push_back(a);
+            line = "positional=" + join_csv(keep);
+        } else if (line.rfind("head_attrs=", 0) == 0) {
+            auto v = split_csv(line.substr(11));
+            if (std::find(v.begin(), v.end(), attr) == v.end()) v.push_back(attr);
+            line = "head_attrs=" + join_csv(v);
             done = true;
         }
         lines.push_back(line);
     }
     in.close();
-    if (!done) lines.push_back("positional=" + name);
+    if (!done) lines.push_back("head_attrs=" + attr);
     {
         std::ofstream out(tmp);
         for (const auto& l : lines) out << l << "\n";
@@ -88,7 +110,7 @@ bool write_vec_ok(const std::string& path, const std::vector<T>& v) {
 
 bool HeadAttr::up_to_date(const Corpus& corpus, const std::string& attr) {
     const std::string name = name_for(attr);
-    if (!corpus.has_attr(name) || !listed_in_info(corpus.dir(), name)) return false;
+    if (!corpus.has_attr(name) || !listed_in_info(corpus.dir(), attr)) return false;
     const std::string b = corpus.dir() + "/" + name;
     const std::string src = corpus.attr(attr).base_path();
     if (!newer_or_same(b + ".rev.idx", src + ".rev.idx") || !newer_or_same(b + ".rev.idx", src + ".dat")
@@ -225,7 +247,7 @@ bool HeadAttr::build(const Corpus& corpus, const std::string& attr, std::string*
         fs::rename(base + ext + ".tmp", base + ext, ec);
         if (ec) return fail("cannot rename " + base + ext + ".tmp: " + ec.message());
     }
-    return add_to_info(corpus.dir(), name, err);
+    return add_to_info(corpus.dir(), attr, err);
 }
 
 }  // namespace pando

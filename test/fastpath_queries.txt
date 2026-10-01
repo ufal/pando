@@ -313,3 +313,18 @@ a:[upos="DET"] b:[upos="NOUN"] :: distance(a,b) < 2; count by b.lemma
 [upos="VERB"] [upos="ADV"]* [upos="DET"]? [upos="ADJ"]* [upos="NOUN"]
 a:[upos="DET"] [upos="ADJ"]* b:[upos="NOUN"]+; count by b.lemma
 [upos="DET"] [upos="ADJ"]* [upos="NOUN"]+ within s having [upos="VERB"]
+# P5.6 head attributes: `parent [P]` restrictions and [P] > [C] read through head#A
+[deprel="nsubj" & parent [upos="VERB"]]
+[deprel="obj" & parent [lemma="have" | lemma="be"]]
+[upos="ADJ"] [upos="NOUN" & parent [upos!="VERB"]]
+[deprel="amod" & parent []]
+[upos="NOUN" & parent [upos="VERB" & lemma=".*e"]] within s
+[lemma="book" %c & parent [upos="VERB"]] :: match.text_langcode="en"
+a:[upos="DET"] b:[upos="NOUN" & parent [deprel="obj"]]; count by b.lemma
+[deprel="nsubj" & not parent [upos="VERB"]]
+[upos="VERB" & child [deprel="nsubj" & parent [upos="VERB"]]]
+[upos!="VERB"] > [deprel="nsubj"]
+[] > [deprel="nsubj"]
+a:[upos="VERB"] > b:[deprel="obj"]; count by a.lemma, b.lemma
+a:[upos="VERB" & text_langcode!="en"] > b:[upos="NOUN"]; count by a.lemma
+[deprel="nsubj"] < [upos="VERB"] [upos="NOUN"]

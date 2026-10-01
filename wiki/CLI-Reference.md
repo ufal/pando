@@ -79,10 +79,12 @@ for `--upgrade`:
 - `--packed-rev [auto|none|A[,B...]]` — also write block-compressed postings
   (`<attr>.rev.pfb`) for every single-valued positional attribute (`auto`, the
   value when the option is given without one) or the ones listed. Default `none`.
-- `--head-attrs A[,B...]` — head attributes `head#A` (the attribute of each
-  token's dependency head; see
-  [Dependency queries](Dependency-Queries.md#head-attributes-headlemma)), built
-  before folds, bitmaps and packed postings so these cover them too. Default none.
+- `--head-attrs A[,B...]` — store attribute A of each token's dependency head
+  (`head#A.*`, listed as `head_attrs=` in `corpus.info`; storage only), which
+  makes `[X] > [Y]`, `[Y] < [X]` and `parent [X]` much faster; see
+  [Dependency queries](Dependency-Queries.md#head-attributes).
+  Built before folds, bitmaps and packed postings so these cover them too.
+  Default none.
 - `--drop-rev` — after verifying that the packed postings decode to the same
   positions, remove the plain `<attr>.rev` files (implies `--packed-rev auto`).
   Saves disk space; queries then decode postings (see
