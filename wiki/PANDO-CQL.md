@@ -169,7 +169,7 @@ A **quoted raw word** expands to a **one-or-more repetition** of a disjunction s
 "can't"  →  [form="can't" | contr_form="can't"]+
 ```
 
-The sample corpus sentence **`sample-en_p6-s1`** (*I can't believe it.*) indexes *can't* as an MWT: lemmas **`can`** + **`not`** on the sub-tokens (surface **`can`** + **`n't`**), with **`contr.form="can't"`** on the spanning region. Searching **`"can't"`** finds all the tokens within that contraction, as well as occurrences of *can't* that are in the corpus as single tokens. There is one side-effect: `"had"` in a sentence like *John had had enough* will find the two sequential occurrences of *had* as a single result, not as two separate ones. 
+The sample corpus sentence **`sample-en_p6-s1`** (*I can't believe it.*) indexes *can't* as an MWT: lemmas **`can`** + **`not`** on the sub-tokens (surface **`can`** + **`n't`**), with **`contr.form="can't"`** on the spanning region. Searching **`"can't"`** finds all the tokens within that contraction, as well as occurrences of *can't* that are in the corpus as single tokens. There is one side-effect: `"had"` in a sentence like *John had had enough* will find the two sequential occurrences of *had* as a single result, not as two separate ones. A corpus without contractions (no `contr_form`, e.g. most UD treebanks without multi-word tokens) has no such spans: there `"the"` is just the one token `[form="the"]`, as in CWB (*the the* gives two hits), and `/th.*/` is `[form=/th.*/]`; an explicit repetition (`"the"{2}`) stays as written. 
 
 ## Multivalue fields and overlapping regions
 

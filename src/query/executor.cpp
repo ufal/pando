@@ -7429,6 +7429,24 @@ void merge_aggregate_into(AggregateBucketData& dst, AggregateBucketData& src) {
 
 }  // namespace
 
+// A bare "s" (or /re/) token is [form="s" | contr_form="s"]+: one hit per run over
+// the tokens of a contraction. A corpus without contr_form has no contractions:
+// it is the one-token [form="s"], as in CQP ("the the" was one hit, and the
+// repeated OR took the generic path: 3 s instead of a posting-list count).
+static bool simplify_bare_strings(const Corpus& corpus, const TokenQuery& q, TokenQuery& out) {
+    bool any = false;
+    for (const auto& t : q.tokens) any |= t.bare_string;
+    if (!any || corpus.has_attr("contr_form")) return false;
+    out = q;
+    for (auto& t : out.tokens) {
+        if (!t.bare_string) continue;
+        t.bare_string = false;
+        if (t.conditions && !t.conditions->is_leaf && t.conditions->left) t.conditions = t.conditions->left;
+        if (!t.bare_repeat_given) t.min_repeat = t.max_repeat = 1;
+    }
+    return true;
+}
+
 MatchSet QueryExecutor::execute(const TokenQuery& query,
                                 size_t max_matches,
                                 bool count_total,
@@ -7438,6 +7456,9 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                                 unsigned num_threads,
                                 const std::vector<std::string>* aggregate_by_fields,
                                 bool skip_name_validation) {
+    if (TokenQuery simple; simplify_bare_strings(corpus_, query, simple))
+        return execute(simple, max_matches, count_total, max_total_cap, sample_size, random_seed, num_threads,
+                       aggregate_by_fields, skip_name_validation);
     // Materialised merge operands (regex / %c / AND postings) are kept for the
     // whole query: several fast paths are tried in turn and each asked for the
     // same operands (a two-regex sequence built each list twice), and the ranges
@@ -8100,6 +8121,13 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
                                          const TokenQuery& target_query,
                                          size_t max_matches,
                                          bool count_total) {
+    {
+        TokenQuery s2, t2;
+        const bool a = simplify_bare_strings(corpus_, source_query, s2);
+        const bool b = simplify_bare_strings(corpus_, target_query, t2);
+        if (a || b)
+            return execute_parallel(a ? s2 : source_query, b ? t2 : target_query, max_matches, count_total);
+    }
     validate_query_name_bindings(source_query, &target_query);
     validate_query_name_bindings(target_query, &source_query);
 

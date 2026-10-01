@@ -222,6 +222,12 @@ struct QueryToken {
     std::vector<std::string> where_refs;
     std::vector<std::vector<CorpusPos>> where_positions;
 
+    /// A bare "string" / /regex/ token: [form=… | contr_form=…]+ (one hit per run of a
+    /// contraction's tokens); without a contr_form attribute the executor reads it
+    /// as the one-token [form=…] (as CQP does).
+    bool bare_string = false;
+    bool bare_repeat_given = false;   // `"s"{2}`, `"s"?`: that repetition, not the run
+
     bool has_repetition() const { return min_repeat != 1 || max_repeat != 1; }
     bool is_anchor() const { return anchor != RegionAnchorType::NONE; }
 };

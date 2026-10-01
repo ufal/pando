@@ -274,6 +274,10 @@ if(BUILD_TESTING)
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
                 --server $<TARGET_FILE:pando-server>
                 --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/aligned.conllu)
+        # a bare "string" without contr_form = one token (CQP)
+        add_test(NAME bare_string
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/bare_string_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
         # P6.4: the server's result cache changes no answer (aligned: persistent names)
         add_test(NAME result_cache
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/result_cache_test.py

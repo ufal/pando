@@ -933,6 +933,7 @@ QueryToken Parser::parse_token_expr() {
         qt.conditions = ConditionNode::make_branch(BoolOp::OR, std::move(form_node), std::move(contr_node));
         qt.min_repeat = 1;
         qt.max_repeat = REPEAT_UNBOUNDED;
+        qt.bare_string = true;
     } else if (t.type == TokType::REGEX) {
         // /pattern/ → [form=/pattern/ | contr_form=/pattern/]+
         lexer_.consume();
@@ -949,13 +950,16 @@ QueryToken Parser::parse_token_expr() {
         qt.conditions = ConditionNode::make_branch(BoolOp::OR, std::move(form_node), std::move(contr_node));
         qt.min_repeat = 1;
         qt.max_repeat = REPEAT_UNBOUNDED;
+        qt.bare_string = true;
     } else {
         throw std::runtime_error("Expected '[' or string or /regex/ at position " +
                                  std::to_string(t.pos));
     }
 
     // Optional repetition quantifier: {n,m}, {n,}, {n}, +, ?
+    const size_t before_rep = lexer_.peek().pos;
     parse_repetition(qt);
+    if (qt.bare_string && lexer_.peek().pos != before_rep) qt.bare_repeat_given = true;
 
     return qt;
 }
