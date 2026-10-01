@@ -172,6 +172,8 @@ struct HitSet {
     std::string display;             // shown in results / info
     bool allow_empty_alignment = false;
     std::vector<std::vector<std::string>> sorts;
+    /// P7.10: a single sort step done without the hits (keys counted, pages re-run)
+    std::shared_ptr<const SortIndex> sort_index;
     NameIndexMap nm, tnm;
     bool total_known = false;
     size_t total = 0;
@@ -447,6 +449,34 @@ MatchSet aggregate(const Corpus& corpus, HitSet& hs, const std::vector<std::stri
     return ms;
 }
 
+// P7.10: `sort set by fields` without materialising: the hits per sort key (pass 1);
+// false = sort the kept hits (set already kept, parallel, sorted before, or keys
+// the index does not cover).
+bool sort_lazily(const Corpus& corpus, HitSet& hs, const std::vector<std::string>& fields,
+                 ExecProgress* progress) {
+    if (hs.materialised || hs.parallel() || !hs.sorts.empty() || fields.empty()) return false;
+    QueryExecutor ex(corpus);
+    setup_executor(ex, hs, progress);
+    const NameIndexMap& nm = hs.nm;
+    auto key = [&](const Match& m) { return make_group_key(corpus, m, nm, fields); };
+    auto less = [](const std::string& a, const std::string& b) { return compare_group_keys(a, b); };
+    auto idx = ex.build_sort_index(hs.st().query, fields, key, less);
+    if (!idx) return false;
+    hs.know_total(idx->total, true);
+    hs.sort_index = std::move(idx);
+    hs.sorts.push_back(fields);
+    return true;
+}
+
+// The hits at sorted positions [from, to) of a lazily sorted set (pass 2).
+std::optional<MatchSet> sorted_page_of(const Corpus& corpus, HitSet& hs, size_t from, size_t to,
+                                       ExecProgress* progress) {
+    if (!hs.sort_index || hs.materialised || hs.sorts.size() != 1) return std::nullopt;
+    QueryExecutor ex(corpus);
+    setup_executor(ex, hs, progress);
+    return ex.sorted_page(hs.st().query, *hs.sort_index, from, to);
+}
+
 }  // namespace
 
 // ── ProgramSession: hit-set API ─────────────────────────────────────────
@@ -509,6 +539,16 @@ std::string ProgramSession::page_json(const Corpus& corpus, const std::string& n
     if (!hs) throw UnknownHitSet(name);
     hs->touch();
     const unsigned threads = std::max(1u, opts.threads);
+    if (!hs->materialised && hs->sort_index && opts.limit > 0) {
+        auto t0 = std::chrono::high_resolution_clock::now();
+        const size_t to = opts.limit > SIZE_MAX - opts.offset ? SIZE_MAX : opts.offset + opts.limit;
+        if (auto page = sorted_page_of(corpus, *hs, opts.offset, to, progress)) {
+            const double elapsed = std::chrono::duration<double, std::milli>(
+                                       std::chrono::high_resolution_clock::now() - t0).count();
+            return to_query_result_json(corpus, hs->display, *page, opts, elapsed, extra_result_fields,
+                                        std::min(opts.offset, page->total_count));
+        }
+    }
     if (!hs->materialised && (!hs->sorts.empty() || hs->parallel()))
         materialise(corpus, *hs, name, *impl_, threads, progress);
     // A deep page of a lazy set: materialise once (every later page is a slice)
@@ -1261,15 +1301,16 @@ static void emit_field_json(std::ostream& out, const std::string& val, bool is_m
     }
 }
 
+/// `base`: ms.matches[0] is hit number `base` of the set (a sorted page, P7.10).
 static void emit_tabulate_json(std::ostream& out, const Corpus& corpus, const MatchSet& ms,
-                               const GroupCommand& cmd, const NameIndexMap& name_map) {
+                               const GroupCommand& cmd, const NameIndexMap& name_map, size_t base = 0) {
     if (cmd.fields.empty()) {
         out << "{\"ok\": false, \"error\": \"tabulate requires at least one field\"}\n";
         return;
     }
     try {
-    const size_t n = ms.matches.size();
-    const size_t start = std::min(cmd.tabulate_offset, n);
+    const size_t n = base + ms.matches.size();
+    const size_t start = std::max(base, std::min(cmd.tabulate_offset, n));
     const size_t end = std::min(start + cmd.tabulate_limit, n);
     const size_t total_hits = ms.total_count > 0 ? ms.total_count : n;
 
@@ -1289,7 +1330,7 @@ static void emit_tabulate_json(std::ostream& out, const Corpus& corpus, const Ma
         out << "    [";
         for (size_t f = 0; f < cmd.fields.size(); ++f) {
             if (f > 0) out << ", ";
-            std::string val = read_tabulate_field(corpus, ms.matches[i], name_map, cmd.fields[f]);
+            std::string val = read_tabulate_field(corpus, ms.matches[i - base], name_map, cmd.fields[f]);
             emit_field_json(out, val, field_is_multi[f]);
         }
         out << "]";
@@ -2131,8 +2172,17 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                         << n << "}\n";
                     break;
                 }
-                case CommandType::TABULATE:
-                    if (!hs->materialised && hs->sorts.empty() && !hs->parallel()) {
+                case CommandType::TABULATE: {
+                    const GroupCommand& tc = stmt.command;
+                    const size_t tab_to = tc.tabulate_limit > SIZE_MAX - tc.tabulate_offset
+                        ? SIZE_MAX : tc.tabulate_offset + tc.tabulate_limit;
+                    std::optional<MatchSet> sorted_rows;
+                    if (!hs->materialised && hs->sort_index)
+                        sorted_rows = sorted_page_of(corpus, *hs, tc.tabulate_offset, tab_to, opts.progress);
+                    if (sorted_rows) {
+                        emit_tabulate_json(out, corpus, *sorted_rows, tc, nm_to_use,
+                                           std::min(tc.tabulate_offset, sorted_rows->total_count));
+                    } else if (!hs->materialised && hs->sorts.empty() && !hs->parallel()) {
                         // unsorted and not kept: only the rows asked for (and the total),
                         // as a /query page
                         const GroupCommand& t = stmt.command;
@@ -2147,6 +2197,7 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                         emit_tabulate_json(out, corpus, full(), stmt.command, nm_to_use);
                     }
                     break;
+                }
                 case CommandType::DESCRIBE:
                     emit_describe_json(out, corpus, full(), stmt.command, nm_to_use);
                     break;
@@ -2181,6 +2232,25 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                     break;
                 }
                 case CommandType::SORT: {
+                    // P7.10: the first sort of a set that is not kept: per sort key, no hits
+                    try {
+                        if (sort_lazily(corpus, *hs, stmt.command.fields, opts.progress)) {
+                            const QueryOptions qo = query_options_of(opts);
+                            const size_t to = qo.limit > SIZE_MAX - qo.offset ? SIZE_MAX : qo.offset + qo.limit;
+                            if (auto page = sorted_page_of(corpus, *hs, qo.offset, to, opts.progress)) {
+                                out << to_query_result_json(corpus, "(sorted)", *page, qo, 0.0, {},
+                                                            std::min(qo.offset, page->total_count));
+                                break;
+                            }
+                            // the page run did not fit the index: sort the kept hits below
+                            hs->sort_index.reset();
+                            hs->sorts.pop_back();
+                        }
+                    } catch (const std::exception& e) {
+                        out << "{\"ok\": false, \"error\": " << jstr(e.what()) << "}\n";
+                        break;
+                    }
+                    hs->sort_index.reset();   // a second sort: of the kept hits
                     materialise(corpus, *hs, set_name, S, threads, opts.progress);
                     try {
                         if (!stmt.command.fields.empty()) {   // P7.7: one key per hit

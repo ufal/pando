@@ -16,7 +16,8 @@ session-less routes give:
   * a /run query without a name (a page) is Last: `count by` on it counts all hits;
   * with --session-memory-bytes 1 every cache is dropped after each request:
     pages, sorts and counts are re-derived and still equal;
-  * --session-max-hits: 413 "too_large" for a set that would need more, small sets work;
+  * --session-max-hits: 413 "too_large" for a set that would need more (`raw`), small sets work,
+    a sort of a big set works without keeping its hits;
   * async deposits ("total": "async") pick up the background total;
   * TTL expiry, --max-sessions (LRU idle session makes room), client-chosen ids,
     bad ids / names, unknown session / set (404 with unknown_session / unknown_hitset),
@@ -271,13 +272,17 @@ def check_async(srv, label):
 
 
 def check_limits(exe, corpus, label, big_q):
-    # max hits: a big set cannot be sorted, a small one can
+    # max hits: a big set cannot be kept (raw, a second sort), a small one can; one
+    # sort of a set that is not kept needs no hits (P7.10: per sort key)
     srv = Server(exe, corpus, "--session-max-hits", "5")
     try:
         sid = srv.session()
         srv.post("/query", {"session_id": sid, "name": "B", "query": big_q, "limit": 1, "total": True})
         st, got = srv.post("/run", {"session_id": sid, "cql": "sort B by lemma"})
-        check(st == 413 and got.get("too_large") and got.get("max_hits") == 5, f"{label} max hits 413: {st} {got}")
+        check(st == 200 and got.get("result", {}).get("page", {}).get("total", 0) > 5,
+              f"{label} sort of a too-large set (per key, no hits kept): {st} {str(got)[:200]}")
+        st, got = srv.post("/run", {"session_id": sid, "cql": "raw B"})
+        check(st == 413 and got.get("too_large") and got.get("max_hits") == 5, f"{label} max hits 413: {st} {str(got)[:200]}")
         st, got = srv.post("/run", {"session_id": sid, "cql": "count B by lemma"})
         check(st == 200, f"{label} count of a too-large set still works (sink): {st}")
         st, got = srv.post("/query", {"session_id": sid, "from": "B", "offset": 20000, "limit": 2})

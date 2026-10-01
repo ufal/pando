@@ -2455,6 +2455,8 @@ static void run_query(const Corpus& corpus, const std::string& input,
         size_t for_si = SIZE_MAX;   // the command statement it belongs to
         size_t hits = 0;
     } sink_state;
+    // P7.10: the SORT statement whose hits the query already returned sorted (a page)
+    size_t presorted_si = SIZE_MAX;
 
     for (size_t si = 0; si < prog.size(); ++si) {
         auto& stmt = prog[si];
@@ -2636,11 +2638,53 @@ static void run_query(const Corpus& corpus, const std::string& input,
                         count_t = true;
                     }
                 }
+                // P7.10: `…; sort by f [; tabulate o n …]` at the end of the program: count
+                // the hits per sort key, then keep only the first ones in sorted order (the
+                // page shown and the rows tabulated), not every hit
+                bool presorted = false;
+                const bool sort_next = next_is_command && !opts.interactive && !stmt.is_parallel
+                    && stmt.name.empty() && !is_dep_subtree_prelude && opts.sample == 0
+                    && !opts.count_only && !opts.dump_matches && !opts.dump_page && !sink_state.sink
+                    && prog[si + 1].command.type == CommandType::SORT && !prog[si + 1].command.fields.empty()
+                    && (prog[si + 1].command.query_name.empty() || prog[si + 1].command.query_name == "Last");
+                const GroupCommand* tab_after = nullptr;
+                bool sort_last_use = false;
+                if (sort_next) {
+                    if (si + 2 >= prog.size()) {
+                        sort_last_use = true;
+                    } else if (prog[si + 2].has_command && !prog[si + 2].has_query
+                               && prog[si + 2].command.type == CommandType::TABULATE
+                               && (prog[si + 2].command.query_name.empty()
+                                   || prog[si + 2].command.query_name == "Last")
+                               && si + 3 >= prog.size()) {
+                        sort_last_use = true;
+                        tab_after = &prog[si + 2].command;
+                    }
+                }
+                if (sort_last_use && executor.may_sink_hits(stmt.query)) {
+                    auto upto = [](size_t a, size_t b) { return b > SIZE_MAX - a - 1 ? SIZE_MAX - 1 : a + b; };
+                    size_t hi = upto(opts.offset, opts.limit);
+                    if (tab_after) hi = std::max(hi, upto(tab_after->tabulate_offset, tab_after->tabulate_limit));
+                    const std::vector<std::string>& fields = prog[si + 1].command.fields;
+                    const NameIndexMap snm = QueryExecutor::build_name_map_for_stripped_query(stmt.query);
+                    auto key = [&](const Match& m) { return make_group_key(corpus, m, snm, fields); };
+                    auto less = [](const std::string& a, const std::string& b) { return a < b; };   // as SORT (bytewise)
+                    if (auto idx = executor.build_sort_index(stmt.query, fields, key, less)) {
+                        // one hit past the page: the "(N matches, M more)" line
+                        if (auto page = executor.sorted_page(stmt.query, *idx, 0, hi + 1)) {
+                            session.last = std::make_shared<MatchSet>(std::move(*page));
+                            presorted = true;
+                            presorted_si = si + 1;
+                        }
+                    }
+                }
+                if (!presorted) {
                 // a new object: the previous one may live on as a named set
                 session.last = std::make_shared<MatchSet>();
                 *session.last = executor.execute(stmt.query, max_m, count_t, max_total_cap,
                                           opts.sample, opts.sample_seed, opts.threads,
                                           aggregate_by);
+                }
                 if (sink_state.sink) {
                     sink_state.hits = executor.sink_hits();
                     executor.set_hit_sink(nullptr);
@@ -3228,6 +3272,11 @@ static void run_query(const Corpus& corpus, const std::string& input,
                     if (cmd_to_run.fields.empty()) {
                         std::cerr << "Error: sort requires 'by' clause\n";
                         return;
+                    }
+                    if (presorted_si == si) {
+                        presorted_si = SIZE_MAX;
+                        if (should_emit_output) emit_hits_text(corpus, "(sorted)", *ms_to_use, opts, 0);
+                        break;
                     }
                     {
                         // the sets are shared: another name holding the same hits keeps

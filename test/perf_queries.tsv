@@ -101,6 +101,8 @@ C10	[upos="NOUN"] :: match.text_langcode="en"; count by text_treebank
 C11	[upos="NOUN"] :: match.text_langcode!="en"; count by lemma
 C12	[upos="ADJ"]; freq by lemma
 C13	[upos="ADJ"] [upos="NOUN"]; sort by lemma; tabulate 0 20 match.lemma
+C14	[upos="NOUN"]; sort by lemma; tabulate 0 20 match.lemma
+C15	[upos!="PUNCT"]; sort by lemma; tabulate 1000000 20 match.lemma
 L1	[upos="ADJ"] [upos="NOUN"]; coll by lemma
 L2	a:[upos="DET"] []{0,2} b:[upos="NOUN"]; coll on a by form
 L3	[upos="VERB"]; dcoll obj by lemma

@@ -110,6 +110,16 @@ private:
         cap_ = static_cast<uint32_t>(nc);
     }
 
+    // room for `need` positions, the current ones dropped (assign)
+    void fresh(size_t need) {
+        size_ = 0;
+        if (need <= cap_) return;
+        auto* p = new CorpusPos[need];
+        if (on_heap()) delete[] heap_;
+        heap_ = p;
+        cap_ = static_cast<uint32_t>(need);
+    }
+
 public:
     using value_type = CorpusPos;
     using size_type = size_t;
@@ -153,14 +163,12 @@ public:
     template <class It, class = decltype(*std::declval<It>())>
     void assign(It b, It e) {
         const size_t n = static_cast<size_t>(std::distance(b, e));
-        size_ = 0;
-        grow(n);
+        fresh(n);
         std::copy(b, e, ptr());
         size_ = static_cast<uint32_t>(n);
     }
     void assign(size_t n, CorpusPos v) {
-        size_ = 0;
-        grow(n);
+        fresh(n);
         std::fill(ptr(), ptr() + n, v);
         size_ = static_cast<uint32_t>(n);
     }
@@ -842,6 +850,22 @@ struct HitSink {
     virtual void hit(const CorpusPos* starts, const CorpusPos* ends, size_t n_tokens) = 0;
 };
 
+/// P7.10: a sort of a query's hits without keeping them. Pass 1 (build_sort_index)
+/// counts the hits per sort key and orders the keys; a page is one more run of
+/// the query (sorted_page) that keeps only the hits that fall on it. Memory: the
+/// distinct keys and the page, not the hits.
+struct SortIndex {
+    std::vector<std::string> fields;
+    size_t total = 0;
+    std::unordered_map<uint64_t, uint32_t> rank_of;   // packed key → rank
+    std::vector<uint32_t> rank_dense;                 // or by packed key: rank + 1 (0: no hit)
+    std::vector<size_t> start;                        // rank → first position in the sorted order
+};
+/// The sort key of a hit as the materialised sort computes it (make_group_key),
+/// and its order; equal strings are one key (their hits keep their order).
+using SortKeyString = std::function<std::string(const Match&)>;
+using SortKeyLess = std::function<bool(const std::string&, const std::string&)>;
+
 struct QueryCancelled : std::runtime_error {
     QueryCancelled() : std::runtime_error("query cancelled") {}
 };
@@ -862,6 +886,14 @@ public:
     /// says (no per-hit filters after the kernels); token anchors are decided at
     /// execution. A false here: the hits would all be materialised anyway.
     bool may_sink_hits(const TokenQuery& q) const;
+    /// P7.10 pass 1 for `sort by fields` (one or two positional / region attribute
+    /// fields, hits that reach the hit sink); nullptr when not supported (sort the
+    /// materialised hits instead).
+    std::shared_ptr<const SortIndex> build_sort_index(const TokenQuery& q, const std::vector<std::string>& fields,
+                                                      const SortKeyString& key, const SortKeyLess& less);
+    /// P7.10 pass 2: the hits at sorted positions [from, to) (fewer at the end),
+    /// total_count = all hits; nullopt when the run does not match the index.
+    std::optional<MatchSet> sorted_page(const TokenQuery& q, const SortIndex& si, size_t from, size_t to);
     /// Throw QueryCancelled when the progress block asks to stop (long loops outside
     /// the per-hit checkpoints: operand unions, lexicon scans).
     void check_cancelled() const {

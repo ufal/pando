@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """P7.8: `coll` / `dcoll` counted in the executor (hit sink) and `tabulate` run for its
-page only must give what counting over materialised hits gives.
+page only must give what counting over materialised hits gives; P7.10: `sort` per
+sort key (pages re-run, no hits kept) must give the materialised sort's order.
 
 On test/data/sample.conllu:
 
@@ -8,7 +9,10 @@ On test/data/sample.conllu:
     sink) and off (every hit materialised, then counted);
   * pando-server /run: the same, one server per mode;
   * tabulate: `query; tabulate o n fields` (only the first o+n hits) against the
-    named set `x = query; tabulate x o n fields` (all hits), CLI and /run.
+    named set `x = query; tabulate x o n fields` (all hits), CLI and /run;
+  * sort: `query; sort by f[; tabulate o n …]` (CLI, per key) against the named set
+    (materialised and sorted), and /run `x = query; sort x by f` + tabulate / /query
+    pages against `x = query; raw x; sort x by f` (kept, then sorted).
 
   test/coll_sink_test.py --pando build/pando --pando-index build/pando-index \\
       --server build/pando-server --conllu test/data/sample.conllu
@@ -42,6 +46,18 @@ COLL = [
     '[upos="NOUN"]; dcoll descendants by lemma',
     'a:[upos="VERB"] > b:[upos="NOUN"]; dcoll on b head by lemma',
     '[upos="VERB"]; dcoll on nosuch obj, nsubj by lemma',
+]
+SORT = [
+    ('[upos="NOUN"]', 'lemma', '3 6 match.lemma, match.form'),
+    ('[upos="NOUN"]', 'form', '0 300 match.form'),
+    ('a:[upos="ADJ"] b:[upos="NOUN"]', 'b.lemma, a.lemma', '0 9 a.lemma, b.lemma'),
+    ('a:[upos="VERB"] > b:[upos="NOUN"]', 'b.form', '2 7 a.form, b.form'),
+    ('[upos="NOUN"]', 'text_lang', '0 12 match.form, text_lang'),
+    ('[upos="DET"] []{0,2} [upos="NOUN"]', 'lemma', '1 8 match.lemma'),
+    ('[upos="ADJ"]+ [upos="NOUN"]', 'lemma', '0 5 match.lemma'),
+    ('<s> [upos="DET"]', 'lemma', '0 5 match.lemma'),         # anchored: materialised
+    ('[upos="NOUN"]', 'feats/Number', '0 4 match.form'),      # keys the index does not cover
+    ('[upos="NOUN"]', 'lemma, form, upos', '0 4 match.form'),
 ]
 TAB = [
     ('[upos="NOUN"]', '3 5 match.form, match.lemma'),
@@ -85,6 +101,15 @@ def main():
                 p, f = json.loads(page[1])["result"], json.loads(full[1])["result"]
                 check(p == f, f"CLI tabulate {q} {t}: page {p} != all hits {f}")
 
+        for q, f, t in SORT:
+            for args in (("--api",), ("--api", "--offset", "4", "--limit", "5")):
+                lazy = cli(f"{q}; sort by {f}", "on", *args)
+                kept = cli(f"x = {q}; sort x by {f}", "on", *args)
+                check(lazy[0] == 0 and lazy == kept, f"CLI {args} {q}; sort by {f}: {lazy[1][:300]!r} != {kept[1][:300]!r}")
+            lazy = cli(f"{q}; sort by {f}; tabulate {t}", "on", "--api")
+            kept = cli(f"x = {q}; sort x by {f}; tabulate x {t}", "on", "--api")
+            check(lazy[0] == 0 and lazy == kept, f"CLI {q}; sort by {f}; tabulate: {lazy[1][:300]!r} != {kept[1][:300]!r}")
+
         servers = {m: Server(opts.server, idx, env={"PANDO_FASTPATH": m}) for m in ("on", "off")}
         try:
             for q in COLL:
@@ -102,6 +127,20 @@ def main():
                     check(p["result"]["rows"] == f["result"]["rows"]
                           and p["result"]["total_matches"] == f["result"]["total_matches"],
                           f"/run tabulate {q} {t}: page {p['result']} != all hits {f['result']}")
+            for q, f, t in SORT:
+                lz = s.req("POST", "/run", {"cql": f"x = {q}; sort x by {f}; tabulate x {t}"})
+                kp = s.req("POST", "/run", {"cql": f"x = {q}; raw x; sort x by {f}; tabulate x {t}"})
+                check(lz[0] == 200 and lz == kp, f"/run sort {q} by {f}: {str(lz)[:300]} != {str(kp)[:300]}")
+                pages = {}
+                for kind, cql in (("lazy", f"sort S by {f}"), ("kept", f"raw S; sort S by {f}")):
+                    sid = s.session()
+                    s.post("/query", {"session_id": sid, "name": "S", "query": q, "limit": 1, "total": True})
+                    first = s.post("/run", {"session_id": sid, "cql": cql, "offset": 1, "limit": 3})
+                    rest = [s.post("/query", {"session_id": sid, "from": "S", "offset": o, "limit": 4})
+                            for o in (0, 5, 30, 1000)]
+                    pages[kind] = json.dumps([first] + rest, sort_keys=True).replace(sid, "SID")
+                check(pages["lazy"] == pages["kept"], f"/query pages of sorted {q} by {f} differ: "
+                      f"{pages['lazy'][:300]} != {pages['kept'][:300]}")
         finally:
             for srv in servers.values():
                 srv.close()
