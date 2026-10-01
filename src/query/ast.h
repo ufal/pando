@@ -397,6 +397,11 @@ struct Statement {
 
     GroupCommand command;
     bool         has_command = false;
+
+    /// P6.4: the statement's text as written (for a named query the part after
+    /// `name =`), trimmed: with the parser options it determines the statement
+    /// (result cache keys).
+    std::string source;
 };
 
 using Program = std::vector<Statement>;

@@ -174,7 +174,7 @@ add_executable(cwb-import src/cli/cwb_import_main.cpp)
 target_link_libraries(cwb-import PRIVATE pando_core)
 
 # API layer: query execution + JSON (used by CLI and server)
-add_library(pando_api STATIC src/api/query_json.cpp src/api/program_api.cpp src/api/query_jobs.cpp src/api/group_counts.cpp src/api/coll_counts.cpp
+add_library(pando_api STATIC src/api/query_json.cpp src/api/program_api.cpp src/api/query_jobs.cpp src/api/group_counts.cpp src/api/coll_counts.cpp src/api/result_cache.cpp
     src/api/server_api.cpp src/api/server_capi.cpp src/api/sessions.cpp
     src/api/limits.cpp)
 target_include_directories(pando_api PUBLIC src)
@@ -273,6 +273,11 @@ if(BUILD_TESTING)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/persistent_names_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
                 --server $<TARGET_FILE:pando-server>
+                --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/aligned.conllu)
+        # P6.4: the server's result cache changes no answer (aligned: persistent names)
+        add_test(NAME result_cache
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/result_cache_test.py
+                --server $<TARGET_FILE:pando-server> --pando-index $<TARGET_FILE:pando-index>
                 --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/aligned.conllu)
         # P7.8: coll / dcoll via the hit sink and page-only tabulate = over all hits
         add_test(NAME coll_sink

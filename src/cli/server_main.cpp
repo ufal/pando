@@ -43,6 +43,8 @@ int main(int argc, char* argv[]) {
                   << "    --result-ttl SEC        drop an unused finished result after SEC (default 3600)\n"
                   << "    --abandon-after SEC     cancel a count nobody polled for SEC (default 120; 0 = never)\n"
                   << "    --debug-total-delay MS  testing: reveal every total gradually over MS\n"
+                  << "  --cache-mb MB               recent pages, count / freq / coll results and sort indexes\n"
+                  << "                              kept for repeated requests (default 128; 0 = off)\n"
                   << "  --query-timeout MS          default /query time limit (0 = none; per request \"timeout_ms\")\n"
                   << "  --query-threads N           count a total / count by over N position ranges in parallel\n"
                   << "                              (default 1: one thread per query)\n"
@@ -67,6 +69,7 @@ int main(int argc, char* argv[]) {
     size_t query_timeout_ms = 0;
     unsigned query_threads = 1;
     SessionConfig sess_cfg;
+    size_t cache_bytes = ServerConfig{}.cache_bytes;
     std::string limits_file;
     bool trust_tier = false;
     for (int i = 2; i < argc; ++i) {
@@ -83,7 +86,8 @@ int main(int argc, char* argv[]) {
         if (a == "--total-workers" || a == "--result-cache" || a == "--result-ttl"
             || a == "--abandon-after" || a == "--debug-total-delay" || a == "--query-timeout"
             || a == "--query-threads" || a == "--session-ttl" || a == "--max-sessions"
-            || a == "--session-memory" || a == "--session-memory-bytes" || a == "--session-max-hits") {
+            || a == "--session-memory" || a == "--session-memory-bytes" || a == "--session-max-hits"
+            || a == "--cache-mb") {
             if (!num_arg(v) || v < 0) return 1;
             if (a == "--total-workers") job_cfg.workers = static_cast<unsigned>(std::max(1LL, v));
             else if (a == "--result-cache") job_cfg.max_entries = static_cast<size_t>(std::max(1LL, v));
@@ -96,6 +100,7 @@ int main(int argc, char* argv[]) {
             else if (a == "--session-memory") sess_cfg.memory_budget = static_cast<size_t>(v) << 20;
             else if (a == "--session-memory-bytes") sess_cfg.memory_budget = static_cast<size_t>(v);   // tests
             else if (a == "--session-max-hits") sess_cfg.max_hits = static_cast<size_t>(v);
+            else if (a == "--cache-mb") cache_bytes = static_cast<size_t>(v) << 20;
             else job_cfg.debug_delay = std::chrono::milliseconds(v);
             continue;
         }
@@ -147,6 +152,7 @@ int main(int argc, char* argv[]) {
     cfg.query_timeout_ms = query_timeout_ms;
     cfg.query_threads = query_threads;
     cfg.sessions = sess_cfg;
+    cfg.cache_bytes = cache_bytes;
     if (!limits_file.empty()) {
         std::ifstream in(limits_file);
         if (!in) {

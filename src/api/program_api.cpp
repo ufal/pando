@@ -5,6 +5,7 @@
 #include "api/query_json.h"
 #include "api/coll_counts.h"
 #include "api/group_counts.h"
+#include "api/result_cache.h"
 #include "core/json_utils.h"
 #include "core/count_hierarchy_json.h"
 #include "query/parser.h"
@@ -174,6 +175,10 @@ struct HitSet {
     std::vector<std::vector<std::string>> sorts;
     /// P7.10: a single sort step done without the hits (keys counted, pages re-run)
     std::shared_ptr<const SortIndex> sort_index;
+    /// P6.4: what determines the hits (parser options + the query statement's text),
+    /// for result cache keys; empty when the query depends on the session (labels
+    /// of earlier statements, `where` sets, dep_subtree sources): not cached.
+    std::string recipe;
     NameIndexMap nm, tnm;
     bool total_known = false;
     size_t total = 0;
@@ -294,6 +299,7 @@ HitSetTooLarge::HitSetTooLarge(const std::string& name, size_t h, size_t lim, st
 
 struct ProgramSession::Impl {
     std::map<std::string, HitSetPtr> sets;   // "Last" and the named sets
+    ResultCache* cache = nullptr;            // P6.4 (shared by the server's sessions)
     size_t max_hits = 0;                     // 0 = no limit
     ProgramSession::AdmitFn admit;
 
@@ -449,18 +455,53 @@ MatchSet aggregate(const Corpus& corpus, HitSet& hs, const std::vector<std::stri
     return ms;
 }
 
+// P6.4: the recipe of a statement (see HitSet::recipe); "" = depends on the session.
+std::string recipe_of(const Statement& st, bool strict, bool allow_empty_alignment, bool external = false) {
+    if (st.source.empty() || external) return {};
+    auto session_bound = [](const TokenQuery& q) {
+        if (!q.global_alignment_filters.empty()) return true;
+        for (const auto& t : q.tokens)
+            if (t.is_dep_subtree || !t.where_refs.empty()) return true;
+        return false;
+    };
+    if (session_bound(st.query) || (st.is_parallel && session_bound(st.target_query))) return {};
+    return cache_key({"recipe/1", strict ? "strict" : "-", allow_empty_alignment ? "empty" : "-", st.source});
+}
+
+std::string sorts_key(const std::vector<std::vector<std::string>>& sorts) {
+    std::string k;
+    for (const auto& step : sorts) {
+        for (const auto& f : step) { k += f; k += ','; }
+        k += ';';
+    }
+    return k;
+}
+
 // P7.10: `sort set by fields` without materialising: the hits per sort key (pass 1);
 // false = sort the kept hits (set already kept, parallel, sorted before, or keys
 // the index does not cover).
 bool sort_lazily(const Corpus& corpus, HitSet& hs, const std::vector<std::string>& fields,
-                 ExecProgress* progress) {
+                 ExecProgress* progress, ResultCache* cache) {
     if (hs.materialised || hs.parallel() || !hs.sorts.empty() || fields.empty()) return false;
-    QueryExecutor ex(corpus);
-    setup_executor(ex, hs, progress);
-    const NameIndexMap& nm = hs.nm;
-    auto key = [&](const Match& m) { return make_group_key(corpus, m, nm, fields); };
-    auto less = [](const std::string& a, const std::string& b) { return compare_group_keys(a, b); };
-    auto idx = ex.build_sort_index(hs.st().query, fields, key, less);
+    std::string ck;
+    std::shared_ptr<const SortIndex> idx;
+    if (cache && !hs.recipe.empty()) {
+        ck = cache_key({"sortindex", hs.recipe, sorts_key({fields})});
+        if (auto e = cache->get(ck)) idx = e->sort;
+    }
+    if (!idx) {
+        QueryExecutor ex(corpus);
+        setup_executor(ex, hs, progress);
+        const NameIndexMap& nm = hs.nm;
+        auto key = [&](const Match& m) { return make_group_key(corpus, m, nm, fields); };
+        auto less = [](const std::string& a, const std::string& b) { return compare_group_keys(a, b); };
+        idx = ex.build_sort_index(hs.st().query, fields, key, less);
+        if (idx && !ck.empty()) {
+            ResultCache::Entry e;
+            e.sort = idx;
+            cache->put(ck, std::move(e));
+        }
+    }
     if (!idx) return false;
     hs.know_total(idx->total, true);
     hs.sort_index = std::move(idx);
@@ -470,11 +511,62 @@ bool sort_lazily(const Corpus& corpus, HitSet& hs, const std::vector<std::string
 
 // The hits at sorted positions [from, to) of a lazily sorted set (pass 2).
 std::optional<MatchSet> sorted_page_of(const Corpus& corpus, HitSet& hs, size_t from, size_t to,
-                                       ExecProgress* progress) {
+                                       ExecProgress* progress, ResultCache* cache) {
     if (!hs.sort_index || hs.materialised || hs.sorts.size() != 1) return std::nullopt;
-    QueryExecutor ex(corpus);
-    setup_executor(ex, hs, progress);
-    return ex.sorted_page(hs.st().query, *hs.sort_index, from, to);
+    to = std::min(to, hs.sort_index->total);
+    from = std::min(from, to);
+    if (!cache || hs.recipe.empty()) {
+        QueryExecutor ex(corpus);
+        setup_executor(ex, hs, progress);
+        return ex.sorted_page(hs.st().query, *hs.sort_index, from, to);
+    }
+    // a run fetches the aligned block(s) of kBlock sorted positions around the page
+    // and caches them: paging on (KonText) is then served from the cache
+    constexpr size_t kBlock = 1024;
+    const size_t bfrom = from / kBlock * kBlock;
+    const size_t bto = std::min(hs.sort_index->total, (to + kBlock - 1) / kBlock * kBlock);
+    const std::string ck = cache_key({"sortblock", hs.recipe, sorts_key(hs.sorts), std::to_string(bfrom),
+                                      std::to_string(bto)});
+    std::shared_ptr<const MatchSet> block;
+    if (auto e = cache->get(ck); e && e->page) block = e->page;
+    if (!block) {
+        QueryExecutor ex(corpus);
+        setup_executor(ex, hs, progress);
+        auto got = ex.sorted_page(hs.st().query, *hs.sort_index, bfrom, bto);
+        if (!got) return std::nullopt;
+        block = std::make_shared<const MatchSet>(std::move(*got));
+        ResultCache::Entry e;
+        e.page = block;
+        cache->put(ck, std::move(e));
+    }
+    MatchSet page;
+    page.total_count = block->total_count;
+    page.total_exact = block->total_exact;
+    page.plan_path = block->plan_path;
+    page.num_tokens = block->num_tokens;
+    const size_t a = std::min(from - bfrom, block->matches.size());
+    const size_t b = std::min(to - bfrom, block->matches.size());
+    page.matches.assign(block->matches.begin() + static_cast<std::ptrdiff_t>(a),
+                        block->matches.begin() + static_cast<std::ptrdiff_t>(b));
+    return page;
+}
+
+// P6.4: a page of a set's query (`max_m` hits, total counted when `count`), cached.
+MatchSet query_page_of(const Corpus& corpus, QueryExecutor& ex, const HitSet& hs, size_t max_m, bool count,
+                       size_t cap, unsigned threads, ResultCache* cache) {
+    std::string ck;
+    if (cache && !hs.recipe.empty()) {
+        ck = cache_key({"page", hs.recipe, std::to_string(max_m), count ? "count" : "-", std::to_string(cap)});
+        if (auto e = cache->get(ck); e && e->page) return *e->page;
+    }
+    (void)corpus;
+    MatchSet ms = ex.execute(hs.st().query, max_m, count, cap, 0, 0, threads);
+    if (!ck.empty()) {
+        ResultCache::Entry e;
+        e.page = std::make_shared<const MatchSet>(ms);
+        cache->put(ck, std::move(e));
+    }
+    return ms;
 }
 
 }  // namespace
@@ -496,6 +588,7 @@ void ProgramSession::store_query(const Corpus& corpus, const std::string& name, 
     hs->display = query_text;
     hs->allow_empty_alignment = opts.allow_empty_alignment;
     const Statement& st = hs->st();
+    hs->recipe = recipe_of(st, opts.strict_quoted_strings, opts.allow_empty_alignment);
     hs->nm = st.is_parallel ? build_name_map(st.query) : QueryExecutor::build_name_map_for_stripped_query(st.query);
     hs->tnm = st.is_parallel ? build_name_map(st.target_query) : NameIndexMap{};
     if (opts.total && result.total_exact) {
@@ -542,7 +635,7 @@ std::string ProgramSession::page_json(const Corpus& corpus, const std::string& n
     if (!hs->materialised && hs->sort_index && opts.limit > 0) {
         auto t0 = std::chrono::high_resolution_clock::now();
         const size_t to = opts.limit > SIZE_MAX - opts.offset ? SIZE_MAX : opts.offset + opts.limit;
-        if (auto page = sorted_page_of(corpus, *hs, opts.offset, to, progress)) {
+        if (auto page = sorted_page_of(corpus, *hs, opts.offset, to, progress, impl_->cache)) {
             const double elapsed = std::chrono::duration<double, std::milli>(
                                        std::chrono::high_resolution_clock::now() - t0).count();
             return to_query_result_json(corpus, hs->display, *page, opts, elapsed, extra_result_fields,
@@ -576,7 +669,7 @@ std::string ProgramSession::page_json(const Corpus& corpus, const std::string& n
     const bool count = opts.total && !(hs->total_known && hs->total_exact) && !shown_total;
     const size_t cap = (count && opts.max_total > 0) ? opts.max_total : 0;
     auto t0 = std::chrono::high_resolution_clock::now();
-    MatchSet ms = ex.execute(hs->st().query, opts.offset + opts.limit, count, cap, 0, 0, threads);
+    MatchSet ms = query_page_of(corpus, ex, *hs, opts.offset + opts.limit, count, cap, threads, impl_->cache);
     const double elapsed = std::chrono::duration<double, std::milli>(
                                std::chrono::high_resolution_clock::now() - t0).count();
     if (count && ms.total_exact) hs->know_total(ms.total_count, true);
@@ -609,6 +702,8 @@ size_t ProgramSession::drop_caches() {
     }
     return freed;
 }
+
+void ProgramSession::set_result_cache(ResultCache* cache) { impl_->cache = cache; }
 
 void ProgramSession::set_max_hits(size_t n) { impl_->max_hits = n; }
 void ProgramSession::set_admission(AdmitFn admit) { impl_->admit = std::move(admit); }
@@ -1902,6 +1997,33 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
     std::optional<MatchSet> immediate;
     size_t immediate_si = 0;
 
+    // P6.4: a command's cached result: the set's recipe and sort steps, the
+    // command as written and the options its output depends on
+    auto command_key = [&](const HitSet& h, const Statement& cst, bool dcoll_fallback) -> std::string {
+        if (!S.cache || h.recipe.empty() || cst.source.empty()) return {};
+        const GroupCommand& c = cst.command;
+        switch (c.type) {
+            case CommandType::COUNT: case CommandType::GROUP: case CommandType::COLL:
+            case CommandType::DCOLL: case CommandType::TABULATE: case CommandType::SIZE:
+                break;
+            case CommandType::FREQ:
+                if (c.freq_query_names.size() >= 2) return {};
+                break;
+            default:
+                return {};
+        }
+        std::string o;
+        for (size_t v : {opts.limit, opts.offset, opts.max_total, opts.group_limit, opts.coll_min_freq,
+                         opts.coll_max_items, opts.coll_stoplist, opts.max_count_hits})
+            o += std::to_string(v) + ",";
+        o += std::to_string(opts.context) + "," + std::to_string(opts.coll_left) + "," + std::to_string(opts.coll_right)
+             + (opts.total ? ",t" : ",-");
+        for (const auto& m : opts.coll_measures) o += "," + m;
+        o += "|";
+        for (const auto& a : opts.attrs) o += a + ",";
+        return cache_key({"cmd/1", h.recipe, sorts_key(h.sorts), cst.source, dcoll_fallback ? "rel" : "-", o});
+    };
+
     for (size_t si = 0; si < prog->size(); ++si) {
         auto& stmt = (*prog)[si];
         bool next_is_command = (si + 1 < prog->size() && (*prog)[si + 1].has_command);
@@ -1910,6 +2032,8 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
             immediate.reset();
             // Persistent names: `:: eng.s_tuid = nld.s_tuid` with `eng` bound by an
             // earlier statement (or request of this session) → a condition on `nld`
+            // (labels of earlier statements: the hits depend on the session, no cache)
+            const bool external_labels = !stmt.query.global_alignment_filters.empty();
             if (!stmt.is_parallel && !stmt.query.global_alignment_filters.empty()) {
                 executor.bind_external_alignment(stmt.query, [&](const std::string& label)
                         -> std::optional<QueryExecutor::LabelBinding> {
@@ -1935,6 +2059,7 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
             hs->stmt = si;
             hs->display = cql;
             hs->allow_empty_alignment = opts.allow_empty_alignment;
+            hs->recipe = recipe_of(stmt, opts.strict_quoted_strings, opts.allow_empty_alignment, external_labels);
             hs->nm = stmt.is_parallel ? build_name_map(stmt.query)
                                       : QueryExecutor::build_name_map_for_stripped_query(stmt.query);
             hs->tnm = stmt.is_parallel ? build_name_map(stmt.target_query) : NameIndexMap{};
@@ -1949,6 +2074,11 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                     aggregate_by = &ncmd.fields;
             }
 
+            // P6.4: the command's result is cached: nothing to count now
+            if (aggregate_by && S.cache) {
+                const std::string nk = command_key(*hs, (*prog)[si + 1], false);
+                if (!nk.empty() && S.cache->get(nk)) aggregate_by = nullptr;
+            }
             if (aggregate_by) {
                 // counted while the query runs; no hits kept
                 check_count_limit(corpus, *hs, stmt.name.empty() ? "Last" : stmt.name, opts.max_count_hits,
@@ -1967,7 +2097,7 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                 auto t0 = std::chrono::high_resolution_clock::now();
                 MatchSet res = stmt.is_parallel
                     ? executor.execute_parallel(stmt.query, stmt.target_query, max_m, count_t)
-                    : executor.execute(stmt.query, max_m, count_t, max_total_cap, 0, 0, threads);
+                    : query_page_of(corpus, executor, *hs, max_m, count_t, max_total_cap, threads, S.cache);
                 auto t1 = std::chrono::high_resolution_clock::now();
                 double query_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
                 const size_t n = stmt.is_parallel ? res.parallel_matches.size() : res.matches.size();
@@ -2103,6 +2233,15 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                 continue;
             }
             hs->touch();
+            const std::string ckey = command_key(*hs, stmt, dcoll_cmd.has_value());
+            if (!ckey.empty()) {
+                if (auto e = S.cache->get(ckey)) {
+                    out.str(""); out.clear();
+                    out << e->json;
+                    if (use_immediate) immediate.reset();
+                    continue;
+                }
+            }
             std::optional<MatchSet> expanded;   // a compact set's hits as Match objects, for this command
             auto full = [&]() -> const MatchSet& {
                 materialise(corpus, *hs, set_name, S, threads, opts.progress);
@@ -2178,7 +2317,7 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                         ? SIZE_MAX : tc.tabulate_offset + tc.tabulate_limit;
                     std::optional<MatchSet> sorted_rows;
                     if (!hs->materialised && hs->sort_index)
-                        sorted_rows = sorted_page_of(corpus, *hs, tc.tabulate_offset, tab_to, opts.progress);
+                        sorted_rows = sorted_page_of(corpus, *hs, tc.tabulate_offset, tab_to, opts.progress, S.cache);
                     if (sorted_rows) {
                         emit_tabulate_json(out, corpus, *sorted_rows, tc, nm_to_use,
                                            std::min(tc.tabulate_offset, sorted_rows->total_count));
@@ -2234,10 +2373,10 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                 case CommandType::SORT: {
                     // P7.10: the first sort of a set that is not kept: per sort key, no hits
                     try {
-                        if (sort_lazily(corpus, *hs, stmt.command.fields, opts.progress)) {
+                        if (sort_lazily(corpus, *hs, stmt.command.fields, opts.progress, S.cache)) {
                             const QueryOptions qo = query_options_of(opts);
                             const size_t to = qo.limit > SIZE_MAX - qo.offset ? SIZE_MAX : qo.offset + qo.limit;
-                            if (auto page = sorted_page_of(corpus, *hs, qo.offset, to, opts.progress)) {
+                            if (auto page = sorted_page_of(corpus, *hs, qo.offset, to, opts.progress, S.cache)) {
                                 out << to_query_result_json(corpus, "(sorted)", *page, qo, 0.0, {},
                                                             std::min(qo.offset, page->total_count));
                                 break;
@@ -2269,6 +2408,14 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                 default:
                     out << "{\"ok\": true, \"operation\": \"unknown\"}\n";
                     break;
+            }
+            if (!ckey.empty()) {
+                std::string res = out.str();
+                if (res.rfind("{\"ok\": true", 0) == 0) {
+                    ResultCache::Entry e;
+                    e.json = std::move(res);
+                    S.cache->put(ckey, std::move(e));
+                }
             }
             if (use_immediate) immediate.reset();
         }

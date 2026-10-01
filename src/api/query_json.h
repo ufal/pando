@@ -194,6 +194,9 @@ struct ProgramSession {
     void set_admission(AdmitFn admit);
     size_t size() const;          // number of names
     void clear();
+    /// P6.4: results of commands, pages and sort indexes of sets whose query is
+    /// self-contained are kept in / taken from this cache (nullptr = none).
+    void set_result_cache(class ResultCache* cache);
 };
 
 struct ProgramOptions {

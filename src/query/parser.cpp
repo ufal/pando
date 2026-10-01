@@ -20,15 +20,30 @@ void reject_ud_feats_dot_syntax(const std::string& attr, size_t pos) {
 } // namespace
 
 Parser::Parser(const std::string& input, ParserOptions opts)
-    : lexer_(input), opts_(opts) {}
+    : input_(input), lexer_(input), opts_(opts) {}
+
+Statement Parser::parse_statement_with_source() {
+    const size_t begin = std::min(lexer_.peek().pos, input_.size());
+    Statement st = parse_statement();
+    const size_t end = std::max(begin, std::min(lexer_.peek().pos, input_.size()));
+    std::string src = input_.substr(begin, end - begin);
+    if (st.has_query && !st.name.empty()) {
+        const size_t eq = src.find('=');
+        if (eq != std::string::npos) src = src.substr(eq + 1);
+    }
+    const size_t a = src.find_first_not_of(" \t\r\n");
+    const size_t b = src.find_last_not_of(" \t\r\n");
+    st.source = a == std::string::npos ? std::string() : src.substr(a, b - a + 1);
+    return st;
+}
 
 Program Parser::parse() {
     Program prog;
-    prog.push_back(parse_statement());
+    prog.push_back(parse_statement_with_source());
     while (lexer_.peek().type == TokType::SEMI) {
         lexer_.consume();
         if (lexer_.peek().type == TokType::END) break;
-        prog.push_back(parse_statement());
+        prog.push_back(parse_statement_with_source());
     }
     // Anything left over is an error, never silently ignored (`[a] | [b]` used to
     // run as `[a]`).

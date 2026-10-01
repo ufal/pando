@@ -48,7 +48,8 @@ pando_server_close(s);
 ```
 
 Open options (JSON, all optional): `preload`, `total_workers`, `result_cache`,
-`result_ttl`, `abandon_after`, `query_timeout_ms`, `query_threads` (position ranges
+`result_ttl`, `abandon_after`, `cache_mb` (recent pages / command results / sort
+indexes reused across requests, default 128 MB per open corpus, 0 = off), `query_timeout_ms`, `query_threads` (position ranges
 counted in parallel per counting query, default 1 — see the CLI reference),
 `threads` (reported only), `session_ttl`, `max_sessions`, `session_memory_mb`,
 `session_max_hits` (client sessions, defaults 1800 s, 256, 2048 MB, 5000000),

@@ -20,6 +20,7 @@
 #include "api/limits.h"
 #include "api/query_json.h"
 #include "api/sessions.h"
+#include "api/result_cache.h"
 #include "corpus/corpus.h"
 
 #include <atomic>
@@ -55,6 +56,10 @@ struct ServerConfig {
     std::map<std::string, QueryLimits> tiers;
     std::string default_tier;
     bool trust_tier = false;
+    /// P6.4: bytes of recent results kept for repeated requests (pages, `count` /
+    /// `freq` / `coll` / … results, sort indexes) across requests and sessions;
+    /// 0 = off.
+    size_t cache_bytes = size_t{128} << 20;
     /// Raw JSON members added to /health, /version and /info "server" (no braces,
     /// no leading comma), e.g. `"embedded_in": "fqs 0.4"`.
     std::string extra_server_fields;
@@ -67,7 +72,7 @@ struct ServerResponse {
 };
 
 /// Server options as JSON (the C ABI's options_json, pando-server --limits FILE):
-/// preload, total_workers, result_cache, result_ttl, abandon_after, query_timeout_ms,
+/// preload, total_workers, result_cache, result_ttl, abandon_after, query_timeout_ms, cache_mb,
 /// threads, query_threads, session_ttl, max_sessions, session_memory_mb,
 /// session_max_hits, embedded_in, debug_total_delay_ms, and
 /// "tiers": {"<name>": {limits.h members}, …}, "default_tier", "trust_tier".
@@ -150,6 +155,7 @@ private:
     ServerConfig cfg_;
     QueryJobManager jobs_;
     std::mutex program_mu_;
+    ResultCache cache_;                    // P6.4 (before the sessions that point to it)
     ProgramSession program_session_;       // /run without a session_id (shared, unlimited)
     SessionManager sessions_;
     std::atomic<size_t> in_flight_{0};

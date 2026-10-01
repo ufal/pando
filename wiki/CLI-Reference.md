@@ -90,6 +90,7 @@ pando-server <corpus_dir> [port] [threads] [--preload] [options]
 | `--preload` | Read all index pages at startup (default: lazy mmap) |
 | `--total-workers N` | Concurrent background counts (default 2) |
 | `--result-cache N` | Cached query results / totals (default 512; unused finished ones evicted first) |
+| `--cache-mb MB` | Memory for recent results reused by repeated requests (default 128 per corpus; 0 = off): pages of `/query` and of stored sets, `count / group / freq / coll / dcoll / tabulate / size` results, sort indexes and sorted pages (blocks of 1024 sorted hits). Shared by all requests and sessions, keyed on the query text, the parser options and the options a result depends on; queries that use the session (labels of earlier statements, `where` sets, `dep_subtree` sources) are not cached. `/health` reports `cache` (entries, bytes, hits, misses) |
 | `--result-ttl SEC` | Drop a finished result nobody asked about for SEC (default 3600) |
 | `--abandon-after SEC` | Cancel a background count nobody polled for SEC (default 120; 0 = never) |
 | `--debug-total-delay MS` | Testing: reveal every total gradually over MS, so a client can be tested against a "slow" count on a small corpus |
@@ -188,6 +189,10 @@ POST /run   {"session_id": "s1f…", "cql": "count Q1 by lemma"}              �
 * **`count / group / freq … by`** on a set use the aggregation sink (the query
   again, partitioned with `--query-threads`, no hits stored) — faster than
   grouping stored hits, and the order does not matter.
+* **`sort`**: the first sort of a set that is not kept counts the hits per sort
+  key (no hits stored) and pages re-run the query for the hits on the page;
+  with `--cache-mb` the key counts and blocks of sorted hits are reused by later
+  pages, other sessions and repeated requests.
 * **Pages**: `"from": "<set>"` pages a stored set — sorted sets in their sorted
   order, unsorted ones by running the query to the page (or slicing the cache).
   `"total"` works as on a query; a set stored with `"total": "async"` takes its
@@ -205,8 +210,9 @@ POST /run   {"session_id": "s1f…", "cql": "count Q1 by lemma"}              �
   sessions answer **404** with `"unknown_session": true` (an unknown set:
   `"unknown_hitset": true`). The client then creates a session and sends its
   query again. A set that would materialise more than `--session-max-hits`
-  hits answers **413** `"too_large"` for `sort` / `coll` / …; counts and pages
-  still work.
+  hits answers **413** `"too_large"` for a command that keeps every hit (`raw`,
+  `stats`, a second `sort`, …); counts, `coll`, a first `sort` and pages still
+  work.
 * A client may choose its id (`POST /session {"session_id": "kontext-u42"}`,
   1–128 of `A–Z a–z 0–9 _ - . :`), so several front-end workers can share a
   session without passing ids around.

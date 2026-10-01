@@ -31,6 +31,8 @@ public:
 
 private:
     Statement parse_statement();
+    Statement parse_statement_with_source();
+    std::string input_;
 
     // Check if this is a command keyword (count, size, show, etc.)
     bool is_command_keyword(const std::string& text) const;

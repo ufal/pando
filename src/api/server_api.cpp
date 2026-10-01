@@ -172,6 +172,7 @@ ServerConfig parse_server_options(const std::string& json_in, ServerConfig cfg) 
     if (has("max_sessions")) cfg.sessions.max_sessions = std::max<size_t>(1, json_extract_num(opts, "max_sessions", 256));
     if (has("session_memory_mb")) cfg.sessions.memory_budget = json_extract_num(opts, "session_memory_mb", 2048) << 20;
     if (has("session_max_hits")) cfg.sessions.max_hits = json_extract_num(opts, "session_max_hits", 5000000);
+    if (has("cache_mb")) cfg.cache_bytes = json_extract_num(opts, "cache_mb", 128) << 20;
     const std::string emb = json_extract_str(opts, "embedded_in");
     if (!emb.empty()) cfg.extra_server_fields = "\"embedded_in\": " + jstr(emb);
     if (has("default_tier")) cfg.default_tier = json_extract_str(opts, "default_tier");
@@ -219,6 +220,7 @@ ServerApi::ServerApi(Corpus& corpus, ServerConfig cfg)
           j.count_threads = std::max({1u, j.count_threads, cfg_.query_threads});
           return j;
       }()),
+      cache_(cfg_.cache_bytes),
       sessions_(cfg_.sessions),
       started_(std::chrono::system_clock::now()), started_steady_(std::chrono::steady_clock::now()) {
     last_request_ns_.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -227,6 +229,7 @@ ServerApi::ServerApi(Corpus& corpus, ServerConfig cfg)
     const std::time_t t = std::chrono::system_clock::to_time_t(started_);
     std::strftime(buf, sizeof buf, "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&t));
     started_iso_ = buf;
+    program_session_.set_result_cache(cache_.max_bytes() ? &cache_ : nullptr);
     watchdog_ = std::thread([this] { watchdog_loop(); });
 }
 
@@ -265,6 +268,7 @@ const std::vector<std::string>& ServerApi::features() {
         "query_timeout",    // /query and /run "timeout_ms" (and a server default) → 408
         "sessions",         // POST /session; "session_id" on /run, /query ("name", "from") (P6.1)
         "tiers",            // "tier" per request: timeouts, hit limits, denied features (limits.h)
+        "page_cache",       // pages, command results and sort indexes reused across requests (P6.4)
     };
     return f;
 }
@@ -302,6 +306,12 @@ std::string ServerApi::server_fields() const {
         + ", \"max_sessions\": " + std::to_string(cfg_.sessions.max_sessions)
         + ", \"memory_budget\": " + std::to_string(cfg_.sessions.memory_budget)
         + ", \"max_hits\": " + std::to_string(cfg_.sessions.max_hits) + "}";
+    {
+        const ResultCache::Stats cs = cache_.stats();
+        s += ", \"cache\": {\"entries\": " + std::to_string(cs.entries) + ", \"bytes\": " + std::to_string(cs.bytes)
+             + ", \"max_bytes\": " + std::to_string(cs.max_bytes) + ", \"hits\": " + std::to_string(cs.hits)
+             + ", \"misses\": " + std::to_string(cs.misses) + ", \"evicted\": " + std::to_string(cs.evicted) + "}";
+    }
     if (!cfg_.tiers.empty()) {
         s += ", \"tiers\": {";
         bool first = true;
@@ -549,6 +559,7 @@ ServerResponse ServerApi::run(const std::string& body) {
     if (!lease) return unknown_session(sid);
     lease.lock();
     lease.ps().set_max_hits(rl.lim.max_hits ? rl.lim.max_hits : cfg_.sessions.max_hits);
+    lease.ps().set_result_cache(cache_.max_bytes() ? &cache_ : nullptr);
     ServerResponse r = exec(lease.ps());
     if (r.status == 200) r.body = with_member(std::move(r.body), session_member(sid, ""));
     return r;
@@ -642,10 +653,31 @@ ServerResponse ServerApi::query(const std::string& body) {
     if (!from.empty()) {
         lease.lock();
         lease.ps().set_max_hits(rl.lim.max_hits ? rl.lim.max_hits : cfg_.sessions.max_hits);
+        lease.ps().set_result_cache(cache_.max_bytes() ? &cache_ : nullptr);
         return query_from(opts, total_async, timeout_ms, progress, from, lease, rl.tier, job_limit);
     }
 
-    auto run_q = [&](const QueryOptions& o) { return run_single_query(corpus_, query_text, o, progress); };
+    // P6.4: the same query / page / count again (KonText: submit, view, each page)
+    auto run_q = [&](const QueryOptions& o) -> std::pair<MatchSet, double> {
+        const bool sampled_now = o.sample > 0 || o.shuffle;
+        std::string ck;
+        if (cache_.max_bytes() && !(sampled_now && o.seed == 0)) {
+            std::string sig;
+            for (size_t v : {o.offset, o.limit, o.max_total, o.sample, static_cast<size_t>(o.seed)})
+                sig += std::to_string(v) + ",";
+            sig += std::string(o.total ? "t" : "-") + (o.shuffle ? "s" : "-") + (o.strict_quoted_strings ? "q" : "-")
+                   + (o.allow_empty_alignment ? "e" : "-");
+            ck = cache_key({"query/1", query_text, sig});
+            if (auto e = cache_.get(ck); e && e->page) return {*e->page, 0.0};
+        }
+        auto r = run_single_query(corpus_, query_text, o, progress);
+        if (!ck.empty()) {
+            ResultCache::Entry e;
+            e.page = std::make_shared<const MatchSet>(r.first);
+            cache_.put(ck, std::move(e));
+        }
+        return r;
+    };
     auto ok = [&](const MatchSet& ms, double elapsed, std::string_view extra = {}) {
         std::string js = to_query_result_json(corpus_, query_text, ms, opts, elapsed, extra);
         if (lease) {
