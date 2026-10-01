@@ -26,9 +26,12 @@ FetchContent_MakeAvailable(httplib)
 # Regex engine for attribute values. RE2 (libre2-dev / brew re2): UTF-8 aware
 # (`.` = one character), `(?i)`, 3-4x faster lexicon scans; patterns RE2 cannot
 # compile (backreferences, lookaround) still run on std::regex (core/regex_engine.h).
-#   AUTO (default): RE2 when found, else std::regex;  ON: RE2 required;  OFF: std::regex only.
-set(PANDO_USE_RE2 "AUTO" CACHE STRING "Regex engine: AUTO | ON | OFF")
-set_property(CACHE PANDO_USE_RE2 PROPERTY STRINGS AUTO ON OFF)
+#   ON (default): RE2 required — configure fails without it (regexes on std::regex are
+#   ~300x slower over a large lexicon: [form=".*ung"] 11.4 s instead of 33 ms on a
+#   38M-token corpus);  AUTO: RE2 when found, else std::regex with a warning;
+#   OFF: std::regex only (deliberately).
+set(PANDO_USE_RE2 "ON" CACHE STRING "Regex engine: ON | AUTO | OFF")
+set_property(CACHE PANDO_USE_RE2 PROPERTY STRINGS ON AUTO OFF)
 
 # CWB/CQP dialect: optional static library (GPL-2+ if derived from IMS CWB sources). Can be
 # disabled for minimal builds or shipped separately; see dev/CQL-DIALECT-LICENSING.md.
@@ -54,7 +57,14 @@ if(NOT _pando_re2_mode STREQUAL "OFF" AND NOT _pando_re2_mode STREQUAL "FALSE" A
         endif()
     endif()
     if(NOT PANDO_WITH_RE2 AND NOT _pando_re2_mode STREQUAL "AUTO")
-        message(FATAL_ERROR "RE2 not found. Install with: brew install re2 (macOS) or apt install libre2-dev (Linux), or -DPANDO_USE_RE2=OFF")
+        message(FATAL_ERROR "RE2 not found. Install it (brew install re2 on macOS, apt install libre2-dev "
+                "on Debian/Ubuntu, dnf install re2-devel on Fedora/RHEL) and configure again. Without RE2, "
+                "regex queries run on std::regex, ~300x slower over a large lexicon; to accept that, "
+                "configure with -DPANDO_USE_RE2=OFF (or AUTO).")
+    endif()
+    if(NOT PANDO_WITH_RE2)
+        message(WARNING "RE2 not found: regexes use std::regex (~300x slower over a large lexicon, byte-wise '.'). "
+                "Install libre2-dev / re2 for a production build.")
     endif()
 endif()
 message(STATUS "pando regex engine: ${PANDO_WITH_RE2} (RE2; OFF = std::regex)  [PANDO_USE_RE2=${PANDO_USE_RE2}]")

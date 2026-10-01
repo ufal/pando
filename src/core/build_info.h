@@ -14,7 +14,11 @@ const char* build_branch();     // branch name; "" when detached / unknown
 /// "0.1.20" for a clean tagged build, else "0.1.20 (v0.1.20-23-g2a000ce, perf/phase1)".
 std::string build_string();
 
-/// `"version": "…", "build": "…", "commit": "…", "branch": "…"` (JSON members, no braces).
+/// "re2", or "std" for a build without RE2 (regexes ~300x slower over a large lexicon).
+const char* build_regex_engine();
+
+/// `"version": "…", "build": "…", "commit": "…", "branch": "…", "regex": "re2"|"std"`
+/// (JSON members, no braces).
 std::string build_json_fields();
 
 }  // namespace pando

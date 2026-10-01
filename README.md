@@ -37,8 +37,9 @@ pando ~/ud-data/pando_idx '[upos="VERB"]' --total
 
 `./install.sh` alone builds and installs the commands without the UD corpus;
 `--prefix DIR` installs elsewhere, `--no-install` only builds (`./build/pando`, …),
-`--test` runs the test suite. RE2 is used when installed (recommended:
-`brew install re2` / `apt install libre2-dev`). By hand, the same is:
+`--test` runs the test suite. RE2 is required (`brew install re2` /
+`apt install libre2-dev`; `--allow-std-regex` builds without it, with regex
+queries ~300x slower over a large lexicon). By hand, the same is:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release

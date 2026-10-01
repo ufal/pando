@@ -10,8 +10,11 @@
 #   ./install.sh --ud-dir DIR         … into DIR instead (implies --ud)
 #   ./install.sh --test               run the test suite after building
 #
-# Needs CMake >= 3.16 and a C++17 compiler; RE2 is used when installed
-# (recommended: brew install re2 / apt install libre2-dev), else std::regex.
+#   ./install.sh --allow-std-regex    build without RE2 (std::regex: regex queries
+#                                     ~300x slower over a large lexicon; not for servers)
+#
+# Needs CMake >= 3.16, a C++17 compiler and RE2 (brew install re2 /
+# apt install libre2-dev / dnf install re2-devel).
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -22,6 +25,7 @@ UD=0
 UD_DIR=""
 TEST=0
 BUILD_DIR=build
+RE2_MODE=ON
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --prefix) PREFIX="$2"; shift 2 ;;
@@ -30,7 +34,8 @@ while [[ $# -gt 0 ]]; do
     --ud-dir) UD=1; UD_DIR="$2"; shift 2 ;;
     --test) TEST=1; shift ;;
     --build-dir) BUILD_DIR="$2"; shift 2 ;;
-    -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --allow-std-regex) RE2_MODE=AUTO; shift ;;
+    -h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1 (see ./install.sh --help)" >&2; exit 2 ;;
   esac
 done
@@ -44,12 +49,21 @@ fi
 
 jobs() { sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4; }
 
-CMAKE_ARGS=(-DCMAKE_BUILD_TYPE=Release -DPANDO_USE_RE2=AUTO)
+CMAKE_ARGS=(-DCMAKE_BUILD_TYPE=Release -DPANDO_USE_RE2=$RE2_MODE)
+re2_missing() {
+  echo "RE2 not found — install it (brew install re2 / apt install libre2-dev / dnf install re2-devel)." >&2
+  echo "Without it regex queries run on std::regex, ~300x slower over a large lexicon." >&2
+  if [[ $RE2_MODE == ON ]]; then
+    echo "error: RE2 is required (or build anyway with --allow-std-regex)" >&2
+    exit 1
+  fi
+  echo "warning: building with std::regex (--allow-std-regex)" >&2
+}
 if command -v brew >/dev/null 2>&1; then
   CMAKE_ARGS+=("-DCMAKE_PREFIX_PATH=$(brew --prefix)")
-  brew list re2 >/dev/null 2>&1 || echo "note: RE2 not installed — regexes will use std::regex (slower, byte-wise '.'); brew install re2"
+  brew list re2 >/dev/null 2>&1 || re2_missing
 elif command -v pkg-config >/dev/null 2>&1 && ! pkg-config --exists re2; then
-  echo "note: RE2 not found — regexes will use std::regex (slower, byte-wise '.'); apt install libre2-dev"
+  re2_missing
 fi
 
 echo "==> configure (${BUILD_DIR})"

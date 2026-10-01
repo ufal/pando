@@ -19,9 +19,18 @@ std::string build_string() {
     return s + ")";
 }
 
+const char* build_regex_engine() {
+#ifdef PANDO_USE_RE2
+    return "re2";
+#else
+    return "std";
+#endif
+}
+
 std::string build_json_fields() {
     return "\"version\": " + json_quote(build_version()) + ", \"build\": " + json_quote(build_describe())
-        + ", \"commit\": " + json_quote(build_commit()) + ", \"branch\": " + json_quote(build_branch());
+        + ", \"commit\": " + json_quote(build_commit()) + ", \"branch\": " + json_quote(build_branch())
+        + ", \"regex\": " + json_quote(build_regex_engine());
 }
 
 }  // namespace pando

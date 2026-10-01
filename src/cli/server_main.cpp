@@ -200,6 +200,9 @@ int main(int argc, char* argv[]) {
     svr.Get(".*", handler);
     svr.Post(".*", handler);
 
+    if (std::string(build_regex_engine()) != "re2")
+        std::cerr << "WARNING: this pando-server was built without RE2: regex queries run on std::regex, "
+                     "~300x slower over a large lexicon. Rebuild with RE2 (apt install libre2-dev) for production.\n";
     std::cerr << "Pando server " << build_string() << ": corpus " << corpus_dir << ", port " << port
               << ", threads " << nthreads
               << (preload ? ", preload=on" : ", preload=off (lazy mmap)")
