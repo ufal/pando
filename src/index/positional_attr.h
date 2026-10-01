@@ -4,6 +4,7 @@
 #include "core/mmap_file.h"
 #include "index/lexicon.h"
 #include "index/packed_postings.h"
+#include <atomic>
 #include <memory>
 #include <string>
 
@@ -11,23 +12,81 @@
 
 namespace pando {
 
-/// Zero-copy view of one lexicon id's sorted `.rev` postings (Manatee-style merge operand).
+/// P4.2b: one id's packed postings (`.rev.pfb`), decoded block by block (128
+/// positions) on first access into a buffer of the attribute's width — a page,
+/// a gallop or a count over intervals decode only the blocks they touch. Safe for
+/// concurrent readers (a block is decoded once; others wait for it).
+class LazyPostings {
+public:
+    LazyPostings(std::shared_ptr<const PackedPostings> pk, int64_t id, size_t count, int width);
+    LazyPostings(const LazyPostings&) = delete;
+    LazyPostings& operator=(const LazyPostings&) = delete;
+
+    size_t count() const { return count_; }
+    int width() const { return width_; }
+    CorpusPos at(size_t i) const {
+        const size_t b = i / PackedPostings::kBlock;
+        if (state_[b].load(std::memory_order_acquire) != kReady) ensure(b);
+        switch (width_) {
+            case 2: return static_cast<CorpusPos>(reinterpret_cast<const int16_t*>(buf_.get())[i]);
+            case 4: return static_cast<CorpusPos>(reinterpret_cast<const int32_t*>(buf_.get())[i]);
+            default: return reinterpret_cast<const int64_t*>(buf_.get())[i];
+        }
+    }
+    /// The whole list as a typed array (every block decoded).
+    const void* whole() const;
+    /// First j in [lo, end) with at(j) >= target (end if none): the skip table
+    /// finds the block, so only that block is decoded.
+    size_t lower_bound(size_t lo, size_t end, CorpusPos target) const;
+    size_t bytes() const { return count_ * static_cast<size_t>(width_); }
+
+private:
+    static constexpr uint8_t kNone = 0, kBusy = 1, kReady = 2;
+    void ensure(size_t b) const;
+    CorpusPos block_first(size_t b) const { return pk_->block_first(id_, count_, b); }
+
+    std::shared_ptr<const PackedPostings> pk_;
+    int64_t id_;
+    size_t count_;
+    int width_;
+    size_t nblocks_;
+    std::unique_ptr<char[]> buf_;
+    std::unique_ptr<std::atomic<uint8_t>[]> state_;
+    mutable std::atomic<bool> all_{false};
+};
+
+/// Zero-copy view of one lexicon id's sorted `.rev` postings (Manatee-style merge
+/// operand): a typed array (`data`, the mmapped `.rev` or a materialised list),
+/// or packed postings decoded on demand (`lazy`, P4.2b: positions base..base+count).
 struct RevSpan {
     int width = 8;            // 2, 4, or 8
     const void* data = nullptr;
     size_t count = 0;
-    /// P4.2: the decoded list when the attribute serves packed postings (null for
-    /// the mmapped `.rev`); copies and slices keep it alive.
+    /// What `data` / `lazy` point into when it is not the mmapped `.rev`; copies and
+    /// slices keep it alive.
     std::shared_ptr<const void> keep;
+    const LazyPostings* lazy = nullptr;
+    size_t base = 0;          // with `lazy`: index of element 0 in the list
 
     CorpusPos at(size_t i) const {
+        if (lazy) return lazy->at(base + i);
         switch (width) {
             case 2: return static_cast<CorpusPos>(static_cast<const int16_t*>(data)[i]);
             case 4: return static_cast<CorpusPos>(static_cast<const int32_t*>(data)[i]);
             default: return static_cast<const int64_t*>(data)[i];
         }
     }
-    bool empty() const { return count == 0 || data == nullptr; }
+    /// All `count` elements as a typed array of `width` (decodes a lazy list).
+    const void* whole() const {
+        if (!lazy) return data;
+        return static_cast<const char*>(lazy->whole()) + base * static_cast<size_t>(width);
+    }
+    /// First j >= lo with at(j) >= target (count if none): galloping on an array,
+    /// the skip table on packed postings.
+    size_t lower_bound(size_t lo, CorpusPos target) const;
+    /// Sub-span [lo, hi) (zero-copy).
+    RevSpan slice(size_t lo, size_t hi) const;
+    bool empty() const { return count == 0 || (data == nullptr && lazy == nullptr); }
 };
 
 // Read-only positional attribute: provides O(log V) lookup from value
@@ -46,7 +105,7 @@ public:
     int rev_width() const { return rev_width_; }
     /// P4.2: postings are served from `<attr>.rev.pfb` (PANDO_REV=packed, or no `.rev`).
     bool rev_packed() const { return use_packed_; }
-    const PackedPostings& packed_postings() const { return packed_; }
+    const PackedPostings& packed_postings() const { return *packed_; }
 
     // Position → value
     LexiconId id_at(CorpusPos pos) const;
@@ -76,7 +135,7 @@ public:
         int64_t start = idx[id];
         int64_t end   = idx[id + 1];
         const size_t count = static_cast<size_t>(end - start);
-        if (use_packed_) return packed_.for_each(id, count, f);
+        if (use_packed_) return packed_->for_each(id, count, f);
         switch (rev_width_) {
             case 2: {
                 const auto* p = rev_.as<int16_t>() + start;
@@ -165,7 +224,8 @@ private:
     CorpusPos corpus_size_ = 0;
     int dat_width_ = 4;    // bytes per element in .dat (1, 2, or 4)
     int rev_width_ = 8;    // bytes per element in .rev (2, 4, or 8)
-    PackedPostings packed_;   // P4.2 `.rev.pfb` (when present)
+    /// P4.2 `.rev.pfb` (when present); shared with the lazily decoded lists
+    std::shared_ptr<PackedPostings> packed_ = std::make_shared<PackedPostings>();
     bool use_packed_ = false;
     uint64_t serial_ = 0;     // decode-cache key of this attribute
 

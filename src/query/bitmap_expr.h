@@ -156,7 +156,9 @@ public:
         const CorpusPos base = static_cast<CorpusPos>(c) << BitmapIndex::kChunkShift;
         const CorpusPos end = base + BitmapIndex::kChunk;
         // skip positions before this chunk (gallop: rare lists jump far)
-        if (i_ < s_.count && s_.at(i_) < base) {
+        if (i_ < s_.count && s_.lazy) {
+            i_ = s_.lower_bound(i_, base);
+        } else if (i_ < s_.count && s_.at(i_) < base) {
             size_t step = 1, lo = i_, hi = i_ + 1;
             while (hi < s_.count && s_.at(hi) < base) { lo = hi; step <<= 1; hi = lo + step; }
             if (hi > s_.count) hi = s_.count;

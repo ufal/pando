@@ -108,6 +108,38 @@ public:
         return true;
     }
 
+    /// Blocks of a list of `count` postings.
+    static size_t nblocks(size_t count) { return (count + kBlock - 1) / kBlock; }
+
+    /// First position of block b of `id`'s list (no decoding).
+    CorpusPos block_first(int64_t id, size_t count, size_t b) const {
+        const uint8_t* p = data_of(id);
+        if (count <= kBlock) return static_cast<CorpusPos>(read_varint(p));
+        int64_t first;
+        std::memcpy(&first, p + b * kSkipBytes, 8);
+        return first;
+    }
+
+    /// Decode block b of `id`'s list into out[0..n); returns n (<= kBlock).
+    size_t decode_block(int64_t id, size_t count, size_t b, CorpusPos* out) const {
+        const uint8_t* p = data_of(id);
+        if (count <= kBlock) {
+            const CorpusPos first = static_cast<CorpusPos>(read_varint(p));
+            uint32_t w = 0;
+            if (count > 1) w = *p++;
+            unpack(first, w, p, count, out);
+            return count;
+        }
+        const uint8_t* e = p + b * kSkipBytes;
+        int64_t first;
+        uint32_t off;
+        std::memcpy(&first, e, 8);
+        std::memcpy(&off, e + 8, 4);
+        const size_t n = std::min(kBlock, count - b * kBlock);
+        unpack(first, e[12], p + off, n, out);
+        return n;
+    }
+
 private:
     const uint8_t* data_of(int64_t id) const {
         return payload_ + base_[static_cast<size_t>(id) / kGroup] + rel_[id];

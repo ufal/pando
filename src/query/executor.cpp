@@ -363,6 +363,7 @@ static SeqMergeOperand seq_merge_operand(const Corpus& corpus, const ConditionPt
 /// Exponential ("galloping") search from `lo`, then binary search inside the
 /// bracket: O(log gap) comparisons, and the probes stay near the cursor.
 static inline size_t gallop_rev(const RevSpan& B, size_t lo, CorpusPos target) {
+    if (B.lazy) return B.lower_bound(lo, target);   // P4.2b: skip table, one block decoded
     const size_t n = B.count;
     if (lo >= n || B.at(lo) >= target) return lo;
     size_t prev = lo;            // invariant: B.at(prev) < target
@@ -481,12 +482,12 @@ static bool shift_merge_rev(const RevSpan& A, const RevSpan& B, int64_t delta, E
     // Balanced two-pointer merge
     if (A.width == B.width) {
         switch (A.width) {
-            case 2: return shift_merge_typed(static_cast<const int16_t*>(A.data), na,
-                                             static_cast<const int16_t*>(B.data), nb, delta, emit);
-            case 4: return shift_merge_typed(static_cast<const int32_t*>(A.data), na,
-                                             static_cast<const int32_t*>(B.data), nb, delta, emit);
-            case 8: return shift_merge_typed(static_cast<const int64_t*>(A.data), na,
-                                             static_cast<const int64_t*>(B.data), nb, delta, emit);
+            case 2: return shift_merge_typed(static_cast<const int16_t*>(A.whole()), na,
+                                             static_cast<const int16_t*>(B.whole()), nb, delta, emit);
+            case 4: return shift_merge_typed(static_cast<const int32_t*>(A.whole()), na,
+                                             static_cast<const int32_t*>(B.whole()), nb, delta, emit);
+            case 8: return shift_merge_typed(static_cast<const int64_t*>(A.whole()), na,
+                                             static_cast<const int64_t*>(B.whole()), nb, delta, emit);
             default: break;
         }
     }
@@ -521,9 +522,9 @@ static void rev_span_to_bitset(const RevSpan& span, std::vector<uint64_t>& bits,
     };
     if (span.empty()) return;
     switch (span.width) {
-        case 2: fill(static_cast<const int16_t*>(span.data), span.count); break;
-        case 4: fill(static_cast<const int32_t*>(span.data), span.count); break;
-        default: fill(static_cast<const int64_t*>(span.data), span.count); break;
+        case 2: fill(static_cast<const int16_t*>(span.whole()), span.count); break;
+        case 4: fill(static_cast<const int32_t*>(span.whole()), span.count); break;
+        default: fill(static_cast<const int64_t*>(span.whole()), span.count); break;
     }
 }
 
@@ -775,15 +776,7 @@ static void restrict_mask_to_range(RegionPosMask& m, const PosRange& r, CorpusPo
 }
 
 /// Sub-span [lo, hi) of a `.rev` posting span (zero-copy).
-static RevSpan rev_slice(const RevSpan& sp, size_t lo, size_t hi) {
-    RevSpan out;
-    out.width = sp.width;
-    if (hi <= lo || lo >= sp.count) return out;
-    out.count = hi - lo;
-    out.data = static_cast<const char*>(sp.data) + lo * static_cast<size_t>(sp.width);
-    out.keep = sp.keep;
-    return out;
-}
+static RevSpan rev_slice(const RevSpan& sp, size_t lo, size_t hi) { return sp.slice(lo, hi); }
 
 /// Typed-array version of gallop_rev: first index >= lo with a[j] >= target.
 template<typename T>
@@ -6879,12 +6872,12 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                             result.total_count = max_total_cap;
                     } else if (child_span.width == parent_span.width) {
                         switch (child_span.width) {
-                            case 2: run(static_cast<const int16_t*>(child_span.data), child_span.count,
-                                        static_cast<const int16_t*>(parent_span.data), parent_span.count); break;
-                            case 4: run(static_cast<const int32_t*>(child_span.data), child_span.count,
-                                        static_cast<const int32_t*>(parent_span.data), parent_span.count); break;
-                            default: run(static_cast<const int64_t*>(child_span.data), child_span.count,
-                                         static_cast<const int64_t*>(parent_span.data), parent_span.count); break;
+                            case 2: run(static_cast<const int16_t*>(child_span.whole()), child_span.count,
+                                        static_cast<const int16_t*>(parent_span.whole()), parent_span.count); break;
+                            case 4: run(static_cast<const int32_t*>(child_span.whole()), child_span.count,
+                                        static_cast<const int32_t*>(parent_span.whole()), parent_span.count); break;
+                            default: run(static_cast<const int64_t*>(child_span.whole()), child_span.count,
+                                         static_cast<const int64_t*>(parent_span.whole()), parent_span.count); break;
                         }
                     } else {
                         std::vector<int64_t> c64(child_span.count), p64(parent_span.count);
@@ -7075,9 +7068,9 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                         }
                     };
                     switch (D.width) {
-                        case 2: run(static_cast<const int16_t*>(D.data), static_cast<const int16_t*>(O.data)); break;
-                        case 4: run(static_cast<const int32_t*>(D.data), static_cast<const int32_t*>(O.data)); break;
-                        default: run(static_cast<const int64_t*>(D.data), static_cast<const int64_t*>(O.data)); break;
+                        case 2: run(static_cast<const int16_t*>(D.whole()), static_cast<const int16_t*>(O.whole())); break;
+                        case 4: run(static_cast<const int32_t*>(D.whole()), static_cast<const int32_t*>(O.whole())); break;
+                        default: run(static_cast<const int64_t*>(D.whole()), static_cast<const int64_t*>(O.whole())); break;
                     }
                     result.total_count += cnt;
                     if (max_total_cap > 0 && result.total_count > max_total_cap)
@@ -7252,12 +7245,12 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                     };
                     if (G.width == Dd.width) {
                         switch (G.width) {
-                            case 2: run(static_cast<const int16_t*>(G.data), G.count,
-                                        static_cast<const int16_t*>(Dd.data), Dd.count); break;
-                            case 4: run(static_cast<const int32_t*>(G.data), G.count,
-                                        static_cast<const int32_t*>(Dd.data), Dd.count); break;
-                            default: run(static_cast<const int64_t*>(G.data), G.count,
-                                         static_cast<const int64_t*>(Dd.data), Dd.count); break;
+                            case 2: run(static_cast<const int16_t*>(G.whole()), G.count,
+                                        static_cast<const int16_t*>(Dd.whole()), Dd.count); break;
+                            case 4: run(static_cast<const int32_t*>(G.whole()), G.count,
+                                        static_cast<const int32_t*>(Dd.whole()), Dd.count); break;
+                            default: run(static_cast<const int64_t*>(G.whole()), G.count,
+                                         static_cast<const int64_t*>(Dd.whole()), Dd.count); break;
                         }
                     } else {
                         std::vector<int64_t> g64(G.count), d64(Dd.count);

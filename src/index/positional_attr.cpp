@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <list>
 #include <mutex>
+#include <thread>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -81,6 +82,123 @@ constexpr size_t kCacheMinPostings = 4096;   // shorter lists are decoded per ca
 
 }  // namespace
 
+// ── LazyPostings (P4.2b) ────────────────────────────────────────────────
+
+LazyPostings::LazyPostings(std::shared_ptr<const PackedPostings> pk, int64_t id, size_t count, int width)
+    : pk_(std::move(pk)), id_(id), count_(count), width_(width), nblocks_(PackedPostings::nblocks(count)),
+      buf_(new char[count * static_cast<size_t>(width)]),   // not touched until decoded
+      state_(new std::atomic<uint8_t>[nblocks_]) {
+    for (size_t b = 0; b < nblocks_; ++b) state_[b].store(kNone, std::memory_order_relaxed);
+}
+
+void LazyPostings::ensure(size_t b) const {
+    uint8_t st = kNone;
+    if (state_[b].compare_exchange_strong(st, kBusy, std::memory_order_acquire)) {
+        CorpusPos tmp[PackedPostings::kBlock];
+        const size_t n = pk_->decode_block(id_, count_, b, tmp);
+        const size_t at = b * PackedPostings::kBlock;
+        switch (width_) {
+            case 2: {
+                auto* o = reinterpret_cast<int16_t*>(buf_.get()) + at;
+                for (size_t i = 0; i < n; ++i) o[i] = static_cast<int16_t>(tmp[i]);
+                break;
+            }
+            case 4: {
+                auto* o = reinterpret_cast<int32_t*>(buf_.get()) + at;
+                for (size_t i = 0; i < n; ++i) o[i] = static_cast<int32_t>(tmp[i]);
+                break;
+            }
+            default: std::memcpy(reinterpret_cast<int64_t*>(buf_.get()) + at, tmp, n * sizeof(int64_t));
+        }
+        state_[b].store(kReady, std::memory_order_release);
+        return;
+    }
+    while (state_[b].load(std::memory_order_acquire) != kReady) std::this_thread::yield();
+}
+
+const void* LazyPostings::whole() const {
+    if (!all_.load(std::memory_order_acquire)) {
+        for (size_t b = 0; b < nblocks_; ++b)
+            if (state_[b].load(std::memory_order_acquire) != kReady) ensure(b);
+        all_.store(true, std::memory_order_release);
+    }
+    return buf_.get();
+}
+
+size_t LazyPostings::lower_bound(size_t lo, size_t end, CorpusPos target) const {
+    if (lo >= end) return end;
+    if (at(lo) >= target) return lo;
+    // the last block whose first position is < target, from lo's block (gallop on
+    // the skip table: merges probe close ahead, page jumps go far)
+    const size_t last_b = (end - 1) / PackedPostings::kBlock;
+    size_t b = lo / PackedPostings::kBlock;   // block_first(b) <= at(lo) < target
+    if (b < last_b) {
+        size_t prev = b, step = 1, hi = b + 1;
+        while (hi <= last_b && block_first(hi) < target) {
+            prev = hi;
+            step <<= 1;
+            hi = prev + step;
+        }
+        if (hi > last_b + 1) hi = last_b + 1;   // answer block in [prev, hi)
+        size_t L = prev + 1, R = hi;              // first block with first >= target
+        while (L < R) {
+            const size_t mid = L + ((R - L) >> 1);
+            if (block_first(mid) < target) L = mid + 1;
+            else R = mid;
+        }
+        b = L - 1;
+    }
+    size_t j = std::max(lo, b * PackedPostings::kBlock);
+    const size_t stop = std::min(end, (b + 1) * PackedPostings::kBlock);
+    // binary search inside the block (at() decodes it once)
+    size_t L = j, R = stop;
+    while (L < R) {
+        const size_t mid = L + ((R - L) >> 1);
+        if (at(mid) < target) L = mid + 1;
+        else R = mid;
+    }
+    return L;   // == stop: the next block starts at or above target (or end)
+}
+
+size_t RevSpan::lower_bound(size_t lo, CorpusPos target) const {
+    if (lazy) {
+        const size_t r = lazy->lower_bound(base + lo, base + count, target);
+        return r - base;
+    }
+    const size_t n = count;
+    if (lo >= n || at(lo) >= target) return lo;
+    size_t prev = lo, step = 1, hi = lo + 1;
+    while (hi < n && at(hi) < target) {
+        prev = hi;
+        step <<= 1;
+        hi = prev + step;
+    }
+    if (hi > n) hi = n;
+    size_t L = prev + 1, R = hi;
+    while (L < R) {
+        const size_t mid = L + ((R - L) >> 1);
+        if (at(mid) < target) L = mid + 1;
+        else R = mid;
+    }
+    return L;
+}
+
+RevSpan RevSpan::slice(size_t lo, size_t hi) const {
+    RevSpan out;
+    out.width = width;
+    if (hi > count) hi = count;
+    if (hi <= lo) return out;
+    out.count = hi - lo;
+    out.keep = keep;
+    if (lazy) {
+        out.lazy = lazy;
+        out.base = base + lo;
+    } else {
+        out.data = static_cast<const char*>(data) + lo * static_cast<size_t>(width);
+    }
+    return out;
+}
+
 void PositionalAttr::open(const std::string& base, CorpusPos corpus_size, bool preload) {
     corpus_size_ = corpus_size;
     base_path_ = base;
@@ -94,9 +212,9 @@ void PositionalAttr::open(const std::string& base, CorpusPos corpus_size, bool p
     const int64_t total = nlex >= 0 ? rev_idx_.as<int64_t>()[nlex] : 0;
     // P4.2: packed postings, when wanted or when the plain `.rev` was dropped
     if (nlex >= 0 && (mode == RevMode::Packed || !have_rev))
-        use_packed_ = packed_.open(base, nlex, total, preload);
+        use_packed_ = packed_->open(base, nlex, total, preload);
     if (use_packed_) {
-        rev_width_ = packed_.rev_width();
+        rev_width_ = packed_->rev_width();
     } else {
         if (!have_rev)
             throw std::runtime_error("no postings for " + base + " (neither .rev nor a valid .rev.pfb)");
@@ -161,27 +279,17 @@ RevSpan PositionalAttr::rev_span_of_id(LexiconId id) const {
     if (end <= start) return span;
     span.count = static_cast<size_t>(end - start);
     if (use_packed_) {
-        // P4.2: decode into a buffer of the span's width (long lists cached)
+        // P4.2b: decoded block by block on access; long lists are kept (with the
+        // blocks decoded so far) for the next queries
         const bool cache = span.count >= kCacheMinPostings;
-        if (cache)
-            if (auto hit = DecodeCache::get().find(serial_, id)) {
-                span.keep = hit;
-                span.data = hit.get();
-                return span;
-            }
-        std::shared_ptr<const void> buf;
-        auto decode = [&](auto tag) {
-            using T = decltype(tag);
-            auto v = std::shared_ptr<T[]>(new T[span.count]);
-            packed_.decode_all(id, span.count, v.get());
-            buf = std::shared_ptr<const void>(v, v.get());
-        };
-        if (rev_width_ == 2) decode(int16_t{});
-        else if (rev_width_ == 4) decode(int32_t{});
-        else decode(int64_t{});
-        if (cache) DecodeCache::get().put(serial_, id, buf, span.count * static_cast<size_t>(rev_width_));
-        span.keep = buf;
-        span.data = buf.get();
+        std::shared_ptr<const void> lp;
+        if (cache) lp = DecodeCache::get().find(serial_, id);
+        if (!lp) {
+            lp = std::make_shared<const LazyPostings>(packed_, id, span.count, rev_width_);
+            if (cache) DecodeCache::get().put(serial_, id, lp, span.count * static_cast<size_t>(rev_width_));
+        }
+        span.lazy = static_cast<const LazyPostings*>(lp.get());
+        span.keep = std::move(lp);
         return span;
     }
     switch (rev_width_) {

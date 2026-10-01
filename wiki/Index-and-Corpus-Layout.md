@@ -47,15 +47,20 @@ Which postings are read:
 to exactly the positions in `.rev`, then deletes the `.rev`. A `.rev.pfb` older
 than its `.rev.idx` is stale and is not opened (rebuild with `--packed-rev`).
 
-From packed postings a value's list is decoded when a query needs it (about
-2–3 ns per position, including the memory it is decoded into). Lists of 4096 or
-more positions are kept in a process-wide cache (`PANDO_REV_CACHE_MB`, default
-256 MB; a list larger than a quarter of it is not kept), so in `pando-server`
-only the first query that uses a frequent value pays for decoding it. A
-one-shot CLI query over a very frequent value (e.g. `[upos="NOUN"]`, 8.5M
-positions) is 20–40 ms slower than from `.rev`; queries over rarer values are
-unaffected. Region attribute `.rev` files, `contr_form` and the dependency edge
-postings (`dep.pair.*.rev`) are not packed.
+From packed postings a value's list is decoded block by block (128 positions)
+as a query touches it: the first page of `[upos="NOUN"]` decodes one block, a
+search for a position (a merge driven by a rare token, a count inside region
+intervals) finds the block through the skip table and decodes only that one, and
+a count needs no decoding (the counts are in `.rev.idx`). Kernels that scan a
+whole list (transitive dependencies, gap sequences, some dependency joins)
+decode all of it, about 2–3 ns per position including the memory it is decoded
+into. Lists of 4096 or more positions are kept, with the blocks decoded so far,
+in a process-wide cache (`PANDO_REV_CACHE_MB`, default 256 MB; a list larger
+than a quarter of it is not kept), so in `pando-server` a block is decoded once.
+On the 38M demo the whole perf benchmark (166 measurements) takes as long from
+packed postings as from `.rev` (17.9 s both); single one-shot CLI queries that
+scan a frequent list are up to 20–40 ms slower. Region attribute `.rev` files,
+`contr_form` and the dependency edge postings (`dep.pair.*.rev`) are not packed.
 
 ## Further reading
 
