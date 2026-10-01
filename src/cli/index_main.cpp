@@ -302,7 +302,7 @@ static int upgrade_index(const std::string& dir, bool quiet = false,
                          const std::string& dep_pairs = kDefaultDepPairs,
                          const std::string& bitmaps = kDefaultBitmaps,
                          const std::string& packed = "none", bool drop_rev = false,
-                         const std::string& head_attrs = "none") {
+                         const std::string& head_attrs = "none", bool compact_deps = false) {
     auto t0 = std::chrono::steady_clock::now();
     auto secs = [&] {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -321,6 +321,51 @@ static int upgrade_index(const std::string& dir, bool quiet = false,
             if (!quiet) std::cerr << "Wrote " << dir << "/dep.head_rel (" << secs() << " s)\n";
         } else if (!quiet) {
             std::cerr << dir << "/dep.head_rel up to date\n";
+        }
+    }
+    // P4.3b: dep.head_rel8 (1 byte per token + exceptions), which readers prefer;
+    // --compact-deps then drops dep.head and dep.head_rel (2 bytes per token each)
+    if ((fs::exists(dir + "/dep.head") || fs::exists(dir + "/dep.head_rel8")) && fs::exists(dir + "/s.rgn")) {
+        try {
+            pando::StructuralAttr sentences;
+            sentences.open(dir + "/s.rgn", false);
+            pando::DependencyIndex before;
+            before.open(dir, sentences);
+            const size_t n = before.token_count();
+            std::error_code ec;
+            const bool stale = fs::exists(dir + "/dep.head")
+                && fs::last_write_time(dir + "/dep.head_rel8", ec) < fs::last_write_time(dir + "/dep.head", ec);
+            if (!pando::DependencyIndex::have_head_rel8(dir, n) || stale) {
+                std::string err;
+                if (!before.write_head_rel8(dir, &err)) {
+                    std::cerr << "Error: " << err << "\n";
+                    return 1;
+                }
+                if (!quiet) std::cerr << "Wrote " << dir << "/dep.head_rel8 (" << secs() << " s)\n";
+            } else if (!quiet) {
+                std::cerr << dir << "/dep.head_rel8 up to date\n";
+            }
+            if (compact_deps && (fs::exists(dir + "/dep.head") || fs::exists(dir + "/dep.head_rel"))) {
+                pando::DependencyIndex after;   // reads dep.head_rel8
+                after.open(dir, sentences);
+                for (size_t p = 0; p < n; ++p)
+                    if (before.head(static_cast<pando::CorpusPos>(p)) != after.head(static_cast<pando::CorpusPos>(p))) {
+                        std::cerr << "Error: dep.head_rel8 differs at token " << p << "; dep.head kept\n";
+                        return 1;
+                    }
+                for (const char* f : {"/dep.head", "/dep.head_rel"}) {
+                    if (!fs::exists(dir + f)) continue;
+                    fs::remove(dir + f, ec);
+                    if (ec) {
+                        std::cerr << "Error: cannot remove " << dir << f << ": " << ec.message() << "\n";
+                        return 1;
+                    }
+                    if (!quiet) std::cerr << "Removed " << dir << f << " (dep.head_rel8 verified)\n";
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << "\n";
+            return 1;
         }
     }
     try {
@@ -434,6 +479,7 @@ int main(int argc, char* argv[]) {
         std::string packed = "none";
         bool drop_rev = false;
         std::string head_attrs = "none";
+        bool compact_deps = false;
         for (int i = 3; i < argc; ++i) {
             const std::string a = argv[i];
             if (a == "--packed-rev" && i + 1 < argc && argv[i + 1][0] != '-') { packed = argv[++i]; continue; }
@@ -441,6 +487,7 @@ int main(int argc, char* argv[]) {
             if (a.rfind("--packed-rev=", 0) == 0) { packed = a.substr(13); continue; }
             if (a == "--drop-rev") { drop_rev = true; continue; }
             if (a == "--head-attrs" && i + 1 < argc) { head_attrs = argv[++i]; continue; }
+            if (a == "--compact-deps") { compact_deps = true; continue; }
             if (a.rfind("--head-attrs=", 0) == 0) { head_attrs = a.substr(13); continue; }
             if (a == "--dep-pairs" && i + 1 < argc) pairs = argv[++i];
             else if (a.rfind("--dep-pairs=", 0) == 0) pairs = a.substr(12);
@@ -452,7 +499,7 @@ int main(int argc, char* argv[]) {
             }
         }
         if (drop_rev && packed == "none") packed = "auto";
-        return upgrade_index(argv[2], false, pairs, bitmaps, packed, drop_rev, head_attrs);
+        return upgrade_index(argv[2], false, pairs, bitmaps, packed, drop_rev, head_attrs, compact_deps);
     }
     bool split_feats = false;
     bool format_vertical = false;
@@ -515,7 +562,9 @@ int main(int argc, char* argv[]) {
                   << "                    verified (implies --packed-rev auto; queries then decode)\n"
                   << "    --head-attrs A[,B...]  head attributes head#A (A of each token's\n"
                   << "                    dependency head, e.g. head#upos, head#lemma): [X] > [Y]\n"
-                  << "                    becomes a one-token query on the dependent (default none)\n";
+                  << "                    becomes a one-token query on the dependent (default none)\n"
+                  << "    --compact-deps  remove dep.head and dep.head_rel once dep.head_rel8 (1 byte\n"
+                  << "                    per token, always written) is verified to give the same heads\n";
         return 1;
     }
 

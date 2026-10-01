@@ -22,6 +22,34 @@ namespace pando {
 //
 // EX-2p: A per-sentence children cache avoids redundant O(sentence_length)
 // scans when multiple seeds in the same sentence request children().
+/// P4.3b: one escaped head offset of `dep.head_rel8` (|head - pos| > 127).
+struct HeadRelException {
+    int64_t pos;
+    int64_t d;
+};
+
+/// Head offsets (head - pos per token, 0 = root / no head), from `dep.head_rel8`
+/// (int8 per token; kEscape = look the position up in the sorted exceptions,
+/// ~1 in 20000 tokens in UD) or the older `dep.head_rel` (int16 per token).
+/// Indexed like the int16 array it replaces: `hrel[pos]`.
+struct HeadRelView {
+    static constexpr int8_t kEscape = -128;
+    const int8_t* r8 = nullptr;
+    const HeadRelException* exc = nullptr;
+    size_t nexc = 0;
+    const int16_t* r16 = nullptr;
+
+    explicit operator bool() const { return r8 != nullptr || r16 != nullptr; }
+    int16_t operator[](CorpusPos pos) const {
+        if (r8) {
+            const int8_t v = r8[pos];
+            return v != kEscape ? static_cast<int16_t>(v) : escaped(pos);
+        }
+        return r16[pos];
+    }
+    int16_t escaped(CorpusPos pos) const;
+};
+
 class DependencyIndex {
 public:
     void open(const std::string& dir, const StructuralAttr& sentences, bool preload = false);
@@ -29,23 +57,27 @@ public:
     // Absolute corpus position of the head.  Returns NO_HEAD for root.
     CorpusPos head(CorpusPos pos) const;
 
-    /// P1.8: optional `dep.head_rel` (int16 per token: head - pos, 0 = root / none).
-    /// nullptr when the index predates it (see `pando-index --upgrade`).
-    /// With it, head(pos) = pos + rel[pos] — no sentence lookup at all.
-    const int16_t* head_rel_data() const {
-        return head_rel_file_.valid() ? head_rel_file_.as<int16_t>() : nullptr;
-    }
+    /// P1.8 / P4.3b: head offsets (head - pos, 0 = root / none) from
+    /// `dep.head_rel8` or `dep.head_rel`; false (no offsets) for an index that
+    /// predates both (see `pando-index --upgrade`). With them, head(pos) =
+    /// pos + rel[pos] — no sentence lookup at all.
+    const HeadRelView& head_rel_data() const { return head_rel_; }
     /// Raw sentence-local Euler tour times (int16 per token).
     const int16_t* euler_in_data() const { return euler_in_file_.as<int16_t>(); }
     const int16_t* euler_out_data() const { return euler_out_file_.as<int16_t>(); }
-    /// Raw sentence-local heads (int16 per token, -1 = root).
-    const int16_t* head_local_data() const { return head_file_.as<int16_t>(); }
-    size_t token_count() const { return head_file_.size() / sizeof(int16_t); }
+    /// Raw sentence-local heads (int16 per token, -1 = root); nullptr when the
+    /// index has no `dep.head` (P4.3b `--compact-deps`: head_rel_data() instead).
+    const int16_t* head_local_data() const { return head_file_.valid() ? head_file_.as<int16_t>() : nullptr; }
+    size_t token_count() const { return n_; }
 
     /// Write `<dir>/dep.head_rel` derived from `dep.head` + sentence regions
     /// (for indexes built before P1.8). Returns false and sets *err on failure.
     static bool write_head_rel_file(const std::string& dir, const StructuralAttr& sentences,
                                     std::string* err);
+    /// P4.3b: write `<dir>/dep.head_rel8{,.exc}` from this index's head offsets.
+    bool write_head_rel8(const std::string& dir, std::string* err) const;
+    /// P4.3b: `dep.head_rel8` present and complete (same token count).
+    static bool have_head_rel8(const std::string& dir, size_t tokens);
 
     /// Like `head`, but reuses `sentence_hint` via `find_region_from` so scanning
     /// sorted child positions is amortized O(1) per call (Manatee-style dep joins).
@@ -83,6 +115,10 @@ private:
     const StructuralAttr* sentences_ = nullptr;
     MmapFile head_file_;       // int16[corpus_size]
     MmapFile head_rel_file_;   // int16[corpus_size], optional (P1.8)
+    MmapFile head_rel8_file_;  // int8[corpus_size], optional (P4.3b)
+    MmapFile head_rel8_exc_;   // HeadRelException[], sorted by pos
+    HeadRelView head_rel_;
+    size_t n_ = 0;             // tokens
     MmapFile euler_in_file_;   // int16[corpus_size]
     MmapFile euler_out_file_;  // int16[corpus_size]
 

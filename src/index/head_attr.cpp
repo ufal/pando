@@ -114,7 +114,8 @@ bool HeadAttr::up_to_date(const Corpus& corpus, const std::string& attr) {
     const std::string b = corpus.dir() + "/" + name;
     const std::string src = corpus.attr(attr).base_path();
     if (!newer_or_same(b + ".rev.idx", src + ".rev.idx") || !newer_or_same(b + ".rev.idx", src + ".dat")
-        || !newer_or_same(b + ".rev.idx", corpus.dir() + "/dep.head_rel"))
+        || !newer_or_same(b + ".rev.idx", corpus.dir() + "/dep.head_rel")
+        || !newer_or_same(b + ".rev.idx", corpus.dir() + "/dep.head_rel8"))
         return false;
     const auto nsrc = corpus.attr(attr).lexicon().size(), nh = corpus.attr(name).lexicon().size();
     return nh == nsrc || nh == nsrc + 1;
@@ -123,7 +124,7 @@ bool HeadAttr::up_to_date(const Corpus& corpus, const std::string& attr) {
 bool HeadAttr::build(const Corpus& corpus, const std::string& attr, std::string* err) {
     auto fail = [&](const std::string& m) { if (err) *err = m; return false; };
     if (!corpus.has_deps()) return fail("corpus has no dependency index");
-    const int16_t* hrel = corpus.deps().head_rel_data();
+    const HeadRelView& hrel = corpus.deps().head_rel_data();
     if (!hrel) return fail("dep.head_rel missing (run pando-index --upgrade first)");
     if (!source_of(attr).empty()) return fail("--head-attrs " + attr + ": already a head attribute");
     if (!corpus.has_attr(attr) || corpus.is_multivalue(attr))

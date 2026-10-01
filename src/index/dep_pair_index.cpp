@@ -28,7 +28,7 @@ bool DepPairIndex::build(const Corpus& corpus, const std::string& head_attr,
                          const std::string& child_attr, std::string* err) {
     auto fail = [&](const std::string& m) { if (err) *err = m; return false; };
     if (!corpus.has_deps()) return fail("corpus has no dependency index");
-    const int16_t* hrel = corpus.deps().head_rel_data();
+    const HeadRelView& hrel = corpus.deps().head_rel_data();
     if (!hrel) return fail("dep.head_rel missing (run pando-index --upgrade first)");
     if (!corpus.has_attr(head_attr) || corpus.is_multivalue(head_attr))
         return fail("no single-valued positional attribute '" + head_attr + "'");

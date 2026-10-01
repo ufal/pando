@@ -85,6 +85,9 @@ for `--upgrade`:
   [Dependency queries](Dependency-Queries.md#head-attributes).
   Built before folds, bitmaps and packed postings so these cover them too.
   Default none.
+- `--compact-deps` — remove `dep.head` and `dep.head_rel` once `dep.head_rel8`
+  (one byte per token, always written) is verified to give the same heads; see
+  [Dependency queries](Dependency-Queries.md#index).
 - `--drop-rev` — after verifying that the packed postings decode to the same
   positions, remove the plain `<attr>.rev` files (implies `--packed-rev auto`).
   Saves disk space; queries then decode postings (see

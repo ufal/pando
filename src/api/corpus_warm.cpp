@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -37,7 +38,9 @@ bool ends_with(const std::string& s, const char* suf) {
 }
 
 bool is_hot(const Corpus& corpus, const std::string& name) {
-    if (name == "corpus.info" || name == "dep.head_rel") return true;
+    if (name == "corpus.info" || name == "dep.head_rel8" || name == "dep.head_rel8.exc") return true;
+    // the int16 offsets only when there are no 1-byte ones (P4.3b)
+    if (name == "dep.head_rel") return !std::ifstream(corpus.dir() + "/dep.head_rel8").good();
     for (const char* suf : {".lex", ".lex.idx", ".rev.idx", ".bm", ".bm.idx", ".perm", ".rgn", ".par",
                             ".val", ".val.idx", ".pfb.idx"})
         if (ends_with(name, suf)) return true;

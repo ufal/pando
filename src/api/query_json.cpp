@@ -386,7 +386,7 @@ std::string index_status_json_fields(const Corpus& corpus) {
     }
     out << "]";
     out << ", \"dep_head_rel\": "
-        << (corpus.has_deps() ? (corpus.deps().head_rel_data() ? "true" : "false") : "null");
+        << (corpus.has_deps() ? (static_cast<bool>(corpus.deps().head_rel_data()) ? "true" : "false") : "null");
 
     size_t fold_ok = 0, fold_missing = 0;
     const FoldMode modes[] = {FoldMode::Lower, FoldMode::NoAccents, FoldMode::LowerNoAccents};

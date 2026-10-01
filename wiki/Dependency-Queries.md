@@ -66,6 +66,18 @@ attributes), N head attributes cover every combination. `>>`, `!>`,
 
 Without `dep.*` files, dependency queries are unavailable or degraded. Run `pando-check` and verify `corpus.info` / file list after indexing.
 
+Files: `dep.head` (sentence-local head, int16 per token), `dep.euler_in` /
+`dep.euler_out` (Euler tour times for `>>` / descendants, int16 each),
+`dep.head_rel` (head − position, int16) and `dep.head_rel8` (the same in one
+byte per token, with the few offsets beyond ±127 in `dep.head_rel8.exc`; 1891
+of 38M tokens in the UD demo). `pando-index --upgrade` writes the derived
+files; readers use `dep.head_rel8` when it is there.
+`pando-index --upgrade <dir> --compact-deps` then removes `dep.head` and
+`dep.head_rel` after checking that `dep.head_rel8` gives the same head for
+every token: 8 → 5 bytes per token of dependency data (on the demo 305 → 191
+MB), at the same query speed. An index compacted this way needs this pando
+version or later.
+
 ## See also
 
 - [Overlapping and nested regions](Overlapping-and-Nested-Regions.md) — `containing subtree`

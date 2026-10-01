@@ -162,7 +162,7 @@ CollCounts DcollCounter::finish() {
         auto it = repeated.find(h);
         return it == repeated.end() ? 1 : it->second;
     };
-    const int16_t* rel = deps.head_rel_data();
+    const HeadRelView& rel = deps.head_rel_data();
     auto head_of = [&](CorpusPos c) -> CorpusPos {
         if (rel) {
             int16_t d = rel[c];

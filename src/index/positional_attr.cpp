@@ -240,7 +240,7 @@ void PositionalAttr::open(const std::string& base, CorpusPos corpus_size, bool p
     }
 }
 
-void PositionalAttr::set_head_source(const PositionalAttr* src, const int16_t* hrel, LexiconId none_id) {
+void PositionalAttr::set_head_source(const PositionalAttr* src, const HeadRelView& hrel, LexiconId none_id) {
     derived_ = true;
     src_ = src;
     hrel_ = hrel;

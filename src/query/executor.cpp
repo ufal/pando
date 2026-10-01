@@ -6614,7 +6614,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                     const StructuralAttr& sents = corpus_.structure("s");
                     const Region* sent_r = sents.region_data();
                     FlatRegionCursor sent_cur(sents);
-                    const int16_t* hrel = deps.head_rel_data();
+                    const HeadRelView& hrel = deps.head_rel_data();
                     const int16_t* hloc = deps.head_local_data();
                     const CorpusPos corpus_end = corpus_.size();
                     const bool mask_bits = use_region_mask && region_mask.use_bits;
@@ -7151,7 +7151,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                     const auto& deps = corpus_.deps();
                     const StructuralAttr& sents = corpus_.structure("s");
                     const Region* sent_r = sents.region_data();
-                    const int16_t* hrel = deps.head_rel_data();
+                    const HeadRelView& hrel = deps.head_rel_data();
                     const int16_t* hloc = deps.head_local_data();
                     const CorpusPos corpus_end = corpus_.size();
                     const bool mask_bits = use_region_mask && region_mask.use_bits;
@@ -7693,7 +7693,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                                          query.tokens[parent_first ? 1 : 0].name, fields))) {
             MatchSet r = execute(one, max_matches, count_total, max_total_cap, sample_size, random_seed,
                                  num_threads, agg ? &fields : nullptr, skip_name_validation);
-            const int16_t* hrel = corpus_.deps().head_rel_data();
+            const HeadRelView& hrel = corpus_.deps().head_rel_data();
             for (auto& m : r.matches) {
                 const CorpusPos c = m.positions[0];
                 const CorpusPos h = c + hrel[c];

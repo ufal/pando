@@ -193,9 +193,8 @@ void Corpus::open(const std::string& dir, bool preload,
     }
 
     if (structs_.count("s")) {
-        std::string dep_head = dir + "/dep.head";
-        std::ifstream probe(dep_head);
-        if (probe.good()) {
+        // dep.head, or (P4.3b, --compact-deps) only dep.head_rel8
+        if (std::ifstream(dir + "/dep.head").good() || std::ifstream(dir + "/dep.head_rel8").good()) {
             deps_.open(dir, *structs_.at("s"), preload);
             has_deps_ = true;
         }

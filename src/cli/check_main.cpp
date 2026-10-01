@@ -123,10 +123,10 @@ static int run_check(const std::string& dir) {
         std::string dep_head = dir + "/dep.head";
         std::string dep_in = dir + "/dep.euler_in";
         std::string dep_out = dir + "/dep.euler_out";
-        if (!file_exists(dep_head)) { std::cerr << "Missing: " << dep_head << " (sentence structure present).\n"; ++errors; }
+        if (!file_exists(dep_head) && !file_exists(dir + "/dep.head_rel8")) { std::cerr << "Missing: " << dep_head << " (sentence structure present).\n"; ++errors; }
         if (!file_exists(dep_in))  { std::cerr << "Missing: " << dep_in << "\n"; ++errors; }
         if (!file_exists(dep_out)) { std::cerr << "Missing: " << dep_out << "\n"; ++errors; }
-        if (file_exists(dep_head) && !file_exists(dir + "/dep.head_rel"))
+        if (file_exists(dep_head) && !file_exists(dir + "/dep.head_rel") && !file_exists(dir + "/dep.head_rel8"))
             std::cerr << "Note: no dep.head_rel (index predates it); run `pando-index --upgrade "
                       << dir << "` for faster dependency queries.\n";
     }

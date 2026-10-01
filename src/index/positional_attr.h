@@ -4,6 +4,7 @@
 #include "core/mmap_file.h"
 #include "index/lexicon.h"
 #include "index/packed_postings.h"
+#include "index/dependency_index.h"
 #include <atomic>
 #include <memory>
 #include <string>
@@ -150,7 +151,7 @@ public:
     /// token's dependency head (head#A, HeadAttr): p + hrel[p], or `none_id` for a
     /// token without a head. Its lexicon is src's with the none value inserted at
     /// none_id when src has no such value (ids at or above it shifted by one).
-    void set_head_source(const PositionalAttr* src, const int16_t* hrel, LexiconId none_id);
+    void set_head_source(const PositionalAttr* src, const HeadRelView& hrel, LexiconId none_id);
     bool derived() const { return derived_; }
     int dat_width() const { return dat_width_; }
     std::string_view value_at(CorpusPos pos) const;
@@ -261,7 +262,7 @@ private:
     MmapFile corpus_;      // .dat  — int8/int16/int32 per position (absent when derived_)
     bool derived_ = false;   // P5.6 head attribute read through src_ at the head
     const PositionalAttr* src_ = nullptr;
-    const int16_t* hrel_ = nullptr;
+    HeadRelView hrel_;
     LexiconId none_id_ = 0;
     bool shift_ = false;     // src_ lacks the none value: ids >= none_id_ move up by one
     LexiconId head_id_at(CorpusPos pos) const;
