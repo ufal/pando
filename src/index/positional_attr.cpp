@@ -1,7 +1,12 @@
 #include "index/positional_attr.h"
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
 #include <filesystem>
+#include <list>
+#include <mutex>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace fs = std::filesystem;
 
@@ -9,13 +14,94 @@ namespace pando {
 
 // ── PositionalAttr (read-only) ──────────────────────────────────────────
 
+namespace {
+
+// P4.2: PANDO_REV=packed serves postings from `.rev.pfb` even when `.rev` exists
+// (tests, benchmarks); raw = the plain `.rev` when present; auto (default) = the
+// plain one when present, else the packed one.
+enum class RevMode { Auto, Raw, Packed };
+RevMode rev_mode() {
+    static const RevMode m = [] {
+        const char* v = std::getenv("PANDO_REV");
+        if (!v) return RevMode::Auto;
+        const std::string s(v);
+        if (s == "packed") return RevMode::Packed;
+        if (s == "raw") return RevMode::Raw;
+        return RevMode::Auto;
+    }();
+    return m;
+}
+
+// Decoded long lists, shared by every attribute of the process, least recently
+// used out by bytes (PANDO_REV_CACHE_MB, default 256). Spans keep their list
+// alive after eviction.
+class DecodeCache {
+public:
+    static DecodeCache& get() {
+        static DecodeCache c;
+        return c;
+    }
+    std::shared_ptr<const void> find(uint64_t serial, LexiconId id) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = index_.find(key(serial, id));
+        if (it == index_.end()) return nullptr;
+        lru_.splice(lru_.begin(), lru_, it->second);
+        return it->second->buf;
+    }
+    void put(uint64_t serial, LexiconId id, std::shared_ptr<const void> buf, size_t bytes) {
+        if (bytes > max_ / 4) return;
+        std::lock_guard<std::mutex> lk(mu_);
+        const uint64_t k = key(serial, id);
+        if (index_.count(k)) return;
+        lru_.push_front(Item{k, std::move(buf), bytes});
+        index_[k] = lru_.begin();
+        bytes_ += bytes;
+        while (bytes_ > max_ && !lru_.empty()) {
+            bytes_ -= lru_.back().bytes;
+            index_.erase(lru_.back().k);
+            lru_.pop_back();
+        }
+    }
+
+private:
+    struct Item { uint64_t k; std::shared_ptr<const void> buf; size_t bytes; };
+    static uint64_t key(uint64_t serial, LexiconId id) { return serial << 40 | static_cast<uint64_t>(id); }
+    DecodeCache() {
+        const char* v = std::getenv("PANDO_REV_CACHE_MB");
+        max_ = (v ? static_cast<size_t>(std::atoll(v)) : size_t{256}) << 20;
+    }
+    std::mutex mu_;
+    std::list<Item> lru_;
+    std::unordered_map<uint64_t, std::list<Item>::iterator> index_;
+    size_t bytes_ = 0, max_ = 0;
+};
+
+std::atomic<uint64_t> g_attr_serial{0};
+constexpr size_t kCacheMinPostings = 4096;   // shorter lists are decoded per call
+
+}  // namespace
+
 void PositionalAttr::open(const std::string& base, CorpusPos corpus_size, bool preload) {
     corpus_size_ = corpus_size;
     base_path_ = base;
+    serial_ = ++g_attr_serial;
     lexicon_.open(base, preload);
     corpus_  = MmapFile::open(base + ".dat", preload);
-    rev_     = MmapFile::open(base + ".rev", preload);
     rev_idx_ = MmapFile::open(base + ".rev.idx", preload);
+    const bool have_rev = fs::exists(base + ".rev");
+    const RevMode mode = rev_mode();
+    const int64_t nlex = static_cast<int64_t>(rev_idx_.count<int64_t>()) - 1;
+    const int64_t total = nlex >= 0 ? rev_idx_.as<int64_t>()[nlex] : 0;
+    // P4.2: packed postings, when wanted or when the plain `.rev` was dropped
+    if (nlex >= 0 && (mode == RevMode::Packed || !have_rev))
+        use_packed_ = packed_.open(base, nlex, total, preload);
+    if (use_packed_) {
+        rev_width_ = packed_.rev_width();
+    } else {
+        if (!have_rev)
+            throw std::runtime_error("no postings for " + base + " (neither .rev nor a valid .rev.pfb)");
+        rev_ = MmapFile::open(base + ".rev", preload);
+    }
 
     // Infer .dat element width from file size
     if (corpus_size_ > 0) {
@@ -74,6 +160,30 @@ RevSpan PositionalAttr::rev_span_of_id(LexiconId id) const {
     int64_t end   = idx[id + 1];
     if (end <= start) return span;
     span.count = static_cast<size_t>(end - start);
+    if (use_packed_) {
+        // P4.2: decode into a buffer of the span's width (long lists cached)
+        const bool cache = span.count >= kCacheMinPostings;
+        if (cache)
+            if (auto hit = DecodeCache::get().find(serial_, id)) {
+                span.keep = hit;
+                span.data = hit.get();
+                return span;
+            }
+        std::shared_ptr<const void> buf;
+        auto decode = [&](auto tag) {
+            using T = decltype(tag);
+            auto v = std::shared_ptr<T[]>(new T[span.count]);
+            packed_.decode_all(id, span.count, v.get());
+            buf = std::shared_ptr<const void>(v, v.get());
+        };
+        if (rev_width_ == 2) decode(int16_t{});
+        else if (rev_width_ == 4) decode(int32_t{});
+        else decode(int64_t{});
+        if (cache) DecodeCache::get().put(serial_, id, buf, span.count * static_cast<size_t>(rev_width_));
+        span.keep = buf;
+        span.data = buf.get();
+        return span;
+    }
     switch (rev_width_) {
         case 2: span.data = rev_.as<int16_t>() + start; break;
         case 4: span.data = rev_.as<int32_t>() + start; break;

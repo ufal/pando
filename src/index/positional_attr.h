@@ -3,6 +3,8 @@
 #include "core/types.h"
 #include "core/mmap_file.h"
 #include "index/lexicon.h"
+#include "index/packed_postings.h"
+#include <memory>
 #include <string>
 
 #include "core/regex_engine.h"
@@ -14,6 +16,9 @@ struct RevSpan {
     int width = 8;            // 2, 4, or 8
     const void* data = nullptr;
     size_t count = 0;
+    /// P4.2: the decoded list when the attribute serves packed postings (null for
+    /// the mmapped `.rev`); copies and slices keep it alive.
+    std::shared_ptr<const void> keep;
 
     CorpusPos at(size_t i) const {
         switch (width) {
@@ -35,7 +40,13 @@ public:
     const std::string& base_path() const { return base_path_; }
 
     /// Sorted postings for `id` without allocating a vector (empty if unknown / OOB).
+    /// With packed postings (P4.2) the list is decoded (long lists cached).
     RevSpan rev_span_of_id(LexiconId id) const;
+    /// Width of the spans' elements (2, 4 or 8), without touching a list.
+    int rev_width() const { return rev_width_; }
+    /// P4.2: postings are served from `<attr>.rev.pfb` (PANDO_REV=packed, or no `.rev`).
+    bool rev_packed() const { return use_packed_; }
+    const PackedPostings& packed_postings() const { return packed_; }
 
     // Position → value
     LexiconId id_at(CorpusPos pos) const;
@@ -47,6 +58,11 @@ public:
     // Value → count (O(1) via rev.idx — no position data touched)
     size_t count_of(const std::string& value) const;
     size_t count_of_id(LexiconId id) const;
+    /// Number of postings over all ids (`.rev.idx` end).
+    size_t postings_total() const {
+        const size_t n = rev_idx_.count<int64_t>();
+        return n ? static_cast<size_t>(rev_idx_.as<int64_t>()[n - 1]) : 0;
+    }
 
     // Value → sorted positions (width-aware, returns owned vector)
     std::vector<CorpusPos> positions_of(const std::string& value) const;
@@ -60,6 +76,7 @@ public:
         int64_t start = idx[id];
         int64_t end   = idx[id + 1];
         const size_t count = static_cast<size_t>(end - start);
+        if (use_packed_) return packed_.for_each(id, count, f);
         switch (rev_width_) {
             case 2: {
                 const auto* p = rev_.as<int16_t>() + start;
@@ -148,6 +165,9 @@ private:
     CorpusPos corpus_size_ = 0;
     int dat_width_ = 4;    // bytes per element in .dat (1, 2, or 4)
     int rev_width_ = 8;    // bytes per element in .rev (2, 4, or 8)
+    PackedPostings packed_;   // P4.2 `.rev.pfb` (when present)
+    bool use_packed_ = false;
+    uint64_t serial_ = 0;     // decode-cache key of this attribute
 
     // RG-5f: MV component reverse index (optional, only for multivalue attrs)
     Lexicon  mv_lexicon_;      // .mv.lex — sorted component strings

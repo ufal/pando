@@ -780,6 +780,7 @@ static RevSpan rev_slice(const RevSpan& sp, size_t lo, size_t hi) {
     if (hi <= lo || lo >= sp.count) return out;
     out.count = hi - lo;
     out.data = static_cast<const char*>(sp.data) + lo * static_cast<size_t>(sp.width);
+    out.keep = sp.keep;
     return out;
 }
 
@@ -4529,7 +4530,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
     const int corpus_rev_width = [&] {
         for (const auto& a : corpus_.attr_names())
             if (corpus_.has_attr(a) && !corpus_.is_multivalue(a))
-                return corpus_.attr(a).rev_span_of_id(0).width;
+                return corpus_.attr(a).rev_width();
         return 8;
     }();
     std::function<bool(const ConditionPtr&)> plain_condition = [&](const ConditionPtr& c) -> bool {
@@ -4673,7 +4674,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
         if (corpus_.is_multivalue(name)) return from_merge_operand();
         const PositionalAttr& pa = corpus_.attr(name);
         std::shared_ptr<BitmapIndex> bi = bitmap_index(name);
-        auto id_count = [&](int64_t id) { return pa.rev_span_of_id(static_cast<LexiconId>(id)).count; };
+        auto id_count = [&](int64_t id) { return pa.count_of_id(static_cast<LexiconId>(id)); };
         auto set_expr = [&](const std::vector<int64_t>& ids, int64_t known = -1) -> std::unique_ptr<BmExpr> {
             if (!bi && ids.size() > 64) return nullptr;   // (before counting: ids can be millions)
             size_t cnt = 0;

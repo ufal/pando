@@ -196,6 +196,81 @@ static int upgrade_bitmaps(const pando::Corpus& corpus, const std::string& spec,
     return 0;
 }
 
+// P4.2: `--packed-rev auto|none|A[,B...]` writes <attr>.rev.pfb (block-compressed
+// postings; auto = every single-valued attribute); `--drop-rev` then removes the
+// plain .rev of those attributes once every list decodes to the same positions.
+static int upgrade_packed(const pando::Corpus& corpus, const std::string& spec, bool drop, bool quiet,
+                          const std::function<double()>& secs) {
+    if (spec == "none") return 0;
+    std::vector<std::string> names;
+    if (spec == "auto") {
+        for (const auto& n : corpus.attr_names())
+            if (corpus.has_attr(n) && !corpus.is_multivalue(n)) names.push_back(n);
+    } else {
+        names = split_list(spec);
+    }
+    for (const auto& name : names) {
+        if (!corpus.has_attr(name) || corpus.is_multivalue(name)) {
+            std::cerr << "Error: --packed-rev " << name << ": not a single-valued positional attribute\n";
+            return 1;
+        }
+        const auto& pa = corpus.attr(name);
+        const std::string base = pa.base_path();
+        pando::PackedPostings probe;
+        const bool have = probe.open(base, pa.lexicon().size(), static_cast<int64_t>(pa.postings_total()));
+        const bool plain = fs::exists(base + ".rev");
+        if (have) {
+            if (!quiet) std::cerr << "Packed postings " << pando::PackedPostings::path(base) << " up to date\n";
+        } else {
+            if (!plain) {
+                std::cerr << "Error: " << base << ": no .rev to pack and no valid .rev.pfb\n";
+                return 1;
+            }
+            std::string err;
+            pando::PackedPostings::BuildStats st;
+            if (!pando::PackedPostings::build(pa, &err, &st)) {
+                std::cerr << "Error: " << err << "\n";
+                return 1;
+            }
+            if (!quiet) {
+                const double raw = static_cast<double>(st.postings) * pa.rev_width();
+                const double packed = static_cast<double>(st.payload_bytes + st.idx_bytes);
+                std::cerr << "Wrote " << pando::PackedPostings::path(base) << " (" << st.postings << " postings, "
+                          << (static_cast<uint64_t>(packed) >> 20) << " MB = "
+                          << (raw > 0 ? static_cast<int>(100.0 * packed / raw + 0.5) : 0) << "% of .rev, "
+                          << secs() << " s)\n";
+            }
+        }
+        if (drop && plain) {
+            // only when the packed lists give back exactly the plain ones
+            pando::PackedPostings pk;
+            if (!pk.open(base, pa.lexicon().size(), static_cast<int64_t>(pa.postings_total()))) {
+                std::cerr << "Error: " << base << ".rev.pfb does not open; .rev kept\n";
+                return 1;
+            }
+            std::vector<pando::CorpusPos> buf;
+            for (pando::LexiconId id = 0; id < pa.lexicon().size(); ++id) {
+                const pando::RevSpan sp = pa.rev_span_of_id(id);
+                buf.resize(sp.count);
+                pk.decode_all(id, sp.count, buf.data());
+                for (size_t i = 0; i < sp.count; ++i)
+                    if (buf[i] != sp.at(i)) {
+                        std::cerr << "Error: " << base << ".rev.pfb differs from .rev (id " << id << "); .rev kept\n";
+                        return 1;
+                    }
+            }
+            std::error_code ec;
+            fs::remove(base + ".rev", ec);
+            if (ec) {
+                std::cerr << "Error: cannot remove " << base << ".rev: " << ec.message() << "\n";
+                return 1;
+            }
+            if (!quiet) std::cerr << "Removed " << base << ".rev (packed postings verified)\n";
+        }
+    }
+    return 0;
+}
+
 // Record `upgraded_with=<build> <UTC time>` in corpus.info (replacing an earlier one).
 static void record_upgrade(const std::string& dir) {
     const std::string path = dir + "/corpus.info", tmp = path + ".tmp";
@@ -221,7 +296,8 @@ static void record_upgrade(const std::string& dir) {
 
 static int upgrade_index(const std::string& dir, bool quiet = false,
                          const std::string& dep_pairs = kDefaultDepPairs,
-                         const std::string& bitmaps = kDefaultBitmaps) {
+                         const std::string& bitmaps = kDefaultBitmaps,
+                         const std::string& packed = "none", bool drop_rev = false) {
     auto t0 = std::chrono::steady_clock::now();
     auto secs = [&] {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -262,6 +338,7 @@ static int upgrade_index(const std::string& dir, bool quiet = false,
         }
         if (!quiet) std::cerr << "Fold indexes up to date (" << secs() << " s)\n";
         if (upgrade_bitmaps(corpus, bitmaps, quiet, secs) != 0) return 1;
+        if (upgrade_packed(corpus, packed, drop_rev, quiet, secs) != 0) return 1;
         if (!quiet && !corpus.has_deps())
             std::cerr << "No dependency index: no dep.head_rel / edge postings\n";
         if (corpus.has_deps() && corpus.deps().head_rel_data() && dep_pairs != "none") {
@@ -317,8 +394,14 @@ int main(int argc, char* argv[]) {
     if (argc >= 3 && std::string(argv[1]) == "--upgrade") {
         std::string pairs = kDefaultDepPairs;
         std::string bitmaps = kDefaultBitmaps;
+        std::string packed = "none";
+        bool drop_rev = false;
         for (int i = 3; i < argc; ++i) {
             const std::string a = argv[i];
+            if (a == "--packed-rev" && i + 1 < argc && argv[i + 1][0] != '-') { packed = argv[++i]; continue; }
+            if (a == "--packed-rev") { packed = "auto"; continue; }
+            if (a.rfind("--packed-rev=", 0) == 0) { packed = a.substr(13); continue; }
+            if (a == "--drop-rev") { drop_rev = true; continue; }
             if (a == "--dep-pairs" && i + 1 < argc) pairs = argv[++i];
             else if (a.rfind("--dep-pairs=", 0) == 0) pairs = a.substr(12);
             else if (a == "--bitmaps" && i + 1 < argc) bitmaps = argv[++i];
@@ -328,7 +411,8 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
         }
-        return upgrade_index(argv[2], false, pairs, bitmaps);
+        if (drop_rev && packed == "none") packed = "auto";
+        return upgrade_index(argv[2], false, pairs, bitmaps, packed, drop_rev);
     }
     bool split_feats = false;
     bool format_vertical = false;
@@ -384,7 +468,11 @@ int main(int argc, char* argv[]) {
                   << "    --bitmaps auto|none|A[,B...]  chunked bitmaps (<attr>.bm) for fast dense\n"
                   << "                    token patterns, <struct>.bnd.bm for `within` (default auto:\n"
                   << "                    attributes with <= " << pando::BitmapIndex::kAutoMaxValues
-                  << " values, flat structures)\n";
+                  << " values, flat structures)\n"
+                  << "    --packed-rev [auto|none|A[,B...]]  block-compressed postings (<attr>.rev.pfb,\n"
+                  << "                    P4.2; auto = every single-valued attribute; default none)\n"
+                  << "    --drop-rev      remove the plain <attr>.rev once its packed postings are\n"
+                  << "                    verified (implies --packed-rev auto; queries then decode)\n";
         return 1;
     }
 

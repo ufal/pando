@@ -19,7 +19,7 @@ std::string DepPairIndex::base_path(const std::string& dir, const std::string& h
 static int corpus_rev_width(const Corpus& corpus) {
     for (const auto& a : corpus.attr_names())
         if (corpus.has_attr(a) && !corpus.is_multivalue(a))
-            return corpus.attr(a).rev_span_of_id(0).width;
+            return corpus.attr(a).rev_width();
     const CorpusPos n = corpus.size();
     return n <= 32767 ? 2 : (n <= 2147483647 ? 4 : 8);
 }

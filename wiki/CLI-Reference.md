@@ -72,6 +72,23 @@ When stdin is a TTY and no query is given, `pando` runs an interactive loop (`se
 
 Builds or updates a corpus directory from JSONL (or streaming integration). See [Sample corpora](Sample-Corpora.md) and [Index and corpus layout](Index-and-Corpus-Layout.md).
 
+`pando-index --upgrade <corpus_dir>` adds the sidecar indexes the current build
+knows (fold, bitmap, dependency edge postings, …) to an existing corpus. Options
+for `--upgrade`:
+
+- `--packed-rev [auto|none|A[,B...]]` — also write block-compressed postings
+  (`<attr>.rev.pfb`) for every single-valued positional attribute (`auto`, the
+  value when the option is given without one) or the ones listed. Default `none`.
+- `--drop-rev` — after verifying that the packed postings decode to the same
+  positions, remove the plain `<attr>.rev` files (implies `--packed-rev auto`).
+  Saves disk space; queries then decode postings (see
+  [Packed postings](Index-and-Corpus-Layout.md#packed-postings-revpfb)).
+
+Environment for `pando`, `pando-server` and embedders: `PANDO_REV=auto|raw|packed`
+(`auto`: `.rev` when present, otherwise `.rev.pfb`; `packed`: `.rev.pfb` whenever
+it is present and up to date) and `PANDO_REV_CACHE_MB` (cache of decoded long
+lists, default 256).
+
 ## `pando-check`
 
 Validates layout and internal consistency.

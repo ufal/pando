@@ -36,7 +36,7 @@ import sys
 import tempfile
 import time
 
-ALL_MODES = ("on", "onbits", "nobm", "bmforce", "nomerge", "off", "mt", "mtbits", "mtoff", "prog")
+ALL_MODES = ("on", "onbits", "nobm", "bmforce", "nomerge", "off", "mt", "mtbits", "mtoff", "prog", "packed")
 MODES = ALL_MODES
 REF = "off"
 # onbits  = fast paths with region filters forced to the bitset representation
@@ -52,6 +52,8 @@ REF = "off"
 MT_THREADS = 4
 MT_MODES = ("mt", "mtbits", "mtoff")
 PARTITION_MIN = "50"
+# packed  = on with the postings decoded from <attr>.rev.pfb (P4.2, PANDO_REV=packed;
+#           the sample index gets them with `pando-index --upgrade --packed-rev`).
 # prog    = on with P6.5e progressive pages for every complex operand
 #           (PANDO_PROGRESSIVE_MIN=1) in ranges from PROGRESSIVE_WINDOW tokens: a
 #           page without a total must be the "on" page, in order.
@@ -62,8 +64,10 @@ def run(pando, corpus, query, args, mode, timeout):
     env = dict(os.environ, PANDO_FASTPATH="off" if mode in ("off", "mtoff") else
                "nomerge" if mode == "nomerge" else "on")
     for k in ("PANDO_MASK_BITS", "PANDO_BITMAPS", "PANDO_PARTITION_MIN",
-              "PANDO_PROGRESSIVE_MIN", "PANDO_PROGRESSIVE_WINDOW"):
+              "PANDO_PROGRESSIVE_MIN", "PANDO_PROGRESSIVE_WINDOW", "PANDO_REV"):
         env.pop(k, None)
+    if mode == "packed":
+        env["PANDO_REV"] = "packed"
     if mode == "prog":
         env["PANDO_PROGRESSIVE_MIN"] = "1"
         env["PANDO_PROGRESSIVE_WINDOW"] = PROGRESSIVE_WINDOW
@@ -221,6 +225,11 @@ def build_sample_index(pando_index, conllu):
         print(p.stdout, p.stderr, file=sys.stderr)
         raise SystemExit(2)
     check_head_rel_upgrade(pando_index, d)
+    # P4.2: packed postings next to the plain ones (mode "packed")
+    p = subprocess.run([pando_index, "--upgrade", d, "--packed-rev"], capture_output=True, text=True)
+    if p.returncode != 0:
+        print(p.stdout, p.stderr, file=sys.stderr)
+        raise SystemExit(2)
     return d
 
 
