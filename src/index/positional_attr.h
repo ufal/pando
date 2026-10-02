@@ -4,6 +4,7 @@
 #include "core/mmap_file.h"
 #include "index/lexicon.h"
 #include "index/packed_postings.h"
+#include "index/packed_dat.h"
 #include "index/dependency_index.h"
 #include <atomic>
 #include <memory>
@@ -146,7 +147,12 @@ public:
     LexiconId id_at(CorpusPos pos) const;
     /// Raw `.dat` ids (dat_width() bytes each: 1 = uint8, 2 = uint16, 4 = int32);
     /// nullptr for a derived attribute (no `.dat`: read it with id_at).
-    const void* dat_data() const { return derived_ ? nullptr : corpus_.data(); }
+    const void* dat_data() const { return derived_ || use_pdat_ ? nullptr : corpus_.data(); }
+    /// ids of [a, b) into out (a block at a time from packed ids, P4.3).
+    void ids_at(CorpusPos a, CorpusPos b, LexiconId* out) const;
+    /// P4.3: ids served from `<attr>.dat.pk` (PANDO_DAT=packed, or no `.dat`).
+    bool dat_packed() const { return use_pdat_; }
+    const PackedDat* packed_dat() const { return use_pdat_ ? &pdat_ : nullptr; }
     /// P5.6: an attribute without `.dat` whose value at p is that of `src` at the
     /// token's dependency head (head#A, HeadAttr): p + hrel[p], or `none_id` for a
     /// token without a head. Its lexicon is src's with the none value inserted at
@@ -260,6 +266,8 @@ private:
     std::string base_path_;
     Lexicon  lexicon_;
     MmapFile corpus_;      // .dat  — int8/int16/int32 per position (absent when derived_)
+    PackedDat pdat_;         // P4.3 `.dat.pk` (when served)
+    bool use_pdat_ = false;
     bool derived_ = false;   // P5.6 head attribute read through src_ at the head
     const PositionalAttr* src_ = nullptr;
     HeadRelView hrel_;

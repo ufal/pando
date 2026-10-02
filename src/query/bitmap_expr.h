@@ -279,7 +279,7 @@ private:
             for (size_t w = 0; w * 64 < len; ++w) {
                 const size_t k1 = std::min<size_t>(64, len - w * 64);
                 uint64_t x = 0;
-                const auto* d = ptr + a + static_cast<CorpusPos>(w * 64);
+                const auto* d = ptr + static_cast<CorpusPos>(w * 64);   // ptr: position a
                 for (size_t k = 0; k < k1; ++k) {
                     const size_t id = static_cast<size_t>(d[k]);
                     x |= static_cast<uint64_t>(id < tn ? t[id] : 0) << k;
@@ -289,28 +289,48 @@ private:
             }
             return orr;
         };
-        if (!dat_) {   // a derived attribute (head#A): ids through id_at
-            uint64_t orr = 0;
-            const size_t len = static_cast<size_t>(b - a);
-            for (size_t w = 0; w * 64 < len; ++w) {
-                const size_t k1 = std::min<size_t>(64, len - w * 64);
-                uint64_t x = 0;
-                for (size_t k = 0; k < k1; ++k) {
-                    const size_t id = static_cast<size_t>(pa_->id_at(a + static_cast<CorpusPos>(w * 64 + k)));
-                    x |= static_cast<uint64_t>(id < tn ? t[id] : 0) << k;
+        if (!dat_) {   // packed ids (P4.3) or a derived attribute (head#A): decoded per chunk
+            const PackedDat* pd = pa_->packed_dat();
+            if (pd && pd->rank_to_id()) {
+                // frequency ranks with the table re-indexed by rank (no rank → id per token)
+                if (!rank_tab_) {
+                    auto rt = std::make_shared<std::vector<uint8_t>>(tn, 0);
+                    const int32_t* r2i = pd->rank_to_id();
+                    for (size_t r = 0; r < tn; ++r) {
+                        const auto id = static_cast<size_t>(r2i[r]);
+                        (*rt)[r] = id < tn ? t[id] : 0;
+                    }
+                    rank_tab_ = std::move(rt);
                 }
-                out[w] = x;
-                orr |= x;
+                ranks_.resize(static_cast<size_t>(b - a));
+                pd->decode_ranks(a, b, ranks_.data());
+                const uint8_t* rt = rank_tab_->data();
+                uint64_t orr = 0;
+                const size_t len = static_cast<size_t>(b - a);
+                for (size_t w = 0; w * 64 < len; ++w) {
+                    const size_t k1 = std::min<size_t>(64, len - w * 64);
+                    uint64_t x = 0;
+                    const uint32_t* d = ranks_.data() + w * 64;
+                    for (size_t k = 0; k < k1; ++k) x |= static_cast<uint64_t>(d[k] < tn ? rt[d[k]] : 0) << k;
+                    out[w] = x;
+                    orr |= x;
+                }
+                return orr;
             }
-            return orr;
+            ids_.resize(static_cast<size_t>(b - a));
+            pa_->ids_at(a, b, ids_.data());
+            return run(ids_.data());
         }
         switch (width_) {
-            case 1: return run(static_cast<const uint8_t*>(dat_));
-            case 2: return run(static_cast<const uint16_t*>(dat_));
-            default: return run(static_cast<const int32_t*>(dat_));
+            case 1: return run(static_cast<const uint8_t*>(dat_) + a);
+            case 2: return run(static_cast<const uint16_t*>(dat_) + a);
+            default: return run(static_cast<const int32_t*>(dat_) + a);
         }
     }
     const PositionalAttr* pa_;
+    mutable std::vector<LexiconId> ids_;   // a chunk's ids when there is no raw .dat
+    mutable std::vector<uint32_t> ranks_;  // a chunk's frequency ranks (packed ids, P4.3)
+    mutable std::shared_ptr<const std::vector<uint8_t>> rank_tab_;   // tab_ by rank
     const void* dat_;
     int width_;
     std::shared_ptr<const std::vector<uint8_t>> tab_;

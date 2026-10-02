@@ -89,8 +89,9 @@ static int run_check(const std::string& dir) {
 
         if (!file_exists(lex_path)) { std::cerr << "Missing: " << lex_path << "\n"; ++errors; }
         if (!file_exists(lex_idx_path)) { std::cerr << "Missing: " << lex_idx_path << "\n"; ++errors; }
-        if (!file_exists(dat_path)) { std::cerr << "Missing: " << dat_path << "\n"; ++errors; }
-        if (!file_exists(rev_path)) { std::cerr << "Missing: " << rev_path << "\n"; ++errors; }
+        // packed forms (P4.3 .dat.pk, P4.2 .rev.pfb) stand in for dropped plain files
+        if (!file_exists(dat_path) && !file_exists(dat_path + ".pk")) { std::cerr << "Missing: " << dat_path << "\n"; ++errors; }
+        if (!file_exists(rev_path) && !file_exists(rev_path + ".pfb")) { std::cerr << "Missing: " << rev_path << "\n"; ++errors; }
         if (!file_exists(rev_idx_path)) { std::cerr << "Missing: " << rev_idx_path << "\n"; ++errors; }
 
         if (info.size > 0 && file_exists(dat_path)) {

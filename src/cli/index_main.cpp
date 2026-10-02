@@ -279,6 +279,80 @@ static int upgrade_packed(const pando::Corpus& corpus, const std::string& spec, 
     return 0;
 }
 
+// P4.3: `--packed-dat [auto|A,B]` writes <attr>.dat.pk (compact ids, O(1) access);
+// `--drop-dat` then removes the plain .dat once every id reads back the same.
+static int upgrade_packed_dat(const pando::Corpus& corpus, const std::string& spec, bool drop, bool quiet,
+                              const std::function<double()>& secs) {
+    if (spec == "none") return 0;
+    std::vector<std::string> names;
+    if (spec == "auto") {
+        for (const auto& n : corpus.attr_names())
+            if (corpus.has_attr(n) && !corpus.attr(n).derived()) names.push_back(n);
+    } else {
+        names = split_list(spec);
+    }
+    for (const auto& name : names) {
+        if (!corpus.has_attr(name) || corpus.attr(name).derived()) {
+            std::cerr << "Error: --packed-dat " << name << ": not a positional attribute with ids\n";
+            return 1;
+        }
+        const auto& pa = corpus.attr(name);
+        const std::string base = pa.base_path();
+        const int64_t n = corpus.size(), nlex = pa.lexicon().size();
+        pando::PackedDat probe;
+        const bool plain = fs::exists(base + ".dat");
+        if (probe.open(base, n, nlex)) {
+            if (!quiet) std::cerr << "Packed ids " << pando::PackedDat::path(base) << " up to date\n";
+        } else {
+            if (!plain) {
+                std::cerr << "Error: " << base << ": no .dat to pack and no valid .dat.pk\n";
+                return 1;
+            }
+            std::string err;
+            pando::PackedDat::BuildStats st;
+            auto fill = [&](int64_t a, int64_t b, pando::LexiconId* out) { pa.ids_at(a, b, out); };
+            if (!pando::PackedDat::build(base, n, nlex, fill, &err, &st)) {
+                std::cerr << "Error: " << err << "\n";
+                return 1;
+            }
+            if (!quiet) {
+                const double raw = static_cast<double>(fs::file_size(base + ".dat"));
+                std::cerr << "Wrote " << pando::PackedDat::path(base) << " ("
+                          << (st.mode == pando::PackedDat::Mode::Fixed ? std::to_string(st.bits) + " bits per id"
+                                                                       : std::string("ranks in blocks of 16"))
+                          << ", " << (st.bytes >> 20) << " MB = "
+                          << (raw > 0 ? static_cast<int>(100.0 * static_cast<double>(st.bytes) / raw + 0.5) : 0)
+                          << "% of .dat, " << secs() << " s)\n";
+            }
+        }
+        if (drop && plain) {
+            pando::PackedDat pk;
+            if (!pk.open(base, n, nlex)) {
+                std::cerr << "Error: " << base << ".dat.pk does not open; .dat kept\n";
+                return 1;
+            }
+            std::vector<pando::LexiconId> a(size_t{1} << 20), b(size_t{1} << 20);
+            for (int64_t p = 0; p < n; p += static_cast<int64_t>(a.size())) {
+                const int64_t e = std::min<int64_t>(n, p + static_cast<int64_t>(a.size()));
+                pa.ids_at(p, e, a.data());
+                pk.decode(p, e, b.data());
+                if (!std::equal(a.begin(), a.begin() + (e - p), b.begin())) {
+                    std::cerr << "Error: " << base << ".dat.pk differs from .dat near token " << p << "; .dat kept\n";
+                    return 1;
+                }
+            }
+            std::error_code ec;
+            fs::remove(base + ".dat", ec);
+            if (ec) {
+                std::cerr << "Error: cannot remove " << base << ".dat: " << ec.message() << "\n";
+                return 1;
+            }
+            if (!quiet) std::cerr << "Removed " << base << ".dat (packed ids verified)\n";
+        }
+    }
+    return 0;
+}
+
 // Record `upgraded_with=<build> <UTC time>` in corpus.info (replacing an earlier one).
 static void record_upgrade(const std::string& dir) {
     const std::string path = dir + "/corpus.info", tmp = path + ".tmp";
@@ -306,7 +380,8 @@ static int upgrade_index(const std::string& dir, bool quiet = false,
                          const std::string& dep_pairs = kDefaultDepPairs,
                          const std::string& bitmaps = kDefaultBitmaps,
                          const std::string& packed = "none", bool drop_rev = false,
-                         const std::string& head_attrs = kDefaultHeadAttrs, bool compact_deps = false) {
+                         const std::string& head_attrs = kDefaultHeadAttrs, bool compact_deps = false,
+                         const std::string& packed_dat = "none", bool drop_dat = false) {
     auto t0 = std::chrono::steady_clock::now();
     auto secs = [&] {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -445,6 +520,7 @@ static int upgrade_index(const std::string& dir, bool quiet = false,
         if (!quiet) std::cerr << "Fold indexes up to date (" << secs() << " s)\n";
         if (upgrade_bitmaps(corpus, bitmaps, quiet, secs) != 0) return 1;
         if (upgrade_packed(corpus, packed, drop_rev, quiet, secs) != 0) return 1;
+        if (upgrade_packed_dat(corpus, packed_dat, drop_dat, quiet, secs) != 0) return 1;
         // P5.6: head attributes keep only packed postings (verified; their plain
         // .rev is 4 bytes per token, the packed lists 20-50% of that)
         if (!corpus.head_attr_names().empty()) {
@@ -511,6 +587,8 @@ int main(int argc, char* argv[]) {
         bool drop_rev = false;
         std::string head_attrs = kDefaultHeadAttrs;
         bool compact_deps = false;
+        std::string packed_dat = "none";
+        bool drop_dat = false;
         for (int i = 3; i < argc; ++i) {
             const std::string a = argv[i];
             if (a == "--packed-rev" && i + 1 < argc && argv[i + 1][0] != '-') { packed = argv[++i]; continue; }
@@ -519,6 +597,10 @@ int main(int argc, char* argv[]) {
             if (a == "--drop-rev") { drop_rev = true; continue; }
             if (a == "--head-attrs" && i + 1 < argc) { head_attrs = argv[++i]; continue; }
             if (a == "--compact-deps") { compact_deps = true; continue; }
+            if (a == "--packed-dat" && i + 1 < argc && argv[i + 1][0] != '-') { packed_dat = argv[++i]; continue; }
+            if (a == "--packed-dat") { packed_dat = "auto"; continue; }
+            if (a.rfind("--packed-dat=", 0) == 0) { packed_dat = a.substr(13); continue; }
+            if (a == "--drop-dat") { drop_dat = true; continue; }
             if (a.rfind("--head-attrs=", 0) == 0) { head_attrs = a.substr(13); continue; }
             if (a == "--dep-pairs" && i + 1 < argc) pairs = argv[++i];
             else if (a.rfind("--dep-pairs=", 0) == 0) pairs = a.substr(12);
@@ -530,7 +612,9 @@ int main(int argc, char* argv[]) {
             }
         }
         if (drop_rev && packed == "none") packed = "auto";
-        return upgrade_index(argv[2], false, pairs, bitmaps, packed, drop_rev, head_attrs, compact_deps);
+        if (drop_dat && packed_dat == "none") packed_dat = "auto";
+        return upgrade_index(argv[2], false, pairs, bitmaps, packed, drop_rev, head_attrs, compact_deps,
+                             packed_dat, drop_dat);
     }
     bool split_feats = false;
     bool format_vertical = false;
@@ -600,6 +684,10 @@ int main(int argc, char* argv[]) {
                   << "                    token's dependency head): [X] > [Y], [Y] < [X] and parent [X]\n"
                   << "                    become one-token queries on the dependent (default auto =\n"
                   << "                    upos, deprel, lemma when the corpus has dependencies)\n"
+                  << "    --packed-dat [auto|none|A[,B...]]  compact ids (<attr>.dat.pk: small lexicons\n"
+                  << "                    bit-packed, large ones as frequency ranks in 1-4 bytes; default none)\n"
+                  << "    --drop-dat      remove the plain <attr>.dat once its packed ids are verified\n"
+                  << "                    (implies --packed-dat auto)\n"
                   << "    --compact-deps  remove dep.head and dep.head_rel once dep.head_rel8 (1 byte\n"
                   << "                    per token, always written) is verified to give the same heads\n";
         return 1;

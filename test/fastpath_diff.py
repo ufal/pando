@@ -36,7 +36,7 @@ import sys
 import tempfile
 import time
 
-ALL_MODES = ("on", "onbits", "nobm", "bmforce", "nomerge", "off", "mt", "mtbits", "mtoff", "prog", "packed", "nohead")
+ALL_MODES = ("on", "onbits", "nobm", "bmforce", "nomerge", "off", "mt", "mtbits", "mtoff", "prog", "packed", "nohead", "packeddat")
 MODES = ALL_MODES
 REF = "off"
 # onbits  = fast paths with region filters forced to the bitset representation
@@ -54,6 +54,8 @@ MT_MODES = ("mt", "mtbits", "mtoff")
 PARTITION_MIN = "50"
 # packed  = on with the postings decoded from <attr>.rev.pfb (P4.2, PANDO_REV=packed;
 #           the sample index gets them with `pando-index --upgrade --packed-rev`).
+# packeddat = on with the token ids read from <attr>.dat.pk (P4.3, PANDO_DAT=packed;
+#           the sample index gets them with `pando-index --upgrade --packed-dat`).
 # nohead  = on without the head-attribute rewrite (PANDO_HEADATTR=off): [P] > [C]
 #           on the dependency paths although the sample index has head#A attributes
 #           (`--head-attrs`), which "on" reads as the one-token [C & head#P].
@@ -67,12 +69,14 @@ def run(pando, corpus, query, args, mode, timeout):
     env = dict(os.environ, PANDO_FASTPATH="off" if mode in ("off", "mtoff") else
                "nomerge" if mode == "nomerge" else "on")
     for k in ("PANDO_MASK_BITS", "PANDO_BITMAPS", "PANDO_PARTITION_MIN",
-              "PANDO_PROGRESSIVE_MIN", "PANDO_PROGRESSIVE_WINDOW", "PANDO_REV", "PANDO_HEADATTR"):
+              "PANDO_PROGRESSIVE_MIN", "PANDO_PROGRESSIVE_WINDOW", "PANDO_REV", "PANDO_HEADATTR", "PANDO_DAT"):
         env.pop(k, None)
     if mode == "packed":
         env["PANDO_REV"] = "packed"
     if mode == "nohead":
         env["PANDO_HEADATTR"] = "off"
+    if mode == "packeddat":
+        env["PANDO_DAT"] = "packed"
     if mode == "prog":
         env["PANDO_PROGRESSIVE_MIN"] = "1"
         env["PANDO_PROGRESSIVE_WINDOW"] = PROGRESSIVE_WINDOW
@@ -232,8 +236,9 @@ def build_sample_index(pando_index, conllu):
     check_head_rel_upgrade(pando_index, d)
     # P4.2: packed postings next to the plain ones (mode "packed"); head attributes
     # (all modes but off / nohead read [P] > [C] through them)
-    p = subprocess.run([pando_index, "--upgrade", d, "--packed-rev", "--head-attrs", "upos,deprel,lemma,form"],
-                       capture_output=True, text=True)
+    # (form and lemma ids as frequency ranks in blocks, the coding of large lexicons)
+    p = subprocess.run([pando_index, "--upgrade", d, "--packed-rev", "--packed-dat", "--head-attrs", "upos,deprel,lemma,form"],
+                       capture_output=True, text=True, env=dict(os.environ, PANDO_PACKED_DAT_GROUP="form,lemma"))
     if p.returncode != 0:
         print(p.stdout, p.stderr, file=sys.stderr)
         raise SystemExit(2)

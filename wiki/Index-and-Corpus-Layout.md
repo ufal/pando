@@ -62,6 +62,34 @@ packed postings as from `.rev` (17.9 s both); single one-shot CLI queries that
 scan a frequent list are up to 20–40 ms slower. Region attribute `.rev` files,
 `contr_form` and the dependency edge postings (`dep.pair.*.rev`) are not packed.
 
+## Packed ids (`.dat.pk`)
+
+`<attr>.dat` holds the lexicon id of every token in 1, 2 or 4 bytes; KWIC,
+`count by`, `freq`, `coll`, sorting and every per-token check read it.
+`pando-index --upgrade <dir> --packed-dat` (or `--packed-dat form,lemma`) adds
+a compact copy with constant-time access to any token:
+
+- lexicons below 65,536 values: every id in ⌈log₂ V⌉ bits (upos 5 bits instead
+  of 8, deprel 9 instead of 16);
+- larger lexicons (form, lemma): each id replaced by its frequency rank (a
+  `rank → id` table in the file), ranks in blocks of 16 tokens with a 2-bit
+  length (1–4 bytes) per token and a block index.
+
+On the 38M demo: form 65% of `.dat`, lemma 57%, deprel 56%, upos 63% — 253 MB
+instead of 420 MB, built in a few seconds. `PANDO_DAT=packed` reads the ids
+from it although `.dat` exists; `--drop-dat` (implies `--packed-dat auto`)
+checks that every id reads back the same and then removes the `.dat`.
+
+It is a trade of memory for time: reading an id costs about 3× as much (one
+token at random ~80 ns instead of ~17 ns, in order ~3 ns instead of ~1 ns per
+token), so queries that read millions of ids get slower — on the demo
+`[upos="NOUN"]; count by lemma` 0.10 → 0.19 s, `sort by lemma` over 8.5M hits
+1.2 → 1.6 s, `[upos="ADJ"] [upos="NOUN"]; coll by lemma` 0.48 → 0.71 s —
+while searches that do not (most token, sequence and dependency queries) are
+unchanged. Worth it when the corpus would otherwise not fit in memory (the
+`.dat` of form and lemma are 8 GB per billion tokens, packed about 5 GB): a
+token read from disk costs far more than its decoding.
+
 ## Further reading
 
 - [Multivalue attributes](Multivalue-Attributes.md) — multivalue **`.mv.*`** indexes vs **KV pipe** `feats` (combined vs split columns)

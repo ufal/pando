@@ -88,6 +88,11 @@ for `--upgrade`:
   <dir>` to build without). `none` is remembered in `corpus.info`, so later
   upgrades leave such a corpus without them until a list is given. Built before
   folds, bitmaps and packed postings so these cover them too.
+- `--packed-dat [auto|none|A[,B...]]` — compact token ids (`<attr>.dat.pk`),
+  about 60% of `.dat`, at a cost when many ids are read; see
+  [Packed ids](Index-and-Corpus-Layout.md#packed-ids-datpk). Default none.
+- `--drop-dat` — remove the plain `<attr>.dat` once its packed ids are verified
+  (implies `--packed-dat auto`).
 - `--compact-deps` — remove `dep.head` and `dep.head_rel` once `dep.head_rel8`
   (one byte per token, always written) is verified to give the same heads; see
   [Dependency queries](Dependency-Queries.md#index).
@@ -100,7 +105,8 @@ Environment for `pando`, `pando-server` and embedders: `PANDO_REV=auto|raw|packe
 (`auto`: `.rev` when present, otherwise `.rev.pfb`; `packed`: `.rev.pfb` whenever
 it is present and up to date) and `PANDO_REV_CACHE_MB` (cache of decoded long
 lists, default 256). `PANDO_HEADATTR=off`: dependency queries do not use head
-attributes. `PANDO_LEXICON_THREADS=N`: threads for the lexicon scan of a
+attributes. `PANDO_DAT=packed`: token ids from `.dat.pk` when it is
+there. `PANDO_LEXICON_THREADS=N`: threads for the lexicon scan of a
 regex (default: the cores, at most 8; scans of 256K entries or more are split).
 
 ## `pando-check`

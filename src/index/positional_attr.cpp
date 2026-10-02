@@ -22,6 +22,16 @@ namespace {
 // (tests, benchmarks); raw = the plain `.rev` when present; auto (default) = the
 // plain one when present, else the packed one.
 enum class RevMode { Auto, Raw, Packed };
+// P4.3: PANDO_DAT=packed serves the ids from `.dat.pk` even when `.dat` exists
+// (tests, benchmarks); otherwise the plain `.dat` when present.
+enum class DatMode { Auto, Packed };
+DatMode dat_mode() {
+    static const DatMode m = [] {
+        const char* v = std::getenv("PANDO_DAT");
+        return v && std::string(v) == "packed" ? DatMode::Packed : DatMode::Auto;
+    }();
+    return m;
+}
 RevMode rev_mode() {
     static const RevMode m = [] {
         const char* v = std::getenv("PANDO_REV");
@@ -205,8 +215,13 @@ void PositionalAttr::open(const std::string& base, CorpusPos corpus_size, bool p
     serial_ = ++g_attr_serial;
     lexicon_.open(base, preload);
     derived_ = false;
-    // P5.6: a head attribute (head#A) may have no .dat: set_head_source() follows
-    if (fs::exists(base + ".dat")) corpus_ = MmapFile::open(base + ".dat", preload);
+    use_pdat_ = false;
+    // P5.6: a head attribute (head#A) may have no .dat: set_head_source() follows.
+    // P4.3: packed ids (.dat.pk) with PANDO_DAT=packed, or when the .dat was dropped.
+    const bool have_dat = fs::exists(base + ".dat");
+    if (!have_dat || dat_mode() == DatMode::Packed)
+        use_pdat_ = pdat_.open(base, corpus_size, lexicon_.size(), preload);
+    if (have_dat && !use_pdat_) corpus_ = MmapFile::open(base + ".dat", preload);
     rev_idx_ = MmapFile::open(base + ".rev.idx", preload);
     const bool have_rev = fs::exists(base + ".rev");
     const RevMode mode = rev_mode();
@@ -258,8 +273,17 @@ LexiconId PositionalAttr::head_id_at(CorpusPos pos) const {
     return shift_ && id >= none_id_ ? id + 1 : id;
 }
 
+void PositionalAttr::ids_at(CorpusPos a, CorpusPos b, LexiconId* out) const {
+    if (use_pdat_) {
+        pdat_.decode(a, b, out);
+        return;
+    }
+    for (CorpusPos p = a; p < b; ++p) *out++ = id_at(p);
+}
+
 LexiconId PositionalAttr::id_at(CorpusPos pos) const {
     if (derived_) return head_id_at(pos);
+    if (use_pdat_) return pdat_.at(pos);
     switch (dat_width_) {
         case 1: return static_cast<LexiconId>(corpus_.as<uint8_t>()[pos]);
         case 2: return static_cast<LexiconId>(corpus_.as<uint16_t>()[pos]);
