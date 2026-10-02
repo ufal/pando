@@ -79,12 +79,15 @@ for `--upgrade`:
 - `--packed-rev [auto|none|A[,B...]]` — also write block-compressed postings
   (`<attr>.rev.pfb`) for every single-valued positional attribute (`auto`, the
   value when the option is given without one) or the ones listed. Default `none`.
-- `--head-attrs A[,B...]` — store attribute A of each token's dependency head
-  (`head#A.*`, listed as `head_attrs=` in `corpus.info`; storage only), which
-  makes `[X] > [Y]`, `[Y] < [X]` and `parent [X]` much faster; see
-  [Dependency queries](Dependency-Queries.md#head-attributes).
-  Built before folds, bitmaps and packed postings so these cover them too.
-  Default none.
+- `--head-attrs auto|none|A[,B...]` — store attribute A of each token's
+  dependency head (`head#A.*`, listed as `head_attrs=` in `corpus.info`; storage
+  only), which makes `[X] > [Y]`, `[Y] < [X]` and `parent [X]` much faster; see
+  [Dependency queries](Dependency-Queries.md#head-attributes). Default `auto`:
+  `upos`, `deprel` and `lemma` (those the corpus has) when it has a dependency
+  index — also when an index is built (`pando-index --head-attrs none <input>
+  <dir>` to build without). `none` is remembered in `corpus.info`, so later
+  upgrades leave such a corpus without them until a list is given. Built before
+  folds, bitmaps and packed postings so these cover them too.
 - `--compact-deps` — remove `dep.head` and `dep.head_rel` once `dep.head_rel8`
   (one byte per token, always written) is verified to give the same heads; see
   [Dependency queries](Dependency-Queries.md#index).

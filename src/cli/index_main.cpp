@@ -118,6 +118,10 @@ static const char* const kDefaultDepPairs = "upos:upos";
 // P3.1 default: bitmaps for every single-valued attribute with at most
 // BitmapIndex::kAutoMaxValues values (upos, deprel, …).
 static const char* const kDefaultBitmaps = "auto";
+// P5.6 default: head attributes for upos, deprel and lemma (those the corpus has)
+// when it has a dependency index; `--head-attrs none` opts out.
+static const char* const kDefaultHeadAttrs = "auto";
+static const char* const kAutoHeadAttrs[] = {"upos", "deprel", "lemma"};
 
 static std::vector<std::string> split_list(const std::string& s) {
     std::vector<std::string> out;
@@ -302,7 +306,7 @@ static int upgrade_index(const std::string& dir, bool quiet = false,
                          const std::string& dep_pairs = kDefaultDepPairs,
                          const std::string& bitmaps = kDefaultBitmaps,
                          const std::string& packed = "none", bool drop_rev = false,
-                         const std::string& head_attrs = "none", bool compact_deps = false) {
+                         const std::string& head_attrs = kDefaultHeadAttrs, bool compact_deps = false) {
     auto t0 = std::chrono::steady_clock::now();
     auto secs = [&] {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -369,16 +373,43 @@ static int upgrade_index(const std::string& dir, bool quiet = false,
         }
     }
     try {
-        if (head_attrs != "none" && !head_attrs.empty()) {
+        // `--head-attrs none` is remembered (an empty head_attrs= line in corpus.info):
+        // later upgrades with the default (auto) leave the corpus without them
+        bool opted_out = false;
+        {
+            std::ifstream in(dir + "/corpus.info");
+            for (std::string line; std::getline(in, line);)
+                if (line == "head_attrs=") opted_out = true;
+        }
+        if (head_attrs == "none" && !opted_out) {
+            pando::Corpus probe;
+            probe.open(dir);
+            if (probe.head_attr_names().empty()) {
+                std::ofstream out(dir + "/corpus.info", std::ios::app);
+                out << "head_attrs=\n";
+            }
+        }
+        if (head_attrs != "none" && !head_attrs.empty() && !(head_attrs == "auto" && opted_out)) {
             // before the corpus is opened for folds / bitmaps / packed postings,
             // which then cover the head attributes too
             pando::Corpus src;
             src.open(dir);
-            if (!src.has_deps() || !src.deps().head_rel_data()) {
+            const bool is_auto = head_attrs == "auto";
+            const bool deps = src.has_deps() && src.deps().head_rel_data();
+            if (!deps && !is_auto) {
                 std::cerr << "Error: --head-attrs: the corpus has no dependency index\n";
                 return 1;
             }
-            for (const auto& a : split_list(head_attrs)) {
+            std::vector<std::string> names;
+            if (!deps) {
+                // auto without dependencies: none
+            } else if (is_auto) {
+                for (const char* a : kAutoHeadAttrs)
+                    if (src.has_attr(a) && !src.is_multivalue(a)) names.push_back(a);
+            } else {
+                names = split_list(head_attrs);
+            }
+            for (const auto& a : names) {
                 if (pando::HeadAttr::up_to_date(src, a)) {
                     if (!quiet) std::cerr << "Head attribute " << pando::HeadAttr::name_for(a) << " up to date\n";
                     continue;
@@ -478,7 +509,7 @@ int main(int argc, char* argv[]) {
         std::string bitmaps = kDefaultBitmaps;
         std::string packed = "none";
         bool drop_rev = false;
-        std::string head_attrs = "none";
+        std::string head_attrs = kDefaultHeadAttrs;
         bool compact_deps = false;
         for (int i = 3; i < argc; ++i) {
             const std::string a = argv[i];
@@ -506,6 +537,7 @@ int main(int argc, char* argv[]) {
     bool format_jsonl = false;
     bool overlay_index = false;
     std::string index_dir;
+    std::string build_head_attrs = kDefaultHeadAttrs;
 
     // Collect flags
     std::vector<std::string> args;
@@ -513,6 +545,8 @@ int main(int argc, char* argv[]) {
         std::string a = argv[i];
         if (a == "--split-feats") split_feats = true;
         else if (a == "--overlay-index") overlay_index = true;
+        else if (a == "--head-attrs" && i + 1 < argc) build_head_attrs = argv[++i];
+        else if (a.rfind("--head-attrs=", 0) == 0) build_head_attrs = a.substr(13);
         else if (a == "--index-dir" && i + 1 < argc) index_dir = argv[++i];
         else if (a == "--format" && i + 1 < argc) {
             std::string fmt = argv[++i];
@@ -538,6 +572,8 @@ int main(int argc, char* argv[]) {
                   << "  For each region attribute (e.g. text_langcode.val), the indexer also writes\n"
                   << "  .lex / .rev / .rev.idx (value → region ids) for fast :: metadata filters.\n\n"
                   << "  --split-feats     Split FEATS into feats#Feature columns (default: combined)\n"
+                  << "  --head-attrs auto|none|A[,B...]  head attributes (default auto: upos, deprel,\n"
+                  << "                    lemma when there are dependencies; see --upgrade)\n"
                   << "  --format vertical Read CWB-style vertical (one token/line, <s> </s>);\n"
                   << "                    optional <!-- positional-attributes: ... --> (Korp/Kielipankki)\n"
                   << "  --format jsonl    Read streaming JSONL events (tokens/regions)\n"
@@ -560,9 +596,10 @@ int main(int argc, char* argv[]) {
                   << "                    P4.2; auto = every single-valued attribute; default none)\n"
                   << "    --drop-rev      remove the plain <attr>.rev once its packed postings are\n"
                   << "                    verified (implies --packed-rev auto; queries then decode)\n"
-                  << "    --head-attrs A[,B...]  head attributes head#A (A of each token's\n"
-                  << "                    dependency head, e.g. head#upos, head#lemma): [X] > [Y]\n"
-                  << "                    becomes a one-token query on the dependent (default none)\n"
+                  << "    --head-attrs auto|none|A[,B...]  head attributes head#A (A of each\n"
+                  << "                    token's dependency head): [X] > [Y], [Y] < [X] and parent [X]\n"
+                  << "                    become one-token queries on the dependent (default auto =\n"
+                  << "                    upos, deprel, lemma when the corpus has dependencies)\n"
                   << "    --compact-deps  remove dep.head and dep.head_rel once dep.head_rel8 (1 byte\n"
                   << "                    per token, always written) is verified to give the same heads\n";
         return 1;
@@ -648,7 +685,8 @@ int main(int argc, char* argv[]) {
                   << static_cast<int>(total_tokens / total_secs / 1000) << " ktok/s avg)\n";
         std::cerr << "Finalizing...\n";
         builder.finalize();
-        if (upgrade_index(output_dir) != 0) return 1;
+        if (upgrade_index(output_dir, false, kDefaultDepPairs, kDefaultBitmaps, "none", false, build_head_attrs) != 0)
+            return 1;
 
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";

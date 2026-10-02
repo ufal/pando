@@ -31,8 +31,9 @@ PML-TQ-style restrictions embed a subtree on the token, e.g.:
 
 ## Head attributes
 
-`pando-index --upgrade <dir> --head-attrs upos,deprel,lemma` stores, for each
-listed attribute A, the value of A on every token's dependency head
+`pando-index` (when it builds an index, and `--upgrade`) stores, for `upos`,
+`deprel` and `lemma` by default (`--head-attrs none` opts out, `--head-attrs
+A,B` chooses), the value of each attribute A on every token's dependency head
 (KonText / Manatee corpora often carry the same as `p_lemma`, `p_upos`). These
 are storage only: they are not listed with the attributes, not shown in hits
 and not named in queries (`head#lemma` is refused). A head attribute has no per-token
