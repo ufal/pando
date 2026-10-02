@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/worker_pool.h"
 #include "core/types.h"
 #include "query/ast.h"
 #include "corpus/corpus.h"
@@ -840,6 +841,15 @@ struct ExecProgress {
     std::atomic<size_t> counted{0};
     std::atomic<int64_t> scanned{-1};
     std::atomic<bool> cancel{false};
+    /// P4.1d: a range worker's progress: the query's own progress, whose cancel
+    /// (a client's, a time limit's) stops the worker too; `on_tick` (set by
+    /// execute_partitioned) publishes the ranges' sum at the worker's checkpoints.
+    const ExecProgress* parent = nullptr;
+    const std::function<void()>* on_tick = nullptr;
+    bool cancelled() const {
+        return cancel.load(std::memory_order_relaxed)
+            || (parent && parent->cancel.load(std::memory_order_relaxed));
+    }
 };
 
 /// P7.8: receives each hit's token starts / ends instead of a Match (see
@@ -897,8 +907,13 @@ public:
     /// Throw QueryCancelled when the progress block asks to stop (long loops outside
     /// the per-hit checkpoints: operand unions, lexicon scans).
     void check_cancelled() const {
-        if (progress_ && progress_->cancel.load(std::memory_order_relaxed)) throw QueryCancelled();
+        if (progress_ && progress_->cancelled()) throw QueryCancelled();
     }
+    /// P4.1d: the most threads this query may use (a tier's `threads`; 0 = no
+    /// cap: lexicon scans use up to min(usable CPUs, 8)). Taken from the
+    /// request's ThreadBudgetScope when the executor is created.
+    void set_thread_budget(unsigned t) { thread_budget_ = t; }
+    unsigned thread_budget() const { return thread_budget_; }
     /// Alignment filters (`:: a.attr = b.attr`): by default, missing values
     /// (empty string or `_`) do not match. Set true to restore legacy behavior.
     void set_include_empty_alignment_values(bool v) { include_empty_alignment_values_ = v; }
@@ -1304,6 +1319,7 @@ private:
     std::shared_ptr<DepPairIndex> dep_pair_index(const std::string& head_attr,
                                                  const std::string& child_attr) const;
     ExecProgress* progress_ = nullptr;
+    unsigned thread_budget_ = current_thread_budget();
     HitSink* hit_sink_ = nullptr;
     size_t sink_hits_ = 0;
     mutable uint32_t progress_ticks_ = 0;
@@ -1315,7 +1331,8 @@ private:
         progress_->counted.store(counted, std::memory_order_relaxed);
         if (pos > progress_->scanned.load(std::memory_order_relaxed))
             progress_->scanned.store(pos, std::memory_order_relaxed);
-        if (progress_->cancel.load(std::memory_order_relaxed)) throw QueryCancelled();
+        if (progress_->on_tick) (*progress_->on_tick)();
+        if (progress_->cancelled()) throw QueryCancelled();
     }
     // P3.1: chunked bitmaps per attribute; nullptr = not built.
     std::unordered_map<std::string, std::shared_ptr<BitmapIndex>>& bitmap_cache_;

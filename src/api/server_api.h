@@ -43,7 +43,17 @@ struct ServerConfig {
     /// P4.1: a counting query (a /query total, a background total, a /run
     /// `count by`) is split over this many position ranges counted in parallel.
     /// 1 = one thread per query (the default: a busy server already runs many).
+    /// 0 = auto: min(pool threads, 8). Each range beyond the first runs on a
+    /// borrowed pool worker when one is idle (P4.1d), so a busy server degrades
+    /// to one thread per query instead of oversubscribing.
     unsigned query_threads = 1;
+    /// P4.1d: size of the process-wide worker pool (shared by every corpus the
+    /// process has open); -1 = not set here (keep / auto), 0 = the usable CPUs
+    /// (affinity mask and cgroup quota). The first explicit value wins.
+    int pool_threads = -1;
+    /// Parallel read streams of the background warm-up (network storage reads
+    /// faster with several).
+    unsigned warm_streams = 4;
     bool preload = false;             // reported: the corpus was opened with preload
     /// Default per-request time limit for /query in ms (0 = none); a request can
     /// set its own with "timeout_ms". An expired query answers 408.
@@ -135,7 +145,7 @@ private:
     ServerResponse status(const std::map<std::string, std::string>& params);
     ServerResponse cancel(const std::map<std::string, std::string>& params, const std::string& body);
     ServerResponse list_jobs();
-    ServerResponse warm(const std::string& body, bool start);
+    ServerResponse warm(const std::map<std::string, std::string>& params, const std::string& body, bool start);
     std::string server_fields() const;
 
     /// The tier of a request and what it may do (ServerConfig::tiers).

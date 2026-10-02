@@ -378,8 +378,17 @@ def check_warm(exe, corpus, label):
             time.sleep(0.05)
         return w
     plain = Server(exe, corpus)
-    srv = Server(exe, corpus, "--warm", "hot")
+    srv = Server(exe, corpus, "--warm", "hot", "--warm-streams", "3", "--pool-threads", "2",
+                 "--query-threads", "auto")
     try:
+        # P4.1d: the process pool and query_threads auto in /health
+        st, h = srv.get("/health")
+        pool = h.get("pool", {})
+        check(pool.get("threads") == 2 and pool.get("usable_cpus", 0) >= 1 and h.get("query_threads") == 2,
+              f"{label}: /health pool: {pool}, query_threads {h.get('query_threads')}")
+        st, h = plain.get("/health")
+        check(h.get("query_threads") == 1 and h.get("pool", {}).get("threads", 0) >= 1,
+              f"{label}: default pool / query_threads: {h.get('pool')} {h.get('query_threads')}")
         w = wait_done(srv)
         check(w.get("state") == "done" and w.get("level") == "hot" and w.get("files", 0) > 5
               and w.get("bytes_done") == w.get("bytes"), f"{label}: --warm hot: {w}")
@@ -393,6 +402,19 @@ def check_warm(exe, corpus, label):
               f"{label}: warm all: {w}")
         st, r = srv.post("/warm", {"level": "lukewarm"})
         check(st == 400, f"{label}: bad level: {st} {r}")
+        # residency: after warming everything, (nearly) all of it is in the page cache
+        st, r = srv.get("/warm?residency=all")
+        res = r.get("residency", {})
+        check(st == 200 and res.get("level") == "all" and res.get("bytes", 0) > 0
+              and res.get("resident_bytes", -1) <= res.get("bytes", 0) and res.get("resident", 0) > 0.5,
+              f"{label}: residency all: {st} {res}")
+        st, r = srv.get("/warm?residency=hot")
+        check(st == 200 and 0 < r.get("residency", {}).get("bytes", 0) < res.get("bytes", 0),
+              f"{label}: residency hot: {st} {r.get('residency')}")
+        st, r = srv.get("/warm?residency=tepid")
+        check(st == 400, f"{label}: bad residency level: {st} {r}")
+        st, r = srv.get("/warm")
+        check("residency" not in r, f"{label}: residency only on request: {r}")
         st, r = plain.get("/warm")
         check(st == 200 and r.get("warm", {}).get("state") == "idle", f"{label}: no warm: {r}")
         for q in ('[upos="NOUN"]', '[upos="VERB"] > [deprel="nsubj"]', '[upos="DET"] [upos="NOUN"]'):

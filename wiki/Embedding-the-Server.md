@@ -51,8 +51,13 @@ Open options (JSON, all optional): `preload`, `warm` (`"hot"` / `"all"`: read th
 files most queries touch, or all of them, into the page cache in a background
 thread when the handle opens; see below), `total_workers`, `result_cache`,
 `result_ttl`, `abandon_after`, `cache_mb` (recent pages / command results / sort
-indexes reused across requests, default 128 MB per open corpus, 0 = off), `query_timeout_ms`, `query_threads` (position ranges
-counted in parallel per counting query, default 1 — see the CLI reference),
+indexes reused across requests, default 128 MB per open corpus, 0 = off), `query_timeout_ms`, `query_threads` (threads a
+counting query is split over, default 1, `"auto"` = min(pool threads, 8) — see the CLI
+reference), `pool_threads` (the process-wide worker pool those threads are borrowed
+from, shared by every handle in the process; default `"auto"`: the CPUs the process may
+use, from the affinity mask and the cgroup quota; the first handle that sets it
+decides, a later different value is ignored with a warning), `warm_streams`
+(parallel read streams of the warm-up, default 4),
 `threads` (reported only), `session_ttl`, `max_sessions`, `session_memory_mb`,
 `session_max_hits` (client sessions, defaults 1800 s, 256, 2048 MB, 5000000),
 `tiers`, `default_tier`, `trust_tier` (limits by tier: see the CLI reference; an
@@ -69,8 +74,11 @@ features. A host can report it for each engine without opening a corpus.
 **Threads.** A handle can serve any number of threads at once. Queries run
 concurrently on the shared corpus. `/run` without a `session_id` is serialised inside the handle,
 because that named-query session is shared state; requests on one client session are serialised
-per session, different sessions run concurrently. With `query_threads` > 1 a counting request also runs
-that many worker threads of its own while it lasts. `pando_server_request` blocks, so call it from a blocking pool
+per session, different sessions run concurrently. With `query_threads` (or a tier's `threads`) > 1 a
+counting request also borrows up to that many − 1 workers of the process pool while it lasts — only idle
+ones, it never waits for one, so under load it runs on the calling thread alone. The process then uses at
+most (calling threads) + `pool_threads` CPUs; bounding the first term (how many requests run at once) is
+the host's admission. `pando_server_request` blocks, so call it from a blocking pool
 (in tokio, use `spawn_blocking`).
 
 **Errors.** No entry point throws or aborts on bad input. Errors come back as JSON
@@ -108,6 +116,11 @@ KonText does — load a corpus when the user selects it, before the first search
 `GET /warm` and `/health` (`"warm"`) report `state` (`idle` / `running` / `done`),
 `level`, `files` / `files_done`, `bytes` / `bytes_done` and `seconds` (since the first
 start). Queries are answered while it runs (they then read what they need themselves).
+Files are read in 64 MB segments by `warm_streams` threads (default 4): on network
+storage (Ceph, NFS) several streams read several times faster than one.
+`GET /warm?residency=hot` (or `all`) adds `"residency"`: how many of those bytes are in
+the page cache now (`resident_bytes`, `resident` as a share) — whether the machine has
+the RAM to keep the corpus warm.
 In fqs, `"pando": {"warm": "hot"}` in the limits file (or a corpus' `settings.limits`)
 warms every corpus as it is opened.
 

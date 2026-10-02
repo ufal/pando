@@ -5,6 +5,7 @@
 
 #include "api/server_api.h"
 #include "core/build_info.h"
+#include "core/worker_pool.h"
 #include "core/json_utils.h"
 #include "corpus/corpus.h"
 #include <httplib.h>
@@ -47,7 +48,11 @@ int main(int argc, char* argv[]) {
                   << "                              kept for repeated requests (default 128; 0 = off)\n"
                   << "  --query-timeout MS          default /query time limit (0 = none; per request \"timeout_ms\")\n"
                   << "  --query-threads N           count a total / count by over N position ranges in parallel\n"
-                  << "                              (default 1: one thread per query)\n"
+                  << "                              (default 1; auto = min(pool threads, 8)); ranges beyond\n"
+                  << "                              the first run on idle pool workers only\n"
+                  << "  --pool-threads N|auto       worker pool shared by all queries (default auto: the CPUs\n"
+                  << "                              this process may use: affinity mask, cgroup quota)\n"
+                  << "  --warm-streams N            parallel read streams of the warm-up (default 4)\n"
                   << "  Client sessions (POST /session, \"session_id\" on /run and /query):\n"
                   << "    --session-ttl SEC       close a session unused for SEC (default 1800)\n"
                   << "    --max-sessions N        open sessions (default 256; the least recently used idle one makes room)\n"
@@ -70,6 +75,8 @@ int main(int argc, char* argv[]) {
     QueryJobConfig job_cfg;
     size_t query_timeout_ms = 0;
     unsigned query_threads = 1;
+    int pool_threads = -1;
+    unsigned warm_streams = 4;
     SessionConfig sess_cfg;
     size_t cache_bytes = ServerConfig{}.cache_bytes;
     std::string limits_file;
@@ -87,6 +94,18 @@ int main(int argc, char* argv[]) {
             return true;
         };
         long long v = 0;
+        if ((a == "--query-threads" || a == "--pool-threads") && i + 1 < argc && std::string(argv[i + 1]) == "auto") {
+            ++i;
+            if (a == "--query-threads") query_threads = 0;
+            else pool_threads = 0;
+            continue;
+        }
+        if (a == "--pool-threads" || a == "--warm-streams") {
+            if (!num_arg(v) || v < 0) return 1;
+            if (a == "--pool-threads") pool_threads = static_cast<int>(v);
+            else warm_streams = static_cast<unsigned>(std::max(1LL, v));
+            continue;
+        }
         if (a == "--total-workers" || a == "--result-cache" || a == "--result-ttl"
             || a == "--abandon-after" || a == "--debug-total-delay" || a == "--query-timeout"
             || a == "--query-threads" || a == "--session-ttl" || a == "--max-sessions"
@@ -98,7 +117,7 @@ int main(int argc, char* argv[]) {
             else if (a == "--result-ttl") job_cfg.ttl = std::chrono::seconds(v);
             else if (a == "--abandon-after") job_cfg.abandon = std::chrono::seconds(v);
             else if (a == "--query-timeout") query_timeout_ms = static_cast<size_t>(v);
-            else if (a == "--query-threads") query_threads = static_cast<unsigned>(std::max(1LL, v));
+            else if (a == "--query-threads") query_threads = static_cast<unsigned>(v);   // 0 = auto
             else if (a == "--session-ttl") sess_cfg.ttl = std::chrono::seconds(std::max(1LL, v));
             else if (a == "--max-sessions") sess_cfg.max_sessions = static_cast<size_t>(std::max(1LL, v));
             else if (a == "--session-memory") sess_cfg.memory_budget = static_cast<size_t>(v) << 20;
@@ -164,6 +183,8 @@ int main(int argc, char* argv[]) {
     cfg.preload = preload;
     cfg.query_timeout_ms = query_timeout_ms;
     cfg.query_threads = query_threads;
+    cfg.pool_threads = pool_threads;
+    cfg.warm_streams = warm_streams;
     cfg.sessions = sess_cfg;
     cfg.cache_bytes = cache_bytes;
     if (!limits_file.empty()) {
@@ -207,7 +228,8 @@ int main(int argc, char* argv[]) {
               << ", threads " << nthreads
               << (preload ? ", preload=on" : ", preload=off (lazy mmap)")
               << ", background totals: " << job_cfg.workers << " workers"
-              << (query_threads > 1 ? ", query threads " + std::to_string(query_threads) : std::string())
+              << ", pool " << WorkerPool::global().size() << " threads (usable CPUs " << usable_cpus() << ")"
+              << (query_threads != 1 ? ", query threads " + (query_threads ? std::to_string(query_threads) : std::string("auto")) : std::string())
               << (query_timeout_ms ? ", query timeout " + std::to_string(query_timeout_ms) + " ms" : std::string())
               << "\n";
     if (!svr.listen("0.0.0.0", static_cast<int>(port))) {

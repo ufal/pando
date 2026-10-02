@@ -1649,6 +1649,7 @@ QueryExecutor::QueryExecutor(const QueryExecutor& parent, const PosRange* range,
       fold_index_cache_(caches_->fold_index),
       dep_pair_cache_(caches_->dep_pair),
       progress_(progress),
+      thread_budget_(parent.thread_budget_),
       bitmap_cache_(caches_->bitmap),
       fold_map_mutex_(caches_->mu),
       regex_cache_(caches_->regex),
@@ -1921,14 +1922,17 @@ void QueryExecutor::compile_conditions(const ConditionPtr& cond) const {
                     }
                 };
                 const LexiconId span = nlex > lex_lo ? nlex - lex_lo : 0;
-                // PANDO_LEXICON_THREADS caps the threads (default: the cores, at most 8)
-                static const unsigned hw = [] {
+                // threads: the request's budget (a tier's `threads`), else
+                // PANDO_LEXICON_THREADS, else min(usable CPUs, 8); workers are
+                // borrowed from the process pool (none when it is busy)
+                static const unsigned env_cap = [] {
                     const char* e = std::getenv("PANDO_LEXICON_THREADS");
-                    const unsigned v = e && *e ? static_cast<unsigned>(std::atoi(e)) : 0;
-                    return v ? v : std::max(1u, std::thread::hardware_concurrency());
+                    const int v = e && *e ? std::atoi(e) : 0;
+                    return v > 0 ? static_cast<unsigned>(v) : std::min(8u, usable_cpus());
                 }();
+                const unsigned cap = thread_budget_ ? std::min(thread_budget_, env_cap) : env_cap;
                 const unsigned nt = static_cast<unsigned>(std::min<LexiconId>(
-                    std::min<unsigned>(hw, 8u), std::max<LexiconId>(1, span / (LexiconId{1} << 18))));
+                    cap, std::max<LexiconId>(1, span / (LexiconId{1} << 18))));
                 std::atomic<bool> stop{false};
                 if (nt <= 1) {
                     for (LexiconId a = lex_lo; a < nlex; a += 0x1000) {
@@ -1937,36 +1941,28 @@ void QueryExecutor::compile_conditions(const ConditionPtr& cond) const {
                         scan(a, std::min<LexiconId>(nlex, a + 0x1000), ac.id_set, stop, re);
                     }
                 } else {
-                    std::vector<std::vector<int32_t>> parts(nt);
-                    std::vector<std::thread> workers;
-                    std::mutex scan_mu;
-                    std::condition_variable scan_cv;
-                    size_t finished = 0;
-                    const LexiconId step = (span + static_cast<LexiconId>(nt) - 1) / static_cast<LexiconId>(nt);
-                    for (unsigned t = 0; t < nt; ++t) {
-                        const LexiconId a = lex_lo + static_cast<LexiconId>(t) * step;
-                        const LexiconId b = std::min<LexiconId>(nlex, a + step);
-                        if (a >= b) break;
-                        workers.emplace_back([&, a, b, t] {
-                            // one compiled regex per thread: RE2's shared DFA cache is
-                            // locked, so threads on one object barely scale
-                            const Regex mine(ac.value);
-                            scan(a, b, parts[t], stop, mine);
-                            std::lock_guard<std::mutex> lk(scan_mu);
-                            ++finished;
-                            scan_cv.notify_one();
-                        });
-                    }
-                    // the caller's thread watches cancel / timeouts while the workers scan
-                    bool cancelled = false;
-                    {
-                        std::unique_lock<std::mutex> lk(scan_mu);
-                        while (finished < workers.size()) {
-                            scan_cv.wait_for(lk, std::chrono::milliseconds(5));
-                            try { check_cancelled(); } catch (const QueryCancelled&) { cancelled = true; stop = true; }
+                    // 4 slices per thread, taken in turn; each slice checks cancel /
+                    // time limits between its 4096-value blocks
+                    const size_t nslices = static_cast<size_t>(nt) * 4;
+                    std::vector<std::vector<int32_t>> parts(nslices);
+                    const LexiconId step = (span + static_cast<LexiconId>(nslices) - 1) / static_cast<LexiconId>(nslices);
+                    std::atomic<bool> cancelled{false};
+                    WorkerPool::global().run(nslices, nt - 1, [&](size_t t) {
+                        const LexiconId a0 = lex_lo + static_cast<LexiconId>(t) * step;
+                        const LexiconId b0 = std::min<LexiconId>(nlex, a0 + step);
+                        if (a0 >= b0) return;
+                        // one compiled regex per slice: RE2's shared DFA cache is
+                        // locked, so threads on one object barely scale
+                        const Regex mine(ac.value);
+                        for (LexiconId a = a0; a < b0 && !stop.load(std::memory_order_relaxed); a += 0x1000) {
+                            if (progress_ && progress_->cancelled()) {
+                                cancelled = true;
+                                stop = true;
+                                return;
+                            }
+                            scan(a, std::min<LexiconId>(b0, a + 0x1000), parts[t], stop, mine);
                         }
-                    }
-                    for (auto& w : workers) w.join();
+                    });
                     if (cancelled) throw QueryCancelled();
                     for (auto& part : parts) ac.id_set.insert(ac.id_set.end(), part.begin(), part.end());
                 }
@@ -7875,6 +7871,24 @@ std::optional<MatchSet> QueryExecutor::execute_partitioned(
     const unsigned K = static_cast<unsigned>(
         std::min<CorpusPos>(static_cast<CorpusPos>(num_threads), N / min_part));
     if (K < 2) return std::nullopt;
+    // P4.1d: more ranges than threads — up to PANDO_RANGES_PER_THREAD (default 4)
+    // per thread, but none below PANDO_RANGE_TARGET tokens (default 2^23: each
+    // range has a fixed cost, and its `count by` buckets are merged) — taken in
+    // turn by whichever thread is free: a dense range no longer holds up the
+    // others, and pool workers that free up later still find work.
+    static const unsigned per_thread = [] {
+        const char* e = std::getenv("PANDO_RANGES_PER_THREAD");
+        const int v = e && *e ? std::atoi(e) : 0;
+        return v > 0 ? static_cast<unsigned>(v) : 4u;
+    }();
+    static const CorpusPos range_target = [] {
+        const char* e = std::getenv("PANDO_RANGE_TARGET");
+        const long long v = e && *e ? std::atoll(e) : 0;
+        return v > 0 ? static_cast<CorpusPos>(v) : CorpusPos{1} << 23;
+    }();
+    const CorpusPos by_size = std::max<CorpusPos>(min_part, range_target);
+    const unsigned R = static_cast<unsigned>(std::clamp<CorpusPos>(
+        N / by_size, static_cast<CorpusPos>(K), static_cast<CorpusPos>(K) * per_thread));
 
     if (!skip_name_validation) validate_query_name_bindings(query);
     // Workers skip compile_query (it writes into the shared condition nodes):
@@ -7908,9 +7922,9 @@ std::optional<MatchSet> QueryExecutor::execute_partitioned(
     if (probe_end <= 0 || probe_end >= N) return std::nullopt;
     ranges.push_back({0, probe_end});
     prev = probe_end;
-    for (unsigned w = 1; w <= K; ++w) {
-        const CorpusPos target = probe_end + (N - probe_end) * static_cast<CorpusPos>(w) / K;
-        const CorpusPos cut = (w == K) ? N : align(target);
+    for (unsigned w = 1; w <= R; ++w) {
+        const CorpusPos target = probe_end + (N - probe_end) * static_cast<CorpusPos>(w) / R;
+        const CorpusPos cut = (w == R) ? N : align(target);
         if (cut > prev) {
             ranges.push_back({prev, cut});
             prev = cut;
@@ -7933,28 +7947,14 @@ std::optional<MatchSet> QueryExecutor::execute_partitioned(
 
     const size_t nw = ranges.size() - 1;
     std::vector<std::unique_ptr<ExecProgress>> wprog(nw);
-    for (auto& p : wprog) p = std::make_unique<ExecProgress>();
     std::vector<std::optional<MatchSet>> parts(nw);
     std::vector<std::exception_ptr> errs(nw);
-    std::atomic<size_t> done{0};
-    std::vector<std::thread> threads;
-    threads.reserve(nw);
-    for (size_t w = 0; w < nw; ++w) {
-        threads.emplace_back([&, w] {
-            try {
-                parts[w] = run_range(ranges[w + 1], wprog[w].get());
-            } catch (...) {
-                errs[w] = std::current_exception();
-                for (auto& p : wprog) p->cancel.store(true, std::memory_order_relaxed);
-            }
-            done.fetch_add(1, std::memory_order_release);
-        });
-    }
     // Publish the partitions' progress as one scan: counted = sum; scanned = the
     // number of positions covered so far, as a position in one sequential scan.
+    // Called at the workers' checkpoints (on_tick) and after each range.
     const size_t probe_total = result.total_count;
-    auto publish = [&] {
-        if (!progress_) return;
+    std::mutex publish_mu;
+    auto publish_locked = [&] {
         size_t counted = probe_total;
         int64_t covered = static_cast<int64_t>(ranges[0].hi);
         for (size_t w = 0; w < nw; ++w) {
@@ -7966,17 +7966,35 @@ std::optional<MatchSet> QueryExecutor::execute_partitioned(
         progress_->counted.store(counted, std::memory_order_relaxed);
         if (covered - 1 > progress_->scanned.load(std::memory_order_relaxed))
             progress_->scanned.store(covered - 1, std::memory_order_relaxed);
-        if (progress_->cancel.load(std::memory_order_relaxed))
-            for (auto& p : wprog) p->cancel.store(true, std::memory_order_relaxed);
     };
-    if (progress_) {
-        while (done.load(std::memory_order_acquire) < nw) {
-            publish();
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
+    const std::function<void()> tick = [&] {
+        std::unique_lock<std::mutex> lk(publish_mu, std::try_to_lock);
+        if (lk.owns_lock()) publish_locked();
+    };
+    for (auto& p : wprog) {
+        p = std::make_unique<ExecProgress>();
+        p->parent = progress_;                    // the query's cancel / time limit
+        p->on_tick = progress_ ? &tick : nullptr;
     }
-    for (auto& t : threads) t.join();
-    publish();
+    // The calling thread runs ranges itself and borrows idle pool workers (at
+    // most K - 1); under load it gets none and goes through the ranges alone.
+    WorkerPool::global().run(nw, K - 1, [&](size_t w) {
+        if (wprog[w]->cancelled()) {
+            errs[w] = std::make_exception_ptr(QueryCancelled());
+            return;
+        }
+        try {
+            parts[w] = run_range(ranges[w + 1], wprog[w].get());
+        } catch (...) {
+            errs[w] = std::current_exception();
+            for (auto& p : wprog) p->cancel.store(true, std::memory_order_relaxed);
+        }
+        if (progress_) tick();
+    });
+    if (progress_) {
+        std::lock_guard<std::mutex> lk(publish_mu);
+        publish_locked();
+    }
 
     // errors: a real one first; otherwise the cancellation
     std::exception_ptr cancelled;

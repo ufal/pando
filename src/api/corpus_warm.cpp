@@ -8,6 +8,8 @@
 #include <filesystem>
 #include <fstream>
 #include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace fs = std::filesystem;
@@ -124,33 +126,104 @@ void CorpusWarmer::start(WarmLevel level) {
 }
 
 void CorpusWarmer::run(std::vector<std::string> files) {
-    std::vector<char> buf(size_t{4} << 20);
-    for (const auto& f : files) {
-        if (stop_) break;
-        const int fd = ::open(f.c_str(), O_RDONLY);
-        if (fd >= 0) {
-#ifdef POSIX_FADV_SEQUENTIAL
-            ::posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
-#endif
-            for (;;) {
-                if (stop_) break;
-                const ssize_t n = ::read(fd, buf.data(), buf.size());
-                if (n <= 0) break;
-                bytes_done_ += static_cast<uint64_t>(n);
-            }
-            ::close(fd);
-        }
-        if (stop_) break;
-        ++files_done_;
-        std::lock_guard<std::mutex> lk(mu_);
-        read_.insert(std::upper_bound(read_.begin(), read_.end(), f), f);
+    // 64 MB segments in file order (smallest files first), taken by the streams in turn
+    constexpr uint64_t kSeg = uint64_t{64} << 20;
+    struct Seg { size_t file; uint64_t off, len; };
+    std::vector<Seg> segs;
+    std::vector<std::atomic<size_t>> left(files.size());
+    for (size_t f = 0; f < files.size(); ++f) {
+        std::error_code ec;
+        const uint64_t sz = fs::file_size(files[f], ec);
+        size_t n = 0;
+        if (!ec)
+            for (uint64_t off = 0; off < sz; off += kSeg, ++n) segs.push_back({f, off, std::min(kSeg, sz - off)});
+        if (n == 0) segs.push_back({f, 0, 0});   // still counted as read
+        left[f].store(n ? n : 1);
     }
+    std::atomic<size_t> next{0};
+    auto stream = [&] {
+        std::vector<char> buf(size_t{4} << 20);
+        for (;;) {
+            if (stop_) return;
+            const size_t i = next.fetch_add(1);
+            if (i >= segs.size()) return;
+            const Seg& sg = segs[i];
+            if (sg.len) {
+                const int fd = ::open(files[sg.file].c_str(), O_RDONLY);
+                if (fd >= 0) {
+#ifdef POSIX_FADV_SEQUENTIAL
+                    ::posix_fadvise(fd, static_cast<off_t>(sg.off), static_cast<off_t>(sg.len), POSIX_FADV_SEQUENTIAL);
+#endif
+                    uint64_t done = 0;
+                    while (done < sg.len && !stop_) {
+                        const size_t want = static_cast<size_t>(std::min<uint64_t>(buf.size(), sg.len - done));
+                        const ssize_t n = ::pread(fd, buf.data(), want, static_cast<off_t>(sg.off + done));
+                        if (n <= 0) break;
+                        done += static_cast<uint64_t>(n);
+                        bytes_done_ += static_cast<uint64_t>(n);
+                    }
+                    ::close(fd);
+                }
+            }
+            if (stop_) return;
+            if (left[sg.file].fetch_sub(1) == 1) {
+                ++files_done_;
+                std::lock_guard<std::mutex> lk(mu_);
+                const std::string& f = files[sg.file];
+                read_.insert(std::upper_bound(read_.begin(), read_.end(), f), f);
+            }
+        }
+    };
+    const unsigned n = std::max(1u, std::min<unsigned>(streams_, static_cast<unsigned>(std::max<size_t>(1, segs.size()))));
+    std::vector<std::thread> helpers;
+    for (unsigned t = 1; t < n; ++t) helpers.emplace_back(stream);
+    stream();
+    for (auto& h : helpers) h.join();
     std::lock_guard<std::mutex> lk(mu_);
     if (!stop_) {
         done_ = true;
         end_ns_ = now_ns();
     }
     running_ = false;
+}
+
+std::string residency_json(const Corpus& corpus, WarmLevel level) {
+    uint64_t total = 0, resident = 0;
+    const std::vector<std::string> files = warm_files(corpus, level, nullptr);
+    const long pg = ::sysconf(_SC_PAGESIZE);
+    const uint64_t page = pg > 0 ? static_cast<uint64_t>(pg) : 4096;
+    std::vector<unsigned char> vec;
+    for (const auto& f : files) {
+        const int fd = ::open(f.c_str(), O_RDONLY);
+        if (fd < 0) continue;
+        struct stat st;
+        if (::fstat(fd, &st) != 0 || st.st_size <= 0) { ::close(fd); continue; }
+        const uint64_t sz = static_cast<uint64_t>(st.st_size);
+        void* m = ::mmap(nullptr, static_cast<size_t>(sz), PROT_READ, MAP_SHARED, fd, 0);
+        ::close(fd);
+        if (m == MAP_FAILED) continue;
+        total += sz;
+        constexpr uint64_t kWin = uint64_t{1} << 30;
+        for (uint64_t off = 0; off < sz; off += kWin) {
+            const uint64_t len = std::min(kWin, sz - off);
+            const size_t pages = static_cast<size_t>((len + page - 1) / page);
+            vec.assign(pages, 0);
+#ifdef __APPLE__
+            const int rc = ::mincore(static_cast<char*>(m) + off, static_cast<size_t>(len), reinterpret_cast<char*>(vec.data()));
+#else
+            const int rc = ::mincore(static_cast<char*>(m) + off, static_cast<size_t>(len), vec.data());
+#endif
+            if (rc != 0) continue;
+            for (size_t i = 0; i < pages; ++i)
+                if (vec[i] & 1) resident += std::min<uint64_t>(page, len - static_cast<uint64_t>(i) * page);
+        }
+        ::munmap(m, static_cast<size_t>(sz));
+    }
+    char share[32];
+    std::snprintf(share, sizeof share, "%.4f", total ? static_cast<double>(resident) / static_cast<double>(total) : 0.0);
+    return std::string("{\"level\": \"") + warm_level_name(level) + "\", \"files\": " + std::to_string(files.size())
+        + ", \"bytes\": " + std::to_string(total) + ", \"resident_bytes\": " + std::to_string(resident)
+        + ", \"resident\": " + share + "}";
 }
 
 std::string CorpusWarmer::status_json() const {

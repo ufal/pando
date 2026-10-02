@@ -106,8 +106,13 @@ Environment for `pando`, `pando-server` and embedders: `PANDO_REV=auto|raw|packe
 it is present and up to date) and `PANDO_REV_CACHE_MB` (cache of decoded long
 lists, default 256). `PANDO_HEADATTR=off`: dependency queries do not use head
 attributes. `PANDO_DAT=packed`: token ids from `.dat.pk` when it is
-there. `PANDO_LEXICON_THREADS=N`: threads for the lexicon scan of a
-regex (default: the cores, at most 8; scans of 256K entries or more are split).
+there. `PANDO_LEXICON_THREADS=N`: the most threads for the lexicon scan of a
+regex (default: the usable CPUs, at most 8; scans of 256K entries or more are
+split; a request's tier `threads` lowers it). `PANDO_POOL_THREADS=N`: size of the
+process worker pool (default: the usable CPUs, see "Parallel counting").
+`PANDO_RANGES_PER_THREAD=N` / `PANDO_RANGE_TARGET=N`: at most N position ranges
+per thread of a parallel count (default 4) / no range below N tokens while
+there are at least as many ranges as threads (default 8388608).
 
 ## `pando-check`
 
@@ -132,7 +137,9 @@ pando-server <corpus_dir> [port] [threads] [--preload] [options]
 | `--result-ttl SEC` | Drop a finished result nobody asked about for SEC (default 3600) |
 | `--abandon-after SEC` | Cancel a background count nobody polled for SEC (default 120; 0 = never) |
 | `--debug-total-delay MS` | Testing: reveal every total gradually over MS, so a client can be tested against a "slow" count on a small corpus |
-| `--query-threads N` | Split every counting query — a `/query` total, a background (`"async"`) total, a `/run` `count by` — over N position ranges counted in parallel (default 1: one thread per query). `/health` reports it as `query_threads` |
+| `--query-threads N\|auto` | Split every counting query — a `/query` total, a background (`"async"`) total, a `/run` `count by` — over position ranges counted by up to N threads (default 1: one thread per query; `auto` = min(pool threads, 8)). The extra threads are borrowed from the process pool when idle (see "Parallel counting"). A tier's `threads` replaces it. `/health` reports it as `query_threads` |
+| `--pool-threads N\|auto` | Size of the worker pool all queries of the process borrow from (default `auto`: the CPUs the process may use — the affinity mask and the cgroup CPU quota, not the host's cores). `/health` reports `pool` |
+| `--warm-streams N` | Parallel read streams of the warm-up (default 4; network storage reads several times faster with several, a local disk needs 1–2) |
 | `--query-timeout MS` | Default time limit of a `/query` or `/run` (0 = none; per request `"timeout_ms"`): 408 `timed_out` |
 | `--session-ttl SEC` | Close a client session nobody used for SEC (default 1800) |
 | `--max-sessions N` | Open client sessions (default 256; a new one closes the least recently used idle one) |
@@ -162,10 +169,28 @@ exist only for the duration of the query:
 - a page without a total (`--limit 20` alone) is never split: it stops at its
   first hits.
 
-Worth it for long counts on large corpora; on a server that already runs many
-queries at once, more request threads may be the better use of the cores
-(`--query-threads` defaults to 1). Ranges smaller than 2^20 tokens are not
-made (`PANDO_PARTITION_MIN` overrides, for tests on small corpora).
+**The worker pool.** The extra threads come from one pool per process, shared
+by every corpus it has open (an embedding host such as FQS keeps many open).
+A query with N threads runs ranges on its own (request) thread and borrows up to
+N − 1 *idle* pool workers; a worker that frees up while ranges remain joins then.
+It never waits for one: on a busy server a query just runs on its request thread
+alone, with the same result. The CPU a process uses is so at most its request
+threads plus the pool (`--pool-threads`, default: the CPUs the process may use —
+affinity mask and cgroup quota, so a container with a 4-CPU limit on a 64-core
+host gets 4). The corpus is cut into up to 4 ranges per thread
+(`PANDO_RANGES_PER_THREAD`), none smaller than 8M tokens (`PANDO_RANGE_TARGET`)
+unless that leaves fewer ranges than threads, taken in turn, so one dense range
+does not hold up the others. Regex lexicon scans use the same pool. `/health` `pool`: `threads`,
+`started`, `busy`, `steps` (parallel steps run), `helpers_wanted` /
+`helpers_granted` (granted well below wanted: the pool is the bottleneck),
+`usable_cpus`.
+
+Worth it for long counts on large corpora. One query stops gaining well before
+32–64 threads (memory bandwidth; ranges are at least 2^20 tokens), so on a large
+machine keep the per-query width (`--query-threads`, a tier's `threads`) at
+8–16 and let the pool serve more queries at once. Ranges smaller than 2^20
+tokens are not made (`PANDO_PARTITION_MIN` overrides, for tests on small
+corpora).
 
 **Progressive pages.** A page without a total of a token sequence with a huge
 complex operand and no rare token (`[word=".*a.*"] [word=".*e.*"]`: two regexes
@@ -194,7 +219,7 @@ default 2^20 tokens) override, for tests. `--timing` reports the ranges as
 | `GET /session?session_id=` | The session's hit sets (query, materialised, hits, total, bytes, sort steps, aliases) |
 | `POST /session/close` | Close a session (`session_id` in the body or the query string) |
 | `GET /sessions` | Open sessions, their memory, the budget |
-| `POST /warm`, `GET /warm` | Start reading the hot (`{"level": "hot"}`, default) or all (`"all"`) index files into the page cache in the background, e.g. when a front-end selects the corpus; the warm-up status |
+| `POST /warm`, `GET /warm` | Start reading the hot (`{"level": "hot"}`, default) or all (`"all"`) index files into the page cache in the background, e.g. when a front-end selects the corpus; the warm-up status. `GET /warm?residency=hot\|all` adds `"residency"`: `bytes`, `resident_bytes`, `resident` (share) of those files in the page cache now (mincore; on demand only) |
 | `GET /info`, `/values/ATTR`, `/regions/TYPE`, `/context?pos=`, `/health` | Corpus description, values, regions, KWIC context |
 
 ### Counts by several fields (`count by A, B`)
@@ -302,11 +327,12 @@ the tier):
 | `total_timeout_ms` | A background (`"async"`) count stops after this long: the job is `cancelled` with `"timed_out": true`, `total` = the count so far. The same tier does not restart it; a tier with a longer (or no) limit does |
 | `max_count_hits` | `count / group / freq / stats / coll / dcoll / keyness / tabulate / describe / sort` over a query or stored set with more hits answer 413 `{"too_large": true, "limit": "max_count_hits", "hits": …, "hits_at_least": …}`. The hits are counted first, and only up to the limit, so refusing is cheap. Totals, `size` and pages are not limited |
 | `max_hits` | Hits one stored set may materialise (sorting, sorted / deep pages in a session): 413 `"limit": "max_hits"` (default: `--session-max-hits`) |
-| `threads` | Position ranges a counting query is split over (default `--query-threads`) |
+| `threads` | The most threads a request of this tier may use: the threads its counting query is split over (default `--query-threads`), its regex lexicon scans and the background total it starts. All borrowed from the process pool, so under load a request may get fewer (never more). Without a tier `threads`, scans use up to min(usable CPUs, 8) |
 | `deny` | Features refused with 403 `{"denied": "<feature>", "tier": …}`: `transitive` (`>>`, `<<`, descendant / ancestor conditions), `unbounded_repeat` (`+`, `*`, `{n,}`), `regex_no_prefix` (a regex without a literal start, which scans the whole lexicon), `regex` (any regex), `parallel` (aligned queries), `negated_relation` (`!>`, `!<`) |
 
-Queues, per-user limits and a global CPU budget belong to the host that sees
-every corpus (FQS); pando enforces what a request may do once it runs.
+Queues, per-user limits and the number of requests running at once belong to
+the host that sees every corpus (FQS); pando enforces what a request may do once
+it runs, and bounds the extra threads of all requests together by its pool.
 `/health` reports the tiers. A regex scan over the lexicon honours the
 timeout too (before, `[word=".*a.*"] [word=".*e.*"] [word=".*i.*"]` ran its 11 s
 whatever the limit).
@@ -328,7 +354,8 @@ Every binary reports the same build identity: `pando --version`,
  "features": ["query", "run", "context", "values", "regions", "async_total", "result_cache",
               "limit0_total", "bitmaps", "dep_pairs", "fold_index", "sentence_context", "version"],
  "started": "2026-09-27T17:45:52Z", "uptime_s": 3600, "corpus": "/data/pando/ud_demo",
- "threads": 8, "total_workers": 2}
+ "threads": 8, "query_threads": 1, "pool": {"threads": 16, "started": 7, "busy": 0, "steps": 412,
+ "helpers_wanted": 1210, "helpers_granted": 1187, "usable_cpus": 16}, "total_workers": 2}
 ```
 
 Clients should test `features` rather than probe for errors. `/info` (and

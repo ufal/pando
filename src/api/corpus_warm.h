@@ -12,8 +12,13 @@
 //   all  every file of the corpus directory (what `--preload` does at open,
 //        but in the background).
 //
-// Files are read sequentially with read() (the OS reads ahead at full speed);
-// the corpus' mmaps then find the pages in the cache. Smallest files first.
+// Files are read in 64 MB segments with pread() by `streams` threads (default
+// 4; one stream is enough for a local disk, network storage — Ceph, NFS —
+// delivers several times more with parallel reads); the corpus' mmaps then
+// find the pages in the cache. Smallest files first.
+//
+// residency_json(): how much of a level's files is in the page cache now
+// (mincore), for GET /warm?residency=hot|all.
 
 #include <atomic>
 #include <cstdint>
@@ -35,6 +40,10 @@ const char* warm_level_name(WarmLevel l);
 /// The files `level` reads, smallest first (paths in the corpus directory).
 std::vector<std::string> warm_files(const Corpus& corpus, WarmLevel level, uint64_t* total_bytes = nullptr);
 
+/// {"level", "files", "bytes", "resident_bytes", "resident"}: the share of
+/// `level`'s files in the page cache (mincore over a read-only map).
+std::string residency_json(const Corpus& corpus, WarmLevel level);
+
 class CorpusWarmer {
 public:
     explicit CorpusWarmer(const Corpus& corpus) : corpus_(corpus) {}
@@ -46,6 +55,8 @@ public:
     /// same or a higher level, or a finished one, is left as it is; a lower
     /// running level is extended (the files already read are not read again).
     void start(WarmLevel level);
+    /// Parallel read streams (≥ 1) for the next start().
+    void set_streams(unsigned n) { streams_ = n ? n : 1; }
 
     /// {"state": "idle"|"running"|"done", "level", "files", "files_done",
     ///  "bytes", "bytes_done", "seconds"}.
@@ -68,6 +79,7 @@ private:
     uint64_t bytes_ = 0;
     std::atomic<uint64_t> bytes_done_{0};
     std::atomic<int64_t> start_ns_{0}, end_ns_{0};
+    unsigned streams_ = 4;
 };
 
 }  // namespace pando

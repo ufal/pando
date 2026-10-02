@@ -176,6 +176,52 @@ def main():
         finally:
             srv.close()
 
+        # P4.1d: a tier's `threads` is the request's whole budget: foreground ranges
+        # and its background total; the pool's /health counters show who asked
+        tl = os.path.join(tmp, "threads.json")
+        with open(tl, "w") as f:
+            json.dump({"tiers": {"one": {"threads": 1}, "two": {"threads": 2}}, "default_tier": "one",
+                       "pool_threads": 4}, f)
+        srv = Server(opts.server, corpus, "--limits", tl, "--trust-tier", "--query-threads", "4",
+                     env={"PANDO_PARTITION_MIN": "64"})
+        try:
+            def steps():
+                return srv.get("/health")[1].get("pool", {}).get("steps", -1)
+            body = {"query": '[upos="NOUN"] [upos="ADP"]', "total": True, "limit": 1}
+            s0 = steps()
+            check(s0 >= 0 and srv.get("/health")[1]["pool"].get("threads") == 4, f"pool: {srv.get('/health')[1].get('pool')}")
+            st1, r1 = srv.post("/query", dict(body, tier="one"))
+            check(st1 == 200 and steps() == s0, f"tier threads 1: no pool step ({steps()} vs {s0})")
+            # (another query: the first one's total is cached)
+            st2, r2 = srv.post("/query", dict(body, query='[upos="NOUN"] [upos="ADP"] []', tier="two"))
+            check(st2 == 200 and steps() > s0, f"tier threads 2: ranges on the pool ({steps()} vs {s0})")
+            st3, r3 = srv.post("/query", dict(body, query='[upos="NOUN"] [upos="ADP"] []', tier="one"))
+            check(r3["result"]["page"]["total"] == r2["result"]["page"]["total"], "same total for every tier")
+            # a background total keeps to the tier that started it
+            s1 = steps()
+            st, r = srv.post("/query", {"query": '[upos="DET"] [upos="NOUN"]', "total": "async", "limit": 1,
+                                        "tier": "one"})
+            job = r.get("result", {}).get("job", {}).get("id") or r.get("job", {}).get("id")
+            for _ in range(200):
+                if not job:
+                    break
+                js = srv.get(f"/status?job={job}")[1]
+                if js.get("finished") or js.get("job", {}).get("finished"):
+                    break
+                time.sleep(0.02)
+            check(st == 200 and job and steps() == s1, f"background total of tier one: no pool step ({steps()} vs {s1}): {r}")
+            st, r = srv.post("/query", {"query": '[upos="ADJ"] [upos="NOUN"]', "total": "async", "limit": 1,
+                                        "tier": "two"})
+            job = r.get("result", {}).get("job", {}).get("id") or r.get("job", {}).get("id")
+            for _ in range(200):
+                js = srv.get(f"/status?job={job}")[1]
+                if js.get("finished") or js.get("job", {}).get("finished"):
+                    break
+                time.sleep(0.02)
+            check(st == 200 and steps() > s1, f"background total of tier two: on the pool ({steps()} vs {s1})")
+        finally:
+            srv.close()
+
         # without --trust-tier the body's tier is ignored
         srv = Server(opts.server, corpus, "--limits", lim)
         try:

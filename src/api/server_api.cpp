@@ -165,8 +165,14 @@ ServerConfig parse_server_options(const std::string& json_in, ServerConfig cfg) 
     if (has("debug_total_delay_ms"))
         cfg.jobs.debug_delay = std::chrono::milliseconds(json_extract_num(opts, "debug_total_delay_ms", 0));
     if (has("threads")) cfg.threads = static_cast<unsigned>(json_extract_num(opts, "threads", 0));
-    if (has("query_threads"))
-        cfg.query_threads = static_cast<unsigned>(std::max<size_t>(1, json_extract_num(opts, "query_threads", 1)));
+    if (has("query_threads"))   // a number, or "auto" / 0 = min(pool threads, 8)
+        cfg.query_threads = json_extract_str(opts, "query_threads") == "auto"
+            ? 0u : static_cast<unsigned>(json_extract_num(opts, "query_threads", 1));
+    if (has("pool_threads"))    // process-wide (every corpus); "auto" / 0 = the usable CPUs
+        cfg.pool_threads = json_extract_str(opts, "pool_threads") == "auto"
+            ? 0u : static_cast<unsigned>(json_extract_num(opts, "pool_threads", 0));
+    if (has("warm_streams"))
+        cfg.warm_streams = static_cast<unsigned>(std::max<size_t>(1, json_extract_num(opts, "warm_streams", 4)));
     if (has("session_ttl"))
         cfg.sessions.ttl = std::chrono::seconds(std::max<size_t>(1, json_extract_num(opts, "session_ttl", 1800)));
     if (has("max_sessions")) cfg.sessions.max_sessions = std::max<size_t>(1, json_extract_num(opts, "max_sessions", 256));
@@ -217,8 +223,22 @@ struct ServerApi::Deadline {
     bool fired = false;
 };
 
+namespace {
+
+/// Size the process pool (first explicit value wins) and resolve
+/// query_threads "auto".
+ServerConfig resolve_threads(ServerConfig cfg) {
+    if (cfg.pool_threads >= 0 && !WorkerPool::global().configure(static_cast<unsigned>(cfg.pool_threads)))
+        std::fprintf(stderr, "pando: pool_threads %d ignored: the process pool already has %u threads\n",
+                     cfg.pool_threads, WorkerPool::global().size());
+    if (cfg.query_threads == 0) cfg.query_threads = std::max(1u, std::min(8u, WorkerPool::global().size()));
+    return cfg;
+}
+
+}  // namespace
+
 ServerApi::ServerApi(Corpus& corpus, ServerConfig cfg)
-    : corpus_(corpus), cfg_(std::move(cfg)),
+    : corpus_(corpus), cfg_(resolve_threads(std::move(cfg))),
       jobs_(corpus, [this] {
           QueryJobConfig j = cfg_.jobs;
           j.count_threads = std::max({1u, j.count_threads, cfg_.query_threads});
@@ -235,6 +255,7 @@ ServerApi::ServerApi(Corpus& corpus, ServerConfig cfg)
     started_iso_ = buf;
     program_session_.set_result_cache(cache_.max_bytes() ? &cache_ : nullptr);
     watchdog_ = std::thread([this] { watchdog_loop(); });
+    warmer_.set_streams(cfg_.warm_streams);
     warmer_.start(cfg_.warm);
 }
 
@@ -306,6 +327,7 @@ std::string ServerApi::server_fields() const {
         + ", \"uptime_s\": " + ups + ", \"corpus\": " + jstr(corpus_.dir())
         + ", \"threads\": " + std::to_string(cfg_.threads)
         + ", \"query_threads\": " + std::to_string(std::max(1u, cfg_.query_threads))
+        + ", \"pool\": " + WorkerPool::global().stats_json()
         + ", \"total_workers\": " + std::to_string(cfg_.jobs.workers)
         + ", \"sessions\": {\"open\": " + std::to_string(sessions_.count())
         + ", \"bytes\": " + std::to_string(sessions_.bytes())
@@ -413,7 +435,7 @@ ServerResponse ServerApi::handle(std::string_view method_in, std::string_view pa
         else if ((r = route_is("POST", "/session/close"))) { if (r > 0) return session_close(params, body); }
         else if ((r = route_is("GET", "/sessions"))) { if (r > 0) return list_sessions(); }
         else if (path == "/warm") {
-            if (post || get) return warm(body, post);
+            if (post || get) return warm(params, body, post);
             r = -1;
         }
         else {
@@ -447,7 +469,10 @@ ServerResponse ServerApi::handle(std::string_view method_in, std::string_view pa
 // GET /warm: warm-up status. POST /warm {"level": "hot" (default) | "all"}: read
 // those index files into the page cache in the background (a front-end calls it
 // when the corpus is selected); answers at once with the status.
-ServerResponse ServerApi::warm(const std::string& body, bool start) {
+// GET /warm?residency=hot|all adds "residency": the share of those files in the
+// page cache now (mincore; reads no data, but maps every file: on demand only).
+ServerResponse ServerApi::warm(const std::map<std::string, std::string>& params, const std::string& body,
+                               bool start) {
     if (start) {
         std::string lv = body.empty() ? "" : json_extract_str(body, "level");
         WarmLevel w = WarmLevel::Hot;
@@ -455,7 +480,17 @@ ServerResponse ServerApi::warm(const std::string& body, bool start) {
             return json_error(400, "level must be \"hot\" or \"all\"");
         warmer_.start(w);
     }
-    return json_ok("{\"ok\":true, \"warm\": " + warmer_.status_json() + "}\n");
+    std::string extra;
+    if (!start) {
+        const auto it = params.find("residency");
+        if (it != params.end()) {
+            WarmLevel w = WarmLevel::Hot;
+            if (!it->second.empty() && (!parse_warm_level(it->second, w) || w == WarmLevel::None))
+                return json_error(400, "residency must be \"hot\" or \"all\"");
+            extra = ", \"residency\": " + residency_json(corpus_, w);
+        }
+    }
+    return json_ok("{\"ok\":true, \"warm\": " + warmer_.status_json() + extra + "}\n");
 }
 
 ServerResponse ServerApi::health() {
@@ -546,6 +581,7 @@ ServerResponse ServerApi::run(const std::string& body) {
     opts.strict_quoted_strings = json_extract_bool(body, "strict_quoted_strings", false);
     const RequestLimits rl = request_limits(body);
     opts.threads = rl.threads;
+    ThreadBudgetScope thread_budget(rl.lim.threads);   // P4.1d: scans keep to the tier too
     opts.max_count_hits = rl.lim.max_count_hits;
     const std::string sid = json_extract_str(body, "session_id");
     const size_t timeout_ms = rl.timeout_ms;
@@ -644,6 +680,8 @@ ServerResponse ServerApi::query(const std::string& body) {
         return json_error(400, "'sample' / 'shuffle' are not stored in sessions (use them without session_id)");
     const RequestLimits rl = request_limits(body);
     opts.threads = rl.threads;
+    opts.thread_cap = rl.lim.threads;
+    ThreadBudgetScope thread_budget(rl.lim.threads);   // P4.1d: scans keep to the tier too
     const size_t timeout_ms = rl.timeout_ms;
     const auto job_limit = std::chrono::milliseconds(rl.lim.total_timeout_ms);
     if (from.empty())

@@ -76,7 +76,13 @@ PANDO_API const char* pando_server_build_json(void);
  *     "abandon_after": SEC      cancel a count nobody polled for SEC (default 120; 0 = never)
  *     "query_timeout_ms": MS    default /query time limit (0 = none; per request "timeout_ms")
  *     "threads": N              reported in /health ("threads")
- *     "query_threads": N        count a total / count by over N position ranges in parallel (default 1)
+ *     "query_threads": N|"auto" count a total / count by over N position ranges in parallel (default 1;
+ *                               "auto" = min(pool threads, 8)); ranges beyond the first run on idle
+ *                               workers of the process pool only
+ *     "pool_threads": N|"auto"  the process-wide worker pool shared by every corpus this process has
+ *                               open (default auto: the CPUs the process may use: affinity mask, cgroup
+ *                               quota); the first explicit value wins, later ones are ignored
+ *     "warm_streams": N         parallel read streams of the background warm-up (default 4)
  *     "session_ttl": SEC        close a client session unused for SEC (default 1800)
  *     "max_sessions": N         open client sessions (default 256)
  *     "session_memory_mb": MB   materialised hits over all sessions (default 2048; 0 = no limit)

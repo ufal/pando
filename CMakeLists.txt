@@ -136,6 +136,7 @@ add_library(pando_core STATIC
     src/core/build_info.cpp
     src/core/mmap_file.cpp
     src/core/regex_engine.cpp
+    src/core/worker_pool.cpp
     src/core/count_hierarchy_json.cpp
     src/index/lexicon.cpp
     src/index/fold_map.cpp
@@ -252,6 +253,9 @@ if(BUILD_TESTING)
     add_executable(parser_quoted_test src/query/parser_quoted_test.cpp)
     target_link_libraries(parser_quoted_test PRIVATE pando_core)
     add_test(NAME parser_quoted COMMAND parser_quoted_test)
+    add_executable(worker_pool_test src/core/worker_pool_test.cpp)
+    target_link_libraries(worker_pool_test PRIVATE pando_core)
+    add_test(NAME worker_pool COMMAND worker_pool_test)
     add_executable(mv_fwd_test src/index/mv_fwd_test.cpp)
     target_link_libraries(mv_fwd_test PRIVATE pando_core)
     add_test(NAME mv_fwd COMMAND mv_fwd_test)

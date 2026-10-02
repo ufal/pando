@@ -29,6 +29,9 @@ struct QueryOptions {
     bool allow_empty_alignment = false;
     /// P4.1: count the total over this many position ranges in parallel (1 = one thread).
     unsigned threads = 1;
+    /// P4.1d: the request's thread cap (a tier's `threads`; 0 = none): bounds the
+    /// lexicon scans of a background total started for this query too.
+    unsigned thread_cap = 0;
     /// KonText "random sample" / "shuffle": `sample` N = a random N of the hits, shown
     /// in corpus order; `shuffle` = the hits in a random order (with `sample`: the
     /// sample in a random order). The same `seed` gives the same sample / order on

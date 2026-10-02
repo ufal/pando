@@ -68,7 +68,7 @@ PROGRESSIVE_WINDOW = "64"
 def run(pando, corpus, query, args, mode, timeout):
     env = dict(os.environ, PANDO_FASTPATH="off" if mode in ("off", "mtoff") else
                "nomerge" if mode == "nomerge" else "on")
-    for k in ("PANDO_MASK_BITS", "PANDO_BITMAPS", "PANDO_PARTITION_MIN",
+    for k in ("PANDO_MASK_BITS", "PANDO_BITMAPS", "PANDO_PARTITION_MIN", "PANDO_RANGE_TARGET",
               "PANDO_PROGRESSIVE_MIN", "PANDO_PROGRESSIVE_WINDOW", "PANDO_REV", "PANDO_HEADATTR", "PANDO_DAT"):
         env.pop(k, None)
     if mode == "packed":
@@ -82,6 +82,7 @@ def run(pando, corpus, query, args, mode, timeout):
         env["PANDO_PROGRESSIVE_WINDOW"] = PROGRESSIVE_WINDOW
     if mode in MT_MODES:
         env["PANDO_PARTITION_MIN"] = PARTITION_MIN
+        env["PANDO_RANGE_TARGET"] = PARTITION_MIN   # P4.1d: several ranges per thread
         args = [*args, "--threads", str(MT_THREADS)]
     if mode in ("onbits", "mtbits"):
         env["PANDO_MASK_BITS"] = "1"
