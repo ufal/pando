@@ -24,6 +24,7 @@
 #include <string_view>
 
 #include <mutex>
+#include <condition_variable>
 
 namespace pando {
 
@@ -126,6 +127,36 @@ static std::string regex_required_literal(const std::string& pat) {
     }
     flush();
     return best;
+}
+
+// P4.6: `(?i)pattern` → its required literal, lowercased, for an ASCII
+// case-insensitive prefilter; empty when the literal is not plain ASCII or has a
+// letter with a non-ASCII case variant in Unicode simple case folding (k: U+212A
+// KELVIN SIGN, s: U+017F LONG S), so the prefilter can never drop a match.
+static std::string regex_required_literal_icase(const std::string& pat) {
+    if (pat.compare(0, 4, "(?i)") != 0) return {};
+    std::string lit = regex_required_literal(pat.substr(4));
+    for (char& c : lit) {
+        const unsigned char u = static_cast<unsigned char>(c);
+        if (u >= 0x80) return {};
+        c = static_cast<char>(std::tolower(u));
+        if (c == 'k' || c == 's') return {};
+    }
+    return lit;
+}
+
+// Does `v` contain the lowercase ASCII `lit` ignoring ASCII case?
+static bool contains_icase_ascii(std::string_view v, std::string_view lit) {
+    if (lit.empty()) return true;
+    if (v.size() < lit.size()) return false;
+    const char a = lit[0], A = static_cast<char>(std::toupper(static_cast<unsigned char>(a)));
+    for (size_t i = 0; i + lit.size() <= v.size(); ++i) {
+        if (v[i] != a && v[i] != A) continue;
+        size_t k = 1;
+        while (k < lit.size() && std::tolower(static_cast<unsigned char>(v[i + k])) == lit[k]) ++k;
+        if (k == lit.size()) return true;
+    }
+    return false;
 }
 
 // Lexicon id range [lo, hi) of the entries starting with `prefix`.
@@ -1851,8 +1882,9 @@ void QueryExecutor::compile_conditions(const ConditionPtr& cond) const {
                 ac.id_set_total = -1;
                 LexiconId lex_lo = 0, nlex = lex.size();
                 bool exact = false;
-                const std::string prefix = (ac.case_insensitive || ac.diacritics_insensitive)
-                    ? std::string() : regex_literal_prefix(ac.value, ac.regex_full_match, &exact);
+                // %c / %d do not apply to a regex (leaf_regex_eval): its literal
+                // prefix and required literal hold with them too
+                const std::string prefix = regex_literal_prefix(ac.value, ac.regex_full_match, &exact);
                 if (exact) {
                     const LexiconId id = lex.lookup(prefix);
                     if (id != UNKNOWN_LEX) ac.id_set.push_back(id);
@@ -1861,8 +1893,8 @@ void QueryExecutor::compile_conditions(const ConditionPtr& cond) const {
                 } else if (!prefix.empty()) {
                     std::tie(lex_lo, nlex) = lexicon_prefix_range(lex, prefix);
                 }
-                const std::string req = (ac.case_insensitive || ac.diacritics_insensitive)
-                    ? std::string() : regex_required_literal(ac.value);
+                const std::string req = regex_required_literal(ac.value);
+                const std::string req_ci = req.empty() ? regex_required_literal_icase(ac.value) : std::string();
                 // the corpus keeps id sets across queries (page, background total,
                 // sort, next page…: one scan)
                 std::string cache_key;
@@ -1875,13 +1907,68 @@ void QueryExecutor::compile_conditions(const ConditionPtr& cond) const {
                         lex_lo = nlex = 0;
                     }
                 }
-                for (LexiconId id = lex_lo; id < nlex; ++id) {
-                    // a scan over a large lexicon can take seconds: honour cancel / timeouts
-                    if ((id & 0xFFF) == 0) check_cancelled();
-                    const std::string_view v = lex.get(id);
-                    if (!req.empty() && v.find(req) == std::string_view::npos) continue;
-                    if (leaf_regex_eval(v, ac))
-                        ac.id_set.push_back(id);
+                // P4.6: a large scan is split over threads (ranges of ids, merged in
+                // order); each checks the literal prefilters before the regex
+                const Regex& re = regex_for(ac.value);   // compiled once (throws on a bad pattern here)
+                auto scan = [&](LexiconId a, LexiconId b, std::vector<int32_t>& out,
+                                const std::atomic<bool>& stop, const Regex& re) {
+                    for (LexiconId id = a; id < b; ++id) {
+                        if ((id & 0xFFF) == 0 && stop.load(std::memory_order_relaxed)) return;
+                        const std::string_view v = lex.get(id);
+                        if (!req.empty() && v.find(req) == std::string_view::npos) continue;
+                        if (!req_ci.empty() && !contains_icase_ascii(v, req_ci)) continue;
+                        if (regex_eval_sv(v, re, ac.regex_full_match)) out.push_back(id);
+                    }
+                };
+                const LexiconId span = nlex > lex_lo ? nlex - lex_lo : 0;
+                // PANDO_LEXICON_THREADS caps the threads (default: the cores, at most 8)
+                static const unsigned hw = [] {
+                    const char* e = std::getenv("PANDO_LEXICON_THREADS");
+                    const unsigned v = e && *e ? static_cast<unsigned>(std::atoi(e)) : 0;
+                    return v ? v : std::max(1u, std::thread::hardware_concurrency());
+                }();
+                const unsigned nt = static_cast<unsigned>(std::min<LexiconId>(
+                    std::min<unsigned>(hw, 8u), std::max<LexiconId>(1, span / (LexiconId{1} << 18))));
+                std::atomic<bool> stop{false};
+                if (nt <= 1) {
+                    for (LexiconId a = lex_lo; a < nlex; a += 0x1000) {
+                        // a scan over a large lexicon can take seconds: honour cancel / timeouts
+                        check_cancelled();
+                        scan(a, std::min<LexiconId>(nlex, a + 0x1000), ac.id_set, stop, re);
+                    }
+                } else {
+                    std::vector<std::vector<int32_t>> parts(nt);
+                    std::vector<std::thread> workers;
+                    std::mutex scan_mu;
+                    std::condition_variable scan_cv;
+                    size_t finished = 0;
+                    const LexiconId step = (span + static_cast<LexiconId>(nt) - 1) / static_cast<LexiconId>(nt);
+                    for (unsigned t = 0; t < nt; ++t) {
+                        const LexiconId a = lex_lo + static_cast<LexiconId>(t) * step;
+                        const LexiconId b = std::min<LexiconId>(nlex, a + step);
+                        if (a >= b) break;
+                        workers.emplace_back([&, a, b, t] {
+                            // one compiled regex per thread: RE2's shared DFA cache is
+                            // locked, so threads on one object barely scale
+                            const Regex mine(ac.value);
+                            scan(a, b, parts[t], stop, mine);
+                            std::lock_guard<std::mutex> lk(scan_mu);
+                            ++finished;
+                            scan_cv.notify_one();
+                        });
+                    }
+                    // the caller's thread watches cancel / timeouts while the workers scan
+                    bool cancelled = false;
+                    {
+                        std::unique_lock<std::mutex> lk(scan_mu);
+                        while (finished < workers.size()) {
+                            scan_cv.wait_for(lk, std::chrono::milliseconds(5));
+                            try { check_cancelled(); } catch (const QueryCancelled&) { cancelled = true; stop = true; }
+                        }
+                    }
+                    for (auto& w : workers) w.join();
+                    if (cancelled) throw QueryCancelled();
+                    for (auto& part : parts) ac.id_set.insert(ac.id_set.end(), part.begin(), part.end());
                 }
                 if (!ac.id_set_resolved && !cache_key.empty())
                     corpus_.cache_id_set(cache_key, std::make_shared<const Corpus::IdSet>(ac.id_set));
@@ -5066,6 +5153,40 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                         build_region_eq_position_mask(corpus_, q.global_region_filters);
                     const bool iv_mask = mask.ready() && !mask.use_bits;
                     const auto& pa = corpus_.attr(aname);
+                    // P4.6: a large, dense id set (`[form=".*e.*"]`: 1M ids, a
+                    // quarter of the tokens): the first page from the token ids
+                    // in corpus order (a few thousand positions at most), the total
+                    // from the counts — not a heap over a million posting lists
+                    const CorpusPos N = corpus_.size();
+                    if (mask.status == RegionMaskStatus::None && ac.id_set.size() > 4096
+                        && ac.id_set_total > 0 && max_matches > 0
+                        && static_cast<double>(ac.id_set_total) * 4096.0 >= static_cast<double>(N)) {
+                        result.plan_path = "single_idset";
+                        const size_t V = static_cast<size_t>(pa.lexicon().size());
+                        std::vector<uint64_t> in((V + 63) / 64, 0);
+                        for (int32_t id : ac.id_set)
+                            if (id >= 0 && static_cast<size_t>(id) < V)
+                                in[static_cast<size_t>(id) >> 6] |= uint64_t{1} << (id & 63);
+                        size_t emitted = 0;
+                        bool capped = false;
+                        CorpusPos p = 0;
+                        for (; p < N; ++p) {
+                            if (result.matches.size() >= max_matches) break;
+                            if ((p & 0xFFFF) == 0) check_cancelled();
+                            const auto id = static_cast<size_t>(pa.id_at(p));
+                            if (!((in[id >> 6] >> (id & 63)) & 1)) continue;
+                            add_match(std::vector<CorpusPos>{p, p});
+                            ++emitted;
+                            if (reached_total_cap()) { capped = true; break; }
+                        }
+                        if (count_total && !capped && p < N) {
+                            result.total_count += static_cast<size_t>(ac.id_set_total) - emitted;
+                            if (max_total_cap > 0 && result.total_count > max_total_cap)
+                                result.total_count = max_total_cap;
+                        }
+                        result.total_exact = !reached_limit() && !reached_total_cap();
+                        return result;
+                    }
                     std::vector<RevSpan> spans;
                     spans.reserve(ac.id_set.size());
                     for (int32_t id : ac.id_set) {

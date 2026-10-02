@@ -100,7 +100,8 @@ Environment for `pando`, `pando-server` and embedders: `PANDO_REV=auto|raw|packe
 (`auto`: `.rev` when present, otherwise `.rev.pfb`; `packed`: `.rev.pfb` whenever
 it is present and up to date) and `PANDO_REV_CACHE_MB` (cache of decoded long
 lists, default 256). `PANDO_HEADATTR=off`: dependency queries do not use head
-attributes.
+attributes. `PANDO_LEXICON_THREADS=N`: threads for the lexicon scan of a
+regex (default: the cores, at most 8; scans of 256K entries or more are split).
 
 ## `pando-check`
 

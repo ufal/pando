@@ -328,3 +328,10 @@ a:[upos="DET"] b:[upos="NOUN" & parent [deprel="obj"]]; count by b.lemma
 a:[upos="VERB"] > b:[deprel="obj"]; count by a.lemma, b.lemma
 a:[upos="VERB" & text_langcode!="en"] > b:[upos="NOUN"]; count by a.lemma
 [deprel="nsubj"] < [upos="VERB"] [upos="NOUN"]
+# P4.6: required literals with %c / (?i), dense id sets (first page from the token ids)
+[form=".*e.*"]
+[form=".*ung" %c]
+[form="(?i).*UNG"]
+[form="(?i).*kraft"]
+[lemma="(?i)th.*" & upos="NOUN"]
+[form="[A-Z].*"] [upos="NOUN"]
