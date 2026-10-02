@@ -101,6 +101,23 @@ for `--upgrade`:
   Saves disk space; queries then decode postings (see
   [Packed postings](Index-and-Corpus-Layout.md#packed-postings-revpfb)).
 
+**Versioned publishing (hot swap).** A corpus that a server keeps open is not
+rebuilt or upgraded in place: build next to it and switch — see
+[Index and corpus layout](Index-and-Corpus-Layout.md#versioned-index-directories-hot-swap).
+
+- `pando-index [options] <input> --publish ROOT` — instead of `<output_dir>`:
+  builds into `ROOT/versions/.building-<id>`, renames it to `ROOT/versions/<id>`
+  when it is complete, and points the symlink `ROOT/current` at it (atomically).
+  `--keep N` versions are kept (default 3; never the new or the previous one).
+- `pando-index --upgrade ROOT --publish [upgrade options]` — copies the current
+  version (keeping modification times), upgrades the copy, then switches.
+- `pando-index --upgrade ROOT/current …`, or a build into `ROOT/current` or
+  `ROOT`, is refused with the `--publish` command to use instead.
+- One publish per `ROOT` at a time (`ROOT/.publish.lock`); a failed or
+  interrupted publish leaves only a `.building-*` directory, removed by the next.
+
+Every build and every `--upgrade` writes a new `index_id=` to `corpus.info`.
+
 Environment for `pando`, `pando-server` and embedders: `PANDO_REV=auto|raw|packed`
 (`auto`: `.rev` when present, otherwise `.rev.pfb`; `packed`: `.rev.pfb` whenever
 it is present and up to date) and `PANDO_REV_CACHE_MB` (cache of decoded long
@@ -355,14 +372,24 @@ Every binary reports the same build identity: `pando --version`,
               "limit0_total", "bitmaps", "dep_pairs", "fold_index", "sentence_context", "version"],
  "started": "2026-09-27T17:45:52Z", "uptime_s": 3600, "corpus": "/data/pando/ud_demo",
  "threads": 8, "query_threads": 1, "pool": {"threads": 16, "started": 7, "busy": 0, "steps": 412,
- "helpers_wanted": 1210, "helpers_granted": 1187, "usable_cpus": 16}, "total_workers": 2}
+ "helpers_wanted": 1210, "helpers_granted": 1187, "usable_cpus": 16}, "total_workers": 2,
+ "index": {"index_id": "20261002T143421535Z-7e1d864b", "index_identity": "20261002T143421535Z-7e1d864b",
+           "index_dir": "/data/pando/ud_demo/versions/20261002T143421535Z-7e1d864b",
+           "published_root": "/data/pando/ud_demo", "current_version": "/data/pando/ud_demo/versions/…",
+           "newer_on_disk": false}}
 ```
 
 Clients should test `features` rather than probe for errors. `/info` (and
 `pando --json` `show info`) also has `result.pando` (the build answering) and
 `result.index`: `indexed_with` / `upgraded_with` (the pando-index build that
 built the index / last ran `--upgrade`, from `corpus.info`; `null` for older
-indexes) and the status of the derived files — `bitmaps`, `structure_bitmaps`,
+indexes), the identity fields of `/health` `index` (`index_id`; `index_identity`
+= `index_id`, or `info:<mtime>:<size>` of `corpus.info` for older indexes;
+`index_dir`, symlinks resolved; `published_root`, `current_version`;
+`newer_on_disk`: a newer version was published, or the directory rebuilt, since
+this one was opened), what the directory holds (`disk_bytes`,
+`bytes_per_token`, `attrs`: `dat` / `rev` as `plain`, `packed`, `both` or
+`none`; `head_attrs`; `dep_files`) and the status of the derived files — `bitmaps`, `structure_bitmaps`,
 `dep_pairs` (`ok`, `stale` = older than its source and ignored, `missing`),
 `dep_head_rel`, `fold_indexes`. A `stale` or `missing` entry means: run
 `pando-index --upgrade <corpus_dir>` with the current build.

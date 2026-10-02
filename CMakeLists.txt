@@ -145,6 +145,7 @@ add_library(pando_core STATIC
     src/index/bitmap_index.cpp
     src/index/packed_postings.cpp
     src/index/packed_dat.cpp
+    src/index/index_publish.cpp
     src/index/head_attr.cpp
     src/index/positional_attr.cpp
     src/index/structural_attr.cpp
@@ -369,6 +370,12 @@ if(BUILD_TESTING)
         add_test(NAME server_sessions
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/server_sessions_test.py
                 --server $<TARGET_FILE:pando-server> --pando-index $<TARGET_FILE:pando-index>
+                --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu)
+        # Versioned index directories: --publish, --upgrade --publish, index_id, hot-swap reporting
+        add_test(NAME publish
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/publish_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
+                --server $<TARGET_FILE:pando-server>
                 --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu)
     endif()
 endif()

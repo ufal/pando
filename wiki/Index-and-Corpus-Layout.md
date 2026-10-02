@@ -90,6 +90,31 @@ unchanged. Worth it when the corpus would otherwise not fit in memory (the
 `.dat` of form and lemma are 8 GB per billion tokens, packed about 5 GB): a
 token read from disk costs far more than its decoding.
 
+## Versioned index directories (hot swap)
+
+A corpus that servers keep open is published in versions, so a new build or
+upgrade never touches files a server has mapped:
+
+```
+ROOT/
+  current -> versions/<id>     relative symlink, replaced atomically (rename)
+  versions/<id>/               a complete index; corpus.info index_id=<id>
+  versions/.building-<id>/     a publish in progress
+  .publish.lock                one publish per ROOT at a time
+```
+
+`pando-index <input> --publish ROOT` builds a new version,
+`pando-index --upgrade ROOT --publish …` upgrades a copy of the current one
+(modification times kept, so the staleness checks still hold); both switch
+`current` only once the new version is complete, and keep the newest `--keep`
+versions (default 3). The symlink is relative, so `ROOT` can be mounted at a
+different path on each machine (shared storage, local copies). Servers and
+hosts open `ROOT/current`; a handle keeps the version it opened (symlinks are
+resolved at open) until the host swaps it — see
+[Embedding the server](Embedding-the-Server.md) ("hot swap"). Every build and
+every `--upgrade` writes a new `index_id=` to `corpus.info`, so hosts can tell
+versions apart also for unpublished directories.
+
 ## Further reading
 
 - [Multivalue attributes](Multivalue-Attributes.md) — multivalue **`.mv.*`** indexes vs **KV pipe** `feats` (combined vs split columns)

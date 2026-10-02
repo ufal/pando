@@ -79,6 +79,11 @@ std::string to_info_json(const Corpus& corpus, std::string_view operation = "inf
 // (no braces). Status per file: "ok", "stale" (present but older than its source or
 // inconsistent → ignored; run `pando-index --upgrade`) or "missing".
 std::string index_status_json_fields(const Corpus& corpus);
+/// `"index_id", "index_identity", "index_dir", "published_root", "current_version",
+/// "newer_on_disk"` (no braces): which version this corpus has open, and whether a
+/// newer one has been published (or the directory rebuilt) since — for hosts that
+/// hot-swap (/health "index", /info "index").
+std::string index_identity_json_fields(const Corpus& corpus);
 
 // Build JSON string listing unique values + counts for a positional or region attribute.
 // Returns empty string if attribute not found.

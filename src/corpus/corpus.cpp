@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <list>
 #include <filesystem>
+#include <sys/stat.h>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -78,6 +79,8 @@ static CorpusInfo read_info(const std::string& path) {
             info.indexed_with = val;
         } else if (key == "upgraded_with") {
             info.upgraded_with = val;
+        } else if (key == "index_id") {
+            info.index_id = val;
         } else if (key == "token_groups") {
             std::istringstream ss(val);
             std::string tok;
@@ -143,12 +146,20 @@ bool overlay_attr_is_kv_pipe(const CorpusInfo& oi, const std::string& name) {
 
 } // namespace
 
-void Corpus::open(const std::string& dir, bool preload,
+void Corpus::open(const std::string& dir_given, bool preload,
                   const std::vector<std::string>& overlay_dirs) {
     group_index_path_override_.clear();
     id_sets_ = std::make_shared<IdSetCache>();   // ids are per index: a fresh cache per open
-    dir_ = dir;
-    info_ = read_info(dir + "/corpus.info");
+    opened_as_ = dir_given;
+    {
+        // resolve symlinks once (ROOT/current -> versions/<id>): every file this
+        // corpus opens later, lazily too, comes from the same version
+        std::error_code ec;
+        const std::filesystem::path canon = std::filesystem::canonical(dir_given, ec);
+        dir_ = ec ? dir_given : canon.string();
+    }
+    const std::string& dir = dir_;
+    info_ = read_info(dir_ + "/corpus.info");
 
     std::unordered_set<std::string> pos_seen;
     for (const auto& name : info_.positional_attrs) pos_seen.insert(name);
@@ -484,6 +495,25 @@ bool Corpus::is_kv_pipe(const std::string& name) const {
     for (const auto& s : info_.kv_pipe_attrs)
         if (bare == s) return true;
     return false;
+}
+
+std::string Corpus::index_identity() const {
+    if (!info_.index_id.empty()) return info_.index_id;
+    struct stat st;
+    if (::stat((dir_ + "/corpus.info").c_str(), &st) != 0) return "";
+    return "info:" + std::to_string(static_cast<long long>(st.st_mtime)) + ":"
+        + std::to_string(static_cast<long long>(st.st_size));
+}
+
+std::string Corpus::display_name() const {
+    namespace fs = std::filesystem;
+    fs::path p(opened_as_.empty() ? dir_ : opened_as_);
+    while (!p.empty() && p.filename().empty()) p = p.parent_path();   // trailing '/'
+    if (p.filename() == "current") p = p.parent_path();
+    else if (p.parent_path().filename() == "versions") p = p.parent_path().parent_path();
+    std::string name = p.filename().string();
+    if (name.size() > 4 && name.compare(name.size() - 4, 4, "_idx") == 0) name.resize(name.size() - 4);
+    return name;
 }
 
 } // namespace pando

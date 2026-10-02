@@ -3175,12 +3175,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
             }
             if (stmt.command.type == CommandType::SHOW_INFO) {
                 // Extract corpus name from directory path
-                std::string name = corpus.dir();
-                if (!name.empty() && name.back() == '/') name.pop_back();
-                auto slash = name.rfind('/');
-                if (slash != std::string::npos) name = name.substr(slash + 1);
-                // Strip _idx suffix if present
-                if (name.size() > 4 && name.substr(name.size() - 4) == "_idx") name = name.substr(0, name.size() - 4);
+                std::string name = corpus.display_name();
 
                 if (opts.json) {
                     std::cout << to_info_json(corpus, "show_info");

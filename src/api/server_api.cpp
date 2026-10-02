@@ -324,7 +324,8 @@ std::string ServerApi::server_fields() const {
     features_json += "]";
     std::string s = build_json_fields() + ", \"build_string\": " + jstr(build_string())
         + ", \"features\": " + features_json + ", \"started\": \"" + started_iso_ + "\""
-        + ", \"uptime_s\": " + ups + ", \"corpus\": " + jstr(corpus_.dir())
+        + ", \"uptime_s\": " + ups + ", \"corpus\": " + jstr(corpus_.opened_as())
+        + ", \"index\": {" + index_identity_json_fields(corpus_) + "}"
         + ", \"threads\": " + std::to_string(cfg_.threads)
         + ", \"query_threads\": " + std::to_string(std::max(1u, cfg_.query_threads))
         + ", \"pool\": " + WorkerPool::global().stats_json()

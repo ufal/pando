@@ -96,6 +96,29 @@ get 404 `unknown_session` and start again, which the session contract allows. A 
 that evicts idle corpora may want to keep a handle whose `GET /sessions` still lists
 recently used sessions.
 
+**Swapping a corpus for a new version (hot swap).** Publish new versions with
+`pando-index … --publish ROOT` (or `--upgrade ROOT --publish`) and open
+`ROOT/current`. A handle resolves the symlink when it opens and reads only
+that version from then on, also for files it opens later; `ROOT/current` moving
+on does not affect it. To swap, make before break:
+
+1. notice the new version: `/health` `index.newer_on_disk` turns `true` (or
+   compare `index.index_id` with `corpus.info` `index_id` of `ROOT/current`, or
+   act on the end of your own reindex job);
+2. open a second handle on `ROOT/current`, with `"warm": "hot"` (and wait for
+   `GET /warm` `state: done` if the first queries should not read the disk);
+3. send new requests to the new handle;
+4. close the old one as for eviction: no request holds it and `busy() == 0`.
+
+Sessions, job ids and cached results belong to a handle, so they end with the
+old one (clients get 404 `unknown_session` / `unknown job` and re-run, which then
+sees the new data). Close old handles within `--keep` publishes: the files of a
+pruned version stay readable while mapped, but one the handle has not opened yet
+would be missing. Never rebuild or `--upgrade` a directory a handle has open:
+files are memory-mapped and some opened on first use, so an in-place change
+mixes versions or, for a truncated file, crashes the process (SIGBUS) —
+`pando-index` refuses that for published roots.
+
 **What "warm" means for pando.** Opening is cheap: the index is `mmap`ed lazily, and
 on ud_demo (38 M tokens) a whole CLI run with a warm page cache takes about 4 ms. The
 speed of a warm corpus is in the OS page cache, which a handle neither holds nor frees.

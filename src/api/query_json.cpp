@@ -1,4 +1,5 @@
 #include "api/query_json.h"
+#include "index/index_publish.h"
 #include "core/json_utils.h"
 #include "core/build_info.h"
 #include "query/parser.h"
@@ -75,15 +76,7 @@ std::vector<std::pair<std::string, size_t>> region_attr_show_values_mv(const Str
 
 namespace {
 
-std::string corpus_json_name(const Corpus& corpus) {
-    std::string name = corpus.dir();
-    if (!name.empty() && name.back() == '/') name.pop_back();
-    auto slash = name.rfind('/');
-    if (slash != std::string::npos) name = name.substr(slash + 1);
-    if (name.size() > 4 && name.substr(name.size() - 4) == "_idx")
-        name.resize(name.size() - 4);
-    return name;
-}
+std::string corpus_json_name(const Corpus& corpus) { return corpus.display_name(); }
 
 size_t region_attr_vocab(const Corpus& corpus,
                          const StructuralAttr& sa,
@@ -320,6 +313,25 @@ std::string to_info_json(const Corpus& corpus, std::string_view operation,
     return out.str();
 }
 
+std::string index_identity_json_fields(const Corpus& corpus) {
+    auto opt_str = [](const std::string& v) { return v.empty() ? std::string("null") : jstr(v); };
+    const std::string root = IndexPublish::root_of(corpus.dir());
+    std::string current;
+    bool is_current = true;
+    if (!root.empty()) {
+        current = IndexPublish::current_version(root);
+        is_current = current == corpus.dir();
+    }
+    // on disk now (a rebuild in place, or a newer published version, changes it)
+    const std::string disk_id = IndexPublish::read_index_id(root.empty() ? corpus.dir() : current);
+    const std::string id = corpus.info().index_id;
+    const bool changed = !root.empty() ? !is_current : (!id.empty() && disk_id != id);
+    return "\"index_id\": " + opt_str(id) + ", \"index_identity\": " + jstr(corpus.index_identity())
+        + ", \"index_dir\": " + jstr(corpus.dir()) + ", \"published_root\": " + opt_str(root)
+        + ", \"current_version\": " + opt_str(current)
+        + ", \"newer_on_disk\": " + (changed ? "true" : "false");
+}
+
 std::string index_status_json_fields(const Corpus& corpus) {
     namespace fs = std::filesystem;
     std::ostringstream out;
@@ -329,6 +341,46 @@ std::string index_status_json_fields(const Corpus& corpus) {
         << ", \"upgraded_with\": " << opt_str(ci.upgraded_with);
     std::error_code ec;
     auto exists = [&](const std::string& p) { return fs::exists(p, ec); };
+    out << ", " << index_identity_json_fields(corpus);
+
+    // what the directory holds (index profile): plain / packed forms, sizes
+    {
+        uint64_t bytes = 0;
+        for (const auto& e : fs::directory_iterator(corpus.dir(), ec)) {
+            std::error_code ec2;
+            if (e.is_regular_file(ec2)) bytes += e.file_size(ec2);
+        }
+        char bpt[32];
+        std::snprintf(bpt, sizeof bpt, "%.1f",
+                      corpus.size() > 0 ? static_cast<double>(bytes) / static_cast<double>(corpus.size()) : 0.0);
+        out << ", \"disk_bytes\": " << bytes << ", \"bytes_per_token\": " << bpt;
+        auto form = [&](const std::string& base, const char* plain, const char* packed) -> const char* {
+            const bool p = exists(base + plain), k = exists(base + packed);
+            return p && k ? "both" : p ? "plain" : k ? "packed" : "none";
+        };
+        out << ", \"attrs\": [";
+        bool f = true;
+        for (const auto& name : corpus.attr_names()) {
+            const std::string base = corpus.dir() + "/" + name;
+            out << (f ? "" : ", ") << "{\"attr\": " << jstr(name) << ", \"dat\": \"" << form(base, ".dat", ".dat.pk")
+                << "\", \"rev\": \"" << form(base, ".rev", ".rev.pfb") << "\"}";
+            f = false;
+        }
+        out << "], \"head_attrs\": [";
+        f = true;
+        for (const auto& a : ci.head_attrs) {
+            out << (f ? "" : ", ") << jstr(a);
+            f = false;
+        }
+        out << "], \"dep_files\": [";
+        f = true;
+        for (const char* d : {"dep.head", "dep.head_rel", "dep.head_rel8", "dep.euler_in", "dep.euler_out"})
+            if (exists(corpus.dir() + "/" + d)) {
+                out << (f ? "" : ", ") << jstr(d);
+                f = false;
+            }
+        out << "]";
+    }
 
     // attribute bitmaps: the --bitmaps auto candidates plus any attribute with a .bm file
     out << ", \"bitmaps\": [";

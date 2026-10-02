@@ -8,12 +8,14 @@
 #include "index/bitmap_index.h"
 #include "corpus/corpus.h"
 #include "core/build_info.h"
+#include "index/index_publish.h"
 #include <chrono>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <memory>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -360,12 +362,14 @@ static void record_upgrade(const std::string& dir) {
     if (!in) return;
     std::vector<std::string> lines;
     for (std::string line; std::getline(in, line);)
-        if (line.rfind("upgraded_with=", 0) != 0) lines.push_back(line);
+        if (line.rfind("upgraded_with=", 0) != 0 && line.rfind("index_id=", 0) != 0) lines.push_back(line);
     in.close();
     char ts[32];
     const std::time_t now = std::time(nullptr);
     std::strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&now));
     lines.push_back("upgraded_with=" + pando::build_string() + " " + ts);
+    // a new identity: the files may have changed (hosts reopen on a new index_id)
+    lines.push_back("index_id=" + pando::IndexPublish::new_index_id());
     {
         std::ofstream out(tmp);
         if (!out) return;
@@ -575,6 +579,31 @@ static int upgrade_index(const std::string& dir, bool quiet = false,
     return 0;
 }
 
+// In-place changes to a published version (or its root) would rewrite files a
+// server may have open: refuse, and say what to do instead.
+static bool refuse_published_in_place(const std::string& dir, bool upgrade) {
+    std::string root;
+    if (pando::IndexPublish::is_root(dir)) root = dir;
+    else root = pando::IndexPublish::root_of(dir);
+    if (root.empty()) return false;
+    std::cerr << "Error: " << dir << " is " << (root == dir ? "a published corpus root" : "a published version of " + root)
+              << "; a server may have it open, so it is not changed in place.\n"
+              << (upgrade ? "  Use: pando-index --upgrade " + root + " --publish [options]  (upgrades a copy, then switches)\n"
+                          : "  Use: pando-index [options] <input> --publish " + root + "  (builds a new version, then switches)\n");
+    return true;
+}
+
+static int report_publish(pando::IndexPublish::Session& pub, int keep) {
+    std::vector<std::string> removed;
+    if (!pub.commit(keep, &removed)) {
+        std::cerr << "Error: publish failed: " << pub.error() << "\n";
+        return 1;
+    }
+    std::cerr << "Published version " << pub.id() << " (current -> versions/" << pub.id() << ")\n";
+    for (const auto& r : removed) std::cerr << "Removed old version " << r << "\n";
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
     if (argc == 2 && (std::string(argv[1]) == "--version" || std::string(argv[1]) == "-V")) {
         std::cout << "pando-index " << pando::build_string() << "\n";
@@ -589,8 +618,12 @@ int main(int argc, char* argv[]) {
         bool compact_deps = false;
         std::string packed_dat = "none";
         bool drop_dat = false;
+        bool publish = false;
+        int keep = 3;
         for (int i = 3; i < argc; ++i) {
             const std::string a = argv[i];
+            if (a == "--publish") { publish = true; continue; }
+            if (a == "--keep" && i + 1 < argc) { keep = std::atoi(argv[++i]); continue; }
             if (a == "--packed-rev" && i + 1 < argc && argv[i + 1][0] != '-') { packed = argv[++i]; continue; }
             if (a == "--packed-rev") { packed = "auto"; continue; }
             if (a.rfind("--packed-rev=", 0) == 0) { packed = a.substr(13); continue; }
@@ -613,6 +646,33 @@ int main(int argc, char* argv[]) {
         }
         if (drop_rev && packed == "none") packed = "auto";
         if (drop_dat && packed_dat == "none") packed_dat = "auto";
+        if (publish) {
+            // a copy of ROOT/current is upgraded, then becomes the current version
+            std::string root = argv[2];
+            if (!pando::IndexPublish::is_root(root)) {
+                const std::string r = pando::IndexPublish::root_of(root);
+                if (r.empty()) {
+                    std::cerr << "Error: " << root << " is not a published corpus root (ROOT/current, ROOT/versions/)\n";
+                    return 1;
+                }
+                root = r;
+            }
+            pando::IndexPublish::Session pub(root);
+            if (!pub.ok()) {
+                std::cerr << "Error: " << pub.error() << "\n";
+                return 1;
+            }
+            std::cerr << "Copying " << pando::IndexPublish::current_version(root) << " to " << pub.building_dir() << "\n";
+            if (!pub.copy_current()) {
+                std::cerr << "Error: " << pub.error() << "\n";
+                return 1;
+            }
+            if (upgrade_index(pub.building_dir(), false, pairs, bitmaps, packed, drop_rev, head_attrs, compact_deps,
+                              packed_dat, drop_dat) != 0)
+                return 1;
+            return report_publish(pub, keep);
+        }
+        if (refuse_published_in_place(argv[2], true)) return 1;
         return upgrade_index(argv[2], false, pairs, bitmaps, packed, drop_rev, head_attrs, compact_deps,
                              packed_dat, drop_dat);
     }
@@ -622,6 +682,8 @@ int main(int argc, char* argv[]) {
     bool overlay_index = false;
     std::string index_dir;
     std::string build_head_attrs = kDefaultHeadAttrs;
+    std::string publish_root;
+    int keep = 3;
 
     // Collect flags
     std::vector<std::string> args;
@@ -632,6 +694,8 @@ int main(int argc, char* argv[]) {
         else if (a == "--head-attrs" && i + 1 < argc) build_head_attrs = argv[++i];
         else if (a.rfind("--head-attrs=", 0) == 0) build_head_attrs = a.substr(13);
         else if (a == "--index-dir" && i + 1 < argc) index_dir = argv[++i];
+        else if (a == "--publish" && i + 1 < argc) publish_root = argv[++i];
+        else if (a == "--keep" && i + 1 < argc) keep = std::atoi(argv[++i]);
         else if (a == "--format" && i + 1 < argc) {
             std::string fmt = argv[++i];
             if (fmt == "vertical") format_vertical = true;
@@ -648,7 +712,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (args.size() < 2) {
+    if (args.size() < (publish_root.empty() ? 2u : 1u)) {
         std::cerr << "Usage: pando-index [options] <input> <output_dir>\n\n"
                   << "  input: .conllu file(s), directory (recursive), or '-' for JSONL stdin;\n"
                   << "         with --format vertical: .vrt/.vert/.txt files;\n"
@@ -665,6 +729,10 @@ int main(int argc, char* argv[]) {
                   << "                    output_dir (no full corpus). Requires --format jsonl and\n"
                   << "                    --index-dir <main_corpus_dir> (must contain corpus.info).\n"
                   << "  --index-dir       Main indexed corpus directory (for overlay size / stamp)\n"
+                  << "  --publish ROOT    instead of <output_dir>: build into ROOT/versions/<id>, then point\n"
+                  << "                    ROOT/current at it (servers hot-swap; nothing is rewritten in place)\n"
+                  << "  --keep N          with --publish: versions kept (default 3; the current and the\n"
+                  << "                    previous one always)\n"
                   << "\n  pando-index --upgrade <corpus_dir>\n"
                   << "                    Add derived files to an existing index\n"
                   << "                    (dep.head_rel, <attr>.fold_*.perm for %c/%d,\n"
@@ -689,12 +757,30 @@ int main(int argc, char* argv[]) {
                   << "    --drop-dat      remove the plain <attr>.dat once its packed ids are verified\n"
                   << "                    (implies --packed-dat auto)\n"
                   << "    --compact-deps  remove dep.head and dep.head_rel once dep.head_rel8 (1 byte\n"
-                  << "                    per token, always written) is verified to give the same heads\n";
+                  << "                    per token, always written) is verified to give the same heads\n"
+                  << "    --publish       <corpus_dir> is a published root: upgrade a copy of its current\n"
+                  << "                    version, then switch current to it (--keep N as for builds)\n";
         return 1;
     }
 
     std::string input_path = args[0];
-    std::string output_dir = args[1];
+    std::string output_dir = publish_root.empty() ? args[1] : std::string();
+    if (!publish_root.empty() && args.size() > 1) {
+        std::cerr << "Error: --publish ROOT replaces <output_dir>\n";
+        return 1;
+    }
+    std::unique_ptr<pando::IndexPublish::Session> pub;
+    if (!publish_root.empty()) {
+        pub = std::make_unique<pando::IndexPublish::Session>(publish_root);
+        if (!pub->ok()) {
+            std::cerr << "Error: " << pub->error() << "\n";
+            return 1;
+        }
+        output_dir = pub->building_dir();
+        std::cerr << "Building version " << pub->id() << " in " << output_dir << "\n";
+    } else if (!overlay_index && refuse_published_in_place(output_dir, false)) {
+        return 1;
+    }
 
     if (overlay_index && !format_jsonl) {
         std::cerr << "Error: --overlay-index requires --format jsonl\n";
@@ -775,6 +861,7 @@ int main(int argc, char* argv[]) {
         builder.finalize();
         if (upgrade_index(output_dir, false, kDefaultDepPairs, kDefaultBitmaps, "none", false, build_head_attrs) != 0)
             return 1;
+        if (pub) return report_publish(*pub, keep);
 
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";

@@ -45,6 +45,9 @@ struct CorpusInfo {
     // (build_string(); empty for indexes from before this was recorded).
     std::string indexed_with;
     std::string upgraded_with;
+    // A new id for every build and every --upgrade (IndexPublish): hosts compare
+    // it to notice that the corpus changed. Empty for older indexes.
+    std::string index_id;
 };
 
 // Phase A: in-memory representation of one record from `groups/<struct>.jsonl`.
@@ -127,7 +130,16 @@ public:
     bool has_deps() const { return has_deps_; }
     const DependencyIndex& deps() const { return deps_; }
 
+    /// The index directory, symlinks resolved at open (a corpus opened through
+    /// ROOT/current keeps reading that version when `current` moves on).
     const std::string& dir() const { return dir_; }
+    /// The path open() was given (before resolving symlinks).
+    const std::string& opened_as() const { return opened_as_; }
+    /// corpus.info index_id, or for older indexes `info:<mtime>:<size>` of corpus.info.
+    std::string index_identity() const;
+    /// Name for /info and `show info`: the directory's name without `_idx`; for
+    /// a published root (ROOT/current, ROOT/versions/<id>) the root's name.
+    std::string display_name() const;
     const CorpusInfo& info() const { return info_; }
 
     /// Regex id sets — the lexicon ids a pattern matches — shared by every query
@@ -140,6 +152,7 @@ public:
 
 private:
     std::string dir_;
+    std::string opened_as_;
     std::vector<std::string> head_attr_names_;
     CorpusInfo info_;
     std::unordered_map<std::string, std::unique_ptr<PositionalAttr>> attrs_;
