@@ -152,6 +152,11 @@ private:
     FILE* dep_euler_in_file_ = nullptr;
     FILE* dep_euler_out_file_ = nullptr;
     CorpusPos dep_written_ = 0;
+    // Dependency input that cannot be stored (reported once by finalize()):
+    uint64_t dep_bad_heads_ = 0;            // head index outside its sentence: stored as root
+    uint64_t dep_long_sentences_ = 0;       // sentences too long for int16 tree offsets: stored without deps
+    uint64_t dep_long_sentence_tokens_ = 0;
+    int dep_longest_sentence_ = 0;
 
     // Sentence region file (streamed)
     FILE* sent_rgn_file_ = nullptr;

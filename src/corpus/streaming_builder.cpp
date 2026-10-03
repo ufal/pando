@@ -371,6 +371,19 @@ void StreamingBuilder::end_sentence(
     for (const auto& t : sent_buf_)
         if (t.sentence_head_id >= 0) { any_deps = true; break; }
 
+    // Tree offsets and Euler timestamps are int16 (two ticks per token), so a
+    // sentence over kMaxDepSentence tokens cannot hold a tree. Such a "sentence" is
+    // a missing sentence segmentation (a whole document or corpus), not syntax:
+    // store it without dependencies instead of overflowing the indexes.
+    constexpr int kMaxDepSentence = 16383;
+    if (any_deps && sent_len > kMaxDepSentence) {
+        any_deps = false;
+        ++dep_long_sentences_;
+        dep_long_sentence_tokens_ += static_cast<uint64_t>(sent_len);
+        dep_longest_sentence_ = std::max(dep_longest_sentence_, sent_len);
+        if (!dep_head_file_) open_dep_files();   // placeholders below keep dep.* aligned
+    }
+
     if (any_deps) {
         has_deps_ = true;
         if (!dep_head_file_) open_dep_files();
@@ -379,6 +392,14 @@ void StreamingBuilder::end_sentence(
         std::vector<int16_t> heads(sent_len);
         for (int i = 0; i < sent_len; ++i) {
             int h = sent_buf_[i].sentence_head_id;
+            // 1-based within the sentence, 0 = root, -1 = no dependency info (kept:
+            // stored as -2, neither root nor attached). A head outside the sentence
+            // (CoNLL-style numbers against a different sentence split, a document-wide
+            // number) has no position here: keep the token as a root, count it.
+            if (h > sent_len || h < -1) {
+                ++dep_bad_heads_;
+                h = 0;
+            }
             heads[i] = (h == 0) ? int16_t(-1) : static_cast<int16_t>(h - 1);
         }
 
@@ -743,6 +764,16 @@ void StreamingBuilder::finalize() {
     // Auto-close last sentence
     if (!sent_buf_.empty())
         end_sentence();
+
+    if (dep_bad_heads_)
+        std::cerr << "Warning: " << dep_bad_heads_ << " token(s) have a head outside their sentence; "
+                     "stored as roots. Numeric heads (CoNLL-U style) count within the sentence: check "
+                     "that the sentence regions match the ones the heads were numbered in.\n";
+    if (dep_long_sentences_)
+        std::cerr << "Warning: " << dep_long_sentences_ << " sentence(s) with dependencies are longer than "
+                  << 16383 << " tokens (" << dep_long_sentence_tokens_ << " tokens, longest "
+                  << dep_longest_sentence_ << "); stored without dependencies. Usually the input has no "
+                     "sentence regions (JSONL v2: struct \"s\"), so a whole document became one sentence.\n";
 
     // Close streaming files
     for (auto& [name, state] : attrs_) {
