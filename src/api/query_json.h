@@ -22,6 +22,12 @@ struct QueryOptions {
     /// When true, left/right context expands to enclosing sentence structure ``s``
     /// (falls back to ``context`` token window if no ``s`` region covers the match).
     bool sentence  = false;
+    /// Each hit also gets `"fragment"`: its context as TEITOK-style XML
+    /// (`<s id="s-N"><tok id="w-P" lemma=… head="w-H">form</tok> …</s>`), its
+    /// tokens an `"id"` (w-P) and `"group"` (query token), and a `"highlight_map"`
+    /// with the matched ids by query token — for front-ends that render tokens
+    /// (TEITOK) on corpora without XML files of their own.
+    bool fragment  = false;
     std::vector<std::string> attrs;  // empty = all token attributes in JSON; else only these
     /// When true: only `/pattern/` is regex; quoted strings are literal (matches `--strict-quoted-strings` on CLI).
     bool strict_quoted_strings = false;

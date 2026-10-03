@@ -672,6 +672,7 @@ ServerResponse ServerApi::query(const std::string& body) {
     opts.context   = static_cast<int>(json_extract_num(body, "context", 5));
     opts.debug     = json_extract_bool(body, "debug", false);
     opts.sentence  = json_extract_bool(body, "sentence", false);
+    opts.fragment  = json_extract_bool(body, "fragment", false);
     opts.strict_quoted_strings = json_extract_bool(body, "strict_quoted_strings", false);
     opts.sample    = json_extract_num(body, "sample", 0);
     opts.shuffle   = json_extract_bool(body, "shuffle", false);

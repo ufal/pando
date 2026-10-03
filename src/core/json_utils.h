@@ -232,6 +232,32 @@ inline bool match_is_full_sentence_span(const Corpus& corpus, const Match& m) {
     return sr.start == first && sr.end == last;
 }
 
+/// The positions a hit's context covers: `ctx_width` tokens around the match,
+/// or (`sentence`) the enclosing ``s`` region(s).
+inline void context_bounds(const Corpus& corpus, const Match& m, int ctx_width, bool sentence,
+                           CorpusPos& left_start, CorpusPos& right_end) {
+    const CorpusPos first = m.first_pos();
+    const CorpusPos last  = m.last_pos();
+    left_start = std::max(CorpusPos(0), first - ctx_width);
+    right_end = std::min(corpus.size() - 1, last + ctx_width);
+    if (sentence && corpus.has_structure("s")) {
+        const auto& s = corpus.structure("s");
+        int64_t ri_first = s.find_region(first);
+        int64_t ri_last = s.find_region(last);
+        if (ri_first >= 0) {
+            Region sr = s.get(static_cast<size_t>(ri_first));
+            left_start = sr.start;
+            right_end = sr.end;
+        }
+        if (ri_last >= 0 && ri_last != ri_first) {
+            Region sr2 = s.get(static_cast<size_t>(ri_last));
+            right_end = sr2.end;
+            if (ri_first < 0)
+                left_start = sr2.start;
+        }
+    }
+}
+
 inline KwicContext build_context(const Corpus& corpus, const Match& m, int ctx_width,
                                  bool sentence = false) {
     const auto& form = corpus.attr("form");

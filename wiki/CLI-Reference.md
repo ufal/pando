@@ -226,7 +226,7 @@ default 2^20 tokens) override, for tests. `--timing` reports the ranges as
 
 | Endpoint | Role |
 | --- | --- |
-| `POST /query` | One query: `query`, `limit`, `offset`, `total`, `max_total`, `context`, `sentence`, `attrs`, `debug`, `strict_quoted_strings` |
+| `POST /query` | One query: `query`, `limit`, `offset`, `total`, `max_total`, `context`, `sentence`, `attrs`, `fragment`, `debug`, `strict_quoted_strings` (see "Token fragments" below) |
 | `GET /status?job=ID` | State of a background total (404 once it has expired: re-send the `/query`) |
 | `POST /cancel?job=ID` | Stop a queued / running count (send a body, even `{}`, or `Content-Length: 0`) |
 | `GET /jobs` | All cached results and running counts |
@@ -238,6 +238,27 @@ default 2^20 tokens) override, for tests. `--timing` reports the ranges as
 | `GET /sessions` | Open sessions, their memory, the budget |
 | `POST /warm`, `GET /warm` | Start reading the hot (`{"level": "hot"}`, default) or all (`"all"`) index files into the page cache in the background, e.g. when a front-end selects the corpus; the warm-up status. `GET /warm?residency=hot\|all` adds `"residency"`: `bytes`, `resident_bytes`, `resident` (share) of those files in the page cache now (mincore; on demand only) |
 | `GET /info`, `/values/ATTR`, `/regions/TYPE`, `/context?pos=`, `/health` | Corpus description, values, regions, KWIC context |
+
+### Token fragments (`"fragment": true`)
+
+For front-ends that render tokens (TEITOK's flexicorp interface) on corpora
+without XML files of their own — an index built straight from CoNLL-U — each
+hit of a `/query` with `"fragment": true` also carries:
+
+- `fragment`: its context (the `context` window, or the sentence with
+  `"sentence": true`) as TEITOK-style XML,
+  `<s id="s-12"><tok id="w-301" lemma="…" upos="…" deprel="nsubj" head="w-303">form</tok> …</s>`
+  — every positional attribute in `attrs` (default all) as an attribute,
+  `head` as the head's token id, sentences as `<s>`;
+- token ids on `tokens[]` (`"id": "w-<position + 1>"`, or the corpus' own `id`
+  attribute when it has one) and `"group"`: the query token;
+- `highlight_map` (flexicorp's highlight contract): `default.tok_ids` / `match`
+  with the matched ids, and `groups` per query token (its label, e.g. `v:`, else
+  `t1`, `t2`, …) when the query has more than one;
+- and the result a `legend` of those groups, so a UI colours each query token.
+
+FQS passes `"fragment": true` through (and TEITOK sends it for projects
+without `xmlfiles/`, where it also shows sentences by default).
 
 ### Counts by several fields (`count by A, B`)
 

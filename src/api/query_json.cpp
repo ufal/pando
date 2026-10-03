@@ -6,6 +6,7 @@
 #include "index/bitmap_index.h"
 #include "index/dep_pair_index.h"
 #include "index/fold_index.h"
+#include <cctype>
 #include <filesystem>
 #include <sstream>
 #include <chrono>
@@ -77,6 +78,78 @@ std::vector<std::pair<std::string, size_t>> region_attr_show_values_mv(const Str
 namespace {
 
 std::string corpus_json_name(const Corpus& corpus) { return corpus.display_name(); }
+
+std::string xml_esc(std::string_view v) {
+    std::string o;
+    o.reserve(v.size() + 8);
+    for (char c : v) {
+        switch (c) {
+            case '&': o += "&amp;"; break;
+            case '<': o += "&lt;"; break;
+            case '>': o += "&gt;"; break;
+            case '"': o += "&quot;"; break;
+            default: o += c;
+        }
+    }
+    return o;
+}
+
+bool xml_name_ok(const std::string& n) {
+    if (n.empty() || !(std::isalpha(static_cast<unsigned char>(n[0])) || n[0] == '_')) return false;
+    for (char c : n)
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' || c == '.')) return false;
+    return true;
+}
+
+/// Token id for the fragment / highlight map: the corpus' own `id` attribute
+/// when it has one (TEITOK xml:ids), else `w-<position + 1>`.
+std::string fragment_tok_id(const Corpus& corpus, CorpusPos p) {
+    if (corpus.has_attr("id")) {
+        std::string_view v = corpus.attr("id").value_at(p);
+        if (!v.empty() && v != "_") return std::string(v);
+    }
+    return "w-" + std::to_string(p + 1);
+}
+
+/// The context [lo, hi] as TEITOK-style XML: `<s id="s-N">` around sentence
+/// parts, `<tok id=… attr=… head=…>form</tok>`, tokens separated by spaces.
+std::string build_fragment(const Corpus& corpus, CorpusPos lo, CorpusPos hi,
+                           const std::vector<std::string>& attr_names) {
+    const auto& form = corpus.attr("form");
+    const StructuralAttr* s = corpus.has_structure("s") ? &corpus.structure("s") : nullptr;
+    std::vector<std::pair<std::string, const PositionalAttr*>> attrs;
+    for (const auto& a : attr_names) {
+        if (a == "form" || a == "id" || !corpus.has_attr(a) || Corpus::is_internal_attr_name(a) || !xml_name_ok(a))
+            continue;
+        attrs.emplace_back(a, &corpus.attr(a));
+    }
+    std::string out;
+    int64_t open_s = -1;
+    for (CorpusPos p = lo; p <= hi; ++p) {
+        const int64_t ri = s ? s->find_region(p) : -1;
+        if (ri != open_s) {
+            if (open_s >= 0) out += "</s>";
+            if (!out.empty()) out += ' ';
+            if (ri >= 0) out += "<s id=\"s-" + std::to_string(ri + 1) + "\">";
+            open_s = ri;
+        } else if (p > lo) {
+            out += ' ';
+        }
+        out += "<tok id=\"" + xml_esc(fragment_tok_id(corpus, p)) + "\"";
+        for (const auto& [name, pa] : attrs) {
+            std::string_view v = pa->value_at(p);
+            if (v.empty() || v == "_") continue;
+            out += ' ' + name + "=\"" + xml_esc(v) + "\"";
+        }
+        if (corpus.has_deps()) {
+            const CorpusPos h = corpus.deps().head(p);
+            if (h != NO_HEAD && h >= 0) out += " head=\"" + xml_esc(fragment_tok_id(corpus, h)) + "\"";
+        }
+        out += '>' + xml_esc(form.value_at(p)) + "</tok>";
+    }
+    if (open_s >= 0) out += "</s>";
+    return out;
+}
 
 size_t region_attr_vocab(const Corpus& corpus,
                          const StructuralAttr& sa,
@@ -161,6 +234,23 @@ std::string to_query_result_json(const Corpus& corpus,
         << ", \"total_exact\": " << (ms.total_exact ? "true" : "false") << "},\n";
     out << "    \"hits\": [\n";
 
+    // fragment mode: highlight groups are the query's tokens (their labels, else t1, t2, …)
+    std::vector<std::string> group_names;
+    if (opts.fragment) {
+        try {
+            Parser parser(query_text, ParserOptions{opts.strict_quoted_strings});
+            Program prog = parser.parse();
+            if (!prog.empty() && prog[0].has_query)
+                for (size_t t = 0; t < prog[0].query.tokens.size(); ++t)
+                    group_names.push_back(prog[0].query.tokens[t].name.empty() ? "t" + std::to_string(t + 1)
+                                                                               : prog[0].query.tokens[t].name);
+        } catch (const std::exception&) {
+        }
+    }
+    auto group_name = [&](size_t t) {
+        return t < group_names.size() ? group_names[t] : "t" + std::to_string(t + 1);
+    };
+
     for (size_t i = start; i < end; ++i) {
         const auto& m = ms.matches[i - matches_offset];
         CorpusPos match_start = m.first_pos();
@@ -196,6 +286,8 @@ std::string to_query_result_json(const Corpus& corpus,
                 if (!first_tok) out << ", ";
                 first_tok = false;
                 out << "{\"pos\": " << p;
+                if (opts.fragment)
+                    out << ", \"id\": " << jstr(fragment_tok_id(corpus, p)) << ", \"group\": " << t;
                 for (const auto& attr_name : attr_names) {
                     if (!corpus.has_attr(attr_name) || Corpus::is_internal_attr_name(attr_name)) continue;
                     auto val = corpus.attr(attr_name).value_at(p);
@@ -205,9 +297,48 @@ std::string to_query_result_json(const Corpus& corpus,
                 out << "}";
             }
         }
-        out << "]}";
+        out << "]";
+        if (opts.fragment) {
+            CorpusPos lo = 0, hi = 0;
+            context_bounds(corpus, m, opts.context, opts.sentence, lo, hi);
+            out << ", \"fragment\": " << jstr(build_fragment(corpus, lo, hi, attr_names));
+            // highlight_map (flexicorp highlight_contract): matched ids, by query token
+            std::vector<std::string> all;
+            std::map<size_t, std::vector<std::string>> by_group;
+            for (size_t t = 0; t < m.positions.size(); ++t) {
+                if (m.positions[t] == NO_HEAD) continue;
+                CorpusPos span_end = (!m.span_ends.empty()) ? m.span_ends[t] : m.positions[t];
+                for (CorpusPos p = m.positions[t]; p <= span_end; ++p) {
+                    std::string id = fragment_tok_id(corpus, p);
+                    by_group[t].push_back(id);
+                    all.push_back(std::move(id));
+                }
+            }
+            auto id_list = [&](const std::vector<std::string>& v) {
+                std::string o = "[";
+                for (size_t k = 0; k < v.size(); ++k) o += (k ? ", " : "") + jstr(v[k]);
+                return o + "]";
+            };
+            out << ", \"highlight_map\": {\"default\": {\"tok_ids\": " << id_list(all)
+                << "}, \"match\": " << id_list(all) << ", \"groups\": [";
+            if (by_group.size() > 1) {
+                bool fg = true;
+                for (const auto& [t, ids] : by_group) {
+                    out << (fg ? "" : ", ") << "{\"id\": " << jstr(group_name(t)) << ", \"tok_ids\": " << id_list(ids) << "}";
+                    fg = false;
+                }
+            }
+            out << "]}";
+        }
+        out << "}";
     }
     out << "\n    ]";
+    if (opts.fragment && group_names.size() > 1) {
+        out << ",\n    \"legend\": [";
+        for (size_t t = 0; t < group_names.size(); ++t)
+            out << (t ? ", " : "") << "{\"id\": " << jstr(group_names[t]) << ", \"name\": " << jstr(group_names[t]) << "}";
+        out << "]";
+    }
 
     if (opts.debug) {
         out << ",\n    \"debug\": {\n";

@@ -428,6 +428,43 @@ def check_warm(exe, corpus, label):
         plain.close()
 
 
+def check_fragment(srv, label):
+    """"fragment": true — TEITOK-style XML per hit, token ids, highlight_map by query token."""
+    import xml.etree.ElementTree as ET
+    q = 'v:[upos="VERB"] > n:[deprel="nsubj"]'
+    st, r = srv.post("/query", {"query": q, "limit": 3, "sentence": True, "fragment": True})
+    check(st == 200 and r["result"]["hits"], f"{label}: fragment query: {st}")
+    if st != 200 or not r["result"]["hits"]:
+        return
+    res = r["result"]
+    check([g.get("id") for g in res.get("legend", [])] == ["v", "n"], f"{label}: legend {res.get('legend')}")
+    for h in res["hits"]:
+        root = ET.fromstring("<root>" + h["fragment"] + "</root>")
+        toks = root.findall(".//tok")
+        ids = [t.get("id") for t in toks]
+        check(toks and root.find("s") is not None and all(i and i.startswith("w-") for i in ids),
+              f"{label}: fragment structure: {h['fragment'][:200]}")
+        hm = h.get("highlight_map", {})
+        match = hm.get("default", {}).get("tok_ids", [])
+        check(match and set(match) <= set(ids) and hm.get("match") == match,
+              f"{label}: highlight ids in the fragment: {match}")
+        groups = {g["id"]: g["tok_ids"] for g in hm.get("groups", [])}
+        check(set(groups) == {"v", "n"} and len(groups["v"]) == 1 and len(groups["n"]) == 1,
+              f"{label}: highlight groups: {hm.get('groups')}")
+        by_id = {t.get("id"): t for t in toks}
+        verb, subj = by_id[groups["v"][0]], by_id[groups["n"][0]]
+        check(verb.get("upos") == "VERB" and subj.get("deprel") == "nsubj" and subj.get("head") == verb.get("id"),
+              f"{label}: tok attributes / head: {ET.tostring(subj, encoding='unicode')}")
+        check(all(t.get("id") and "group" in t for t in h["tokens"]), f"{label}: token ids / groups")
+        words = " ".join(t.text or "" for t in toks)
+        check(words == " ".join(x for x in (h["context"]["left"], h["context"]["match"], h["context"]["right"]) if x),
+              f"{label}: fragment words = sentence context")
+    # without the option nothing changes
+    st, r = srv.post("/query", {"query": q, "limit": 1})
+    h = r["result"]["hits"][0]
+    check("fragment" not in h and "highlight_map" not in h and "id" not in h["tokens"][0], f"{label}: no fragment by default")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--server", required=True)
@@ -452,6 +489,7 @@ def main():
             check_semantics(srv, "default")
             check_async(srv, "default")
             check_concurrent(srv, queries[:4], "default", offsets[:3])
+            check_fragment(srv, "fragment")
         finally:
             srv.close()
         # every cache dropped after each request: sets are re-derived (sorted again)
