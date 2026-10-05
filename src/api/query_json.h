@@ -49,6 +49,10 @@ struct QueryOptions {
 };
 
 // Run a single query (one statement, no trailing command). Returns (MatchSet, elapsed_ms).
+/// True when the first statement is an aligned `… with …` query (run_single_query
+/// then returns every pair, whatever the page).
+bool query_is_parallel(const std::string& query_text, bool strict_quoted_strings = false);
+
 std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
                                             const std::string& query_text,
                                             const QueryOptions& opts);

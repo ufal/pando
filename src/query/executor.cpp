@@ -8503,6 +8503,27 @@ MatchSet QueryExecutor::execute_dep_subtree_from_named(const TokenQuery& query,
 
 // ── #16 Source | Target parallel execution ──────────────────────────────
 
+// Below this many positions the parallel fast path pulls target candidates by alignment
+// value without first counting the target query on its own.
+static constexpr size_t kParallelPullAlways = 4096;
+
+// Pairs in corpus order of the source hit, then of the target: the same order whichever
+// join produced them (pulling by alignment value visits values in hash order), and source
+// hits grouped and paged the way concordances are.
+static void sort_parallel_pairs(MatchSet& ms) {
+    auto& v = ms.parallel_matches;
+    if (v.size() < 2) return;
+    auto key = [](const Match& m) {
+        return std::make_pair(m.positions.empty() ? CorpusPos{0} : m.first_pos(),
+                              m.positions.empty() ? CorpusPos{0} : m.last_pos());
+    };
+    std::stable_sort(v.begin(), v.end(), [&](const std::pair<Match, Match>& x, const std::pair<Match, Match>& y) {
+        auto kx = key(x.first), ky = key(y.first);
+        if (kx != ky) return kx < ky;
+        return key(x.second) < key(y.second);
+    });
+}
+
 MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
                                          const TokenQuery& target_query,
                                          size_t max_matches,
@@ -8537,6 +8558,7 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
 
     MatchSet result;
     result.num_tokens = source_query.tokens.size() + target_query.tokens.size();
+    result.parallel = true;
 
     MatchSet source_set = execute(src_exec, 0, true, 0, 0, 0, 1, nullptr, true);
     NameIndexMap src_names = build_name_map(source_query);
@@ -8585,13 +8607,32 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
                 collect_alignment_component_strings(corpus_, an1, p1, wanted_components);
             }
 
-            MatchSet target_set;
-            target_set.num_tokens = target_query.tokens.size();
-            std::unordered_set<CorpusPos> seen_positions;
-            seen_positions.reserve(wanted_components.size() * 4 + 16);
+            // What pulling would visit: every position carrying a wanted value. With
+            // sentence-level ids copied onto tokens (TEITOK `tuid`) that is every token of
+            // every aligned sentence in every language, often most of the corpus, while
+            // the target on its own (upos="ADV" & text_lang="Dutch") is a cheap bitmap
+            // count. Count the target up to the pull cost; when it stays below, run it
+            // and hash-join instead.
+            std::vector<LexiconId> wanted_ids;
+            wanted_ids.reserve(wanted_components.size());
+            size_t pull_cost = 0;
             for (const auto& comp : wanted_components) {
                 LexiconId id = pa2.lexicon().lookup(comp);
                 if (id == UNKNOWN_LEX) continue;
+                wanted_ids.push_back(id);
+                pull_cost += pa2.count_of_id(id);
+            }
+            bool pull = true;
+            if (pull_cost > kParallelPullAlways) {
+                MatchSet probe = execute(tgt_exec, 1, true, pull_cost, 0, 0, 1, nullptr, true);
+                if (probe.total_exact && probe.total_count < pull_cost) pull = false;
+            }
+            if (pull) {
+            MatchSet target_set;
+            target_set.num_tokens = target_query.tokens.size();
+            std::unordered_set<CorpusPos> seen_positions;
+            seen_positions.reserve(std::min<size_t>(pull_cost, wanted_ids.size() * 4 + 16));
+            for (LexiconId id : wanted_ids) {
                 pa2.for_each_position_id(id, [&](CorpusPos p) {
                     if (!seen_positions.insert(p).second) return true;
                     if (!check_conditions(p, target_query.tokens[0].conditions)) return true;
@@ -8610,7 +8651,9 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
                     result.parallel_matches, result.total_count,
                     max_matches, count_total);
             result.total_exact = true;
+            sort_parallel_pairs(result);
             return result;
+            }
         }
     }
 
@@ -8630,7 +8673,63 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
                     result.parallel_matches, result.total_count,
                     max_matches, count_total);
             result.total_exact = true;
+            sort_parallel_pairs(result);
             return result;
+        }
+    }
+    // One alignment filter on region attributes (`a:[…] with b:<s …> :: a.s_tuid = b.s_tuid`)
+    // or a named region: hash join on the values (or their components) instead of
+    // comparing every source hit with every target hit.
+    if (filters.size() == 1 && !include_empty_alignment_values_) {
+        const auto& af = filters[0];
+        const std::string an1 = normalize_attr(af.attr1);
+        const std::string an2 = normalize_attr(af.attr2);
+        if (alignment_attr_is_supported(corpus_, an1) && alignment_attr_is_supported(corpus_, an2)) {
+            // same semantics as alignment_values_match: whole values when both sides are
+            // scalar, else any shared pipe component; missing values never align
+            const bool scalar = !corpus_.is_multivalue(an1) && !corpus_.is_multivalue(an2);
+            auto keys_of = [&](std::optional<std::string_view> v, std::vector<std::string>& out) {
+                out.clear();
+                if (!v || alignment_value_is_missing(*v)) return;
+                if (scalar) { out.emplace_back(*v); return; }
+                size_t start = 0;
+                while (start <= v->size()) {
+                    size_t bar = v->find('|', start);
+                    size_t end = bar == std::string_view::npos ? v->size() : bar;
+                    if (end > start) out.emplace_back(v->substr(start, end - start));
+                    if (bar == std::string_view::npos) break;
+                    start = bar + 1;
+                }
+                std::sort(out.begin(), out.end());
+                out.erase(std::unique(out.begin(), out.end()), out.end());
+            };
+            std::unordered_map<std::string, std::vector<size_t>> src_by_key;
+            src_by_key.reserve(source_set.matches.size() * 2 + 16);
+            std::vector<std::string> keys;
+            for (size_t i = 0; i < source_set.matches.size(); ++i) {
+                keys_of(resolve_alignment_operand_value(corpus_, source_set.matches[i], src_names, af.name1, an1), keys);
+                for (auto& k : keys) src_by_key[std::move(k)].push_back(i);
+            }
+            std::vector<size_t> hit;
+            for (size_t j = 0; j < target_set.matches.size(); ++j) {
+                keys_of(resolve_alignment_operand_value(corpus_, target_set.matches[j], tgt_names, af.name2, an2), keys);
+                hit.clear();
+                for (const auto& k : keys) {
+                    auto it = src_by_key.find(k);
+                    if (it != src_by_key.end()) hit.insert(hit.end(), it->second.begin(), it->second.end());
+                }
+                if (keys.size() > 1) {
+                    std::sort(hit.begin(), hit.end());
+                    hit.erase(std::unique(hit.begin(), hit.end()), hit.end());
+                }
+                for (size_t i : hit) {
+                    result.parallel_matches.emplace_back(source_set.matches[i], target_set.matches[j]);
+                    result.total_count++;
+                    if (max_matches > 0 && result.total_count >= max_matches && !count_total)
+                        goto done;
+                }
+            }
+            goto done;
         }
     }
     for (const auto& s : source_set.matches) {
@@ -8662,6 +8761,7 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
     }
 done:
     result.total_exact = true;
+    sort_parallel_pairs(result);
     return result;
 }
 

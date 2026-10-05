@@ -18,6 +18,7 @@
 #include <unordered_map>
 #include <iomanip>
 #include <string_view>
+#include <functional>
 
 namespace pando {
 
@@ -170,6 +171,17 @@ std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
     return run_single_query(corpus, query_text, opts, nullptr);
 }
 
+bool query_is_parallel(const std::string& query_text, bool strict_quoted_strings) {
+    if (query_text.find("with") == std::string::npos) return false;
+    try {
+        Parser parser(query_text, ParserOptions{strict_quoted_strings});
+        Program prog = parser.parse();
+        return !prog.empty() && prog[0].has_query && prog[0].is_parallel;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
                                             const std::string& query_text,
                                             const QueryOptions& opts,
@@ -187,7 +199,7 @@ std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
     size_t max_total_cap = (opts.total && opts.max_total > 0) ? opts.max_total : 0;
 
     auto t0 = std::chrono::high_resolution_clock::now();
-    if (opts.sample > 0 || opts.shuffle) {
+    if ((opts.sample > 0 || opts.shuffle) && !prog[0].is_parallel) {
         // the hits with the smallest hash of (seed, hit): a sample of N, or the first
         // offset + limit of the shuffled order (HitSample)
         size_t k = opts.sample;
@@ -202,11 +214,107 @@ std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
         auto t1 = std::chrono::high_resolution_clock::now();
         return {std::move(ms), std::chrono::duration<double, std::milli>(t1 - t0).count()};
     }
+    if (prog[0].is_parallel) {
+        // every aligned pair (a page is cut from them in to_query_result_json); with
+        // max_total, at most that many and the total marked inexact when reached
+        const size_t cap = opts.max_total;
+        MatchSet ms = executor.execute_parallel(prog[0].query, prog[0].target_query, cap, cap == 0);
+        if (cap > 0 && ms.parallel_matches.size() >= cap) ms.total_exact = false;
+        ms.total_count = ms.parallel_matches.size();
+        auto t1 = std::chrono::high_resolution_clock::now();
+        return {std::move(ms), std::chrono::duration<double, std::milli>(t1 - t0).count()};
+    }
     MatchSet ms = executor.execute(prog[0].query, max_m, count_t, max_total_cap, 0, 0,
                                    std::max(1u, opts.threads));
     auto t1 = std::chrono::high_resolution_clock::now();
     double elapsed = std::chrono::duration<double, std::milli>(t1 - t0).count();
     return {std::move(ms), elapsed};
+}
+
+// One hit of a /query page: doc, match span, context, named regions, tokens, and in
+// fragment mode its TEITOK-style XML with a highlight map. `group_offset` numbers the
+// query tokens of an aligned target after those of its source.
+static void emit_hit_json(std::ostringstream& out, const Corpus& corpus, const Match& m,
+                          const QueryOptions& opts,
+                          const std::function<std::string(size_t)>& group_name,
+                          size_t group_offset = 0) {
+    CorpusPos match_start = m.first_pos();
+    CorpusPos match_end   = m.last_pos();
+    auto doc_id = lookup_doc_id(corpus, match_start);
+    auto ctx = build_context(corpus, m, opts.context, opts.sentence);
+
+    out << "      {";
+    out << "\"doc_id\": " << (doc_id.empty() ? "null" : jstr(doc_id));
+    out << ", \"match_start\": " << match_start << ", \"match_end\": " << match_end;
+    out << ", \"context\": {\"left\": " << jstr(ctx.left)
+        << ", \"match\": " << jstr(ctx.match) << ", \"right\": " << jstr(ctx.right) << "}";
+    if (!m.named_regions.empty()) {
+        out << ", \"named_regions\": {";
+        bool first_nr = true;
+        for (const auto& [nm, rr] : m.named_regions) {
+            if (!first_nr) out << ", ";
+            first_nr = false;
+            out << jstr(nm) << ": {\"struct\": " << jstr(rr.struct_name)
+                << ", \"region_idx\": " << rr.region_idx << "}";
+        }
+        out << "}";
+    }
+    out << ", \"tokens\": [";
+    const auto& attr_names = opts.attrs.empty()
+        ? corpus.attr_names() : opts.attrs;
+    bool first_tok = true;
+    for (size_t t = 0; t < m.positions.size(); ++t) {
+        if (m.positions[t] == NO_HEAD) continue;
+        CorpusPos span_end = (!m.span_ends.empty()) ? m.span_ends[t] : m.positions[t];
+        for (CorpusPos p = m.positions[t]; p <= span_end; ++p) {
+            if (!first_tok) out << ", ";
+            first_tok = false;
+            out << "{\"pos\": " << p;
+            if (opts.fragment)
+                out << ", \"id\": " << jstr(fragment_tok_id(corpus, p)) << ", \"group\": " << (t + group_offset);
+            for (const auto& attr_name : attr_names) {
+                if (!corpus.has_attr(attr_name) || Corpus::is_internal_attr_name(attr_name)) continue;
+                auto val = corpus.attr(attr_name).value_at(p);
+                if (val == "_") continue;
+                out << ", " << jstr(attr_name) << ": " << jstr(val);
+            }
+            out << "}";
+        }
+    }
+    out << "]";
+    if (opts.fragment) {
+        CorpusPos lo = 0, hi = 0;
+        context_bounds(corpus, m, opts.context, opts.sentence, lo, hi);
+        out << ", \"fragment\": " << jstr(build_fragment(corpus, lo, hi, attr_names));
+        // highlight_map (flexicorp highlight_contract): matched ids, by query token
+        std::vector<std::string> all;
+        std::map<size_t, std::vector<std::string>> by_group;
+        for (size_t t = 0; t < m.positions.size(); ++t) {
+            if (m.positions[t] == NO_HEAD) continue;
+            CorpusPos span_end = (!m.span_ends.empty()) ? m.span_ends[t] : m.positions[t];
+            for (CorpusPos p = m.positions[t]; p <= span_end; ++p) {
+                std::string id = fragment_tok_id(corpus, p);
+                by_group[t + group_offset].push_back(id);
+                all.push_back(std::move(id));
+            }
+        }
+        auto id_list = [&](const std::vector<std::string>& v) {
+            std::string o = "[";
+            for (size_t k = 0; k < v.size(); ++k) o += (k ? ", " : "") + jstr(v[k]);
+            return o + "]";
+        };
+        out << ", \"highlight_map\": {\"default\": {\"tok_ids\": " << id_list(all)
+            << "}, \"match\": " << id_list(all) << ", \"groups\": [";
+        if (by_group.size() > 1) {
+            bool fg = true;
+            for (const auto& [t, ids] : by_group) {
+                out << (fg ? "" : ", ") << "{\"id\": " << jstr(group_name(t)) << ", \"tok_ids\": " << id_list(ids) << "}";
+                fg = false;
+            }
+        }
+        out << "]}";
+    }
+    out << "}";
 }
 
 std::string to_query_result_json(const Corpus& corpus,
@@ -222,6 +330,93 @@ std::string to_query_result_json(const Corpus& corpus,
     size_t end   = std::min(start + opts.limit, stored);
     size_t returned = end - start;
 
+    // fragment mode: highlight groups are the query's tokens (their labels, else t1, t2, …);
+    // an aligned query numbers its target's tokens after the source's
+    std::vector<std::string> group_names;
+    size_t source_tokens = 0;
+    if (opts.fragment || ms.parallel) {
+        try {
+            Parser parser(query_text, ParserOptions{opts.strict_quoted_strings});
+            Program prog = parser.parse();
+            if (!prog.empty() && prog[0].has_query) {
+                auto add = [&](const TokenQuery& q) {
+                    for (const auto& tok : q.tokens)
+                        group_names.push_back(tok.name.empty() ? "t" + std::to_string(group_names.size() + 1) : tok.name);
+                };
+                add(prog[0].query);
+                source_tokens = group_names.size();
+                if (prog[0].is_parallel) add(prog[0].target_query);
+            }
+        } catch (const std::exception&) {
+        }
+    }
+    std::function<std::string(size_t)> group_name = [&](size_t t) {
+        return t < group_names.size() ? group_names[t] : "t" + std::to_string(t + 1);
+    };
+    auto emit_debug_and_extra = [&]() {
+        if (opts.debug) {
+            out << ",\n    \"debug\": {\n";
+            out << "      \"corpus_size\": " << corpus.size() << ",\n";
+            out << "      \"has_deps\": " << (corpus.has_deps() ? "true" : "false") << ",\n";
+            out << "      \"elapsed_ms\": " << elapsed_ms << ",\n";
+            out << "      \"plan_path\": " << jstr(ms.plan_path) << ",\n";
+            out << "      \"seed_token\": " << ms.seed_token << ",\n";
+            out << "      \"cardinalities\": [";
+            for (size_t i = 0; i < ms.cardinalities.size(); ++i) {
+                if (i > 0) out << ", ";
+                out << ms.cardinalities[i];
+            }
+            out << "]\n    }";
+        }
+        if (!extra_result_fields.empty()) out << ",\n    " << extra_result_fields;
+        out << "\n  }\n}\n";
+    };
+
+    // `a:[…] with b:[…] :: a.x = b.x`: aligned pairs (source, target), paged by pair in
+    // corpus order of the source hit (as execute_parallel sorts them). page.total counts
+    // pairs; total_sources the distinct source hits among them.
+    if (ms.parallel) {
+        const auto& pm = ms.parallel_matches;
+        const size_t pstart = std::min(opts.offset, pm.size());
+        const size_t pend = opts.limit == 0 ? pm.size() : std::min(pstart + opts.limit, pm.size());
+        size_t sources = 0;
+        for (size_t i = 0; i < pm.size(); ++i)
+            if (i == 0 || pm[i].first.positions != pm[i - 1].first.positions
+                || pm[i].first.span_ends != pm[i - 1].first.span_ends) ++sources;
+        out << "{\n  \"ok\": true,\n  \"backend\": \"pando\",\n  \"operation\": \"query\",\n";
+        out << "  \"last_command\": \"query\",\n  \"result\": {\n    \"parallel\": true,\n";
+        out << "    \"query\": {\"language\": \"pando-cql\", \"text\": " << jstr(query_text) << "},\n";
+        out << "    \"page\": {\"start\": " << pstart << ", \"size\": " << opts.limit
+            << ", \"returned\": " << (pend - pstart) << ", \"total\": " << pm.size()
+            << ", \"returned_pairs\": " << (pend - pstart) << ", \"total_pairs\": " << pm.size()
+            << ", \"total_sources\": " << sources
+            << ", \"total_exact\": " << (ms.total_exact ? "true" : "false") << "},\n";
+        out << "    \"hits\": [],\n    \"pairs\": [\n";
+        for (size_t i = pstart; i < pend; ++i) {
+            const auto& [src, tgt] = pm[i];
+            if (i > pstart) out << ",\n";
+            auto doc_s = lookup_doc_id(corpus, src.first_pos());
+            auto doc_t = lookup_doc_id(corpus, tgt.first_pos());
+            out << "      {\"aligned\": true, \"alignment\": {\"kind\": \"with\", \"pair_index\": " << i << "},\n";
+            out << "       \"source\":\n";
+            emit_hit_json(out, corpus, src, opts, group_name, 0);
+            out << ",\n       \"target\":\n";
+            emit_hit_json(out, corpus, tgt, opts, group_name, source_tokens);
+            out << ",\n       \"source_text_id\": " << (doc_s.empty() ? "null" : jstr(doc_s))
+                << ", \"target_text_id\": " << (doc_t.empty() ? "null" : jstr(doc_t)) << "}";
+        }
+        out << "\n    ]";
+        if (group_names.size() > 1) {
+            out << ",\n    \"legend\": [";
+            for (size_t t = 0; t < group_names.size(); ++t)
+                out << (t ? ", " : "") << "{\"id\": " << jstr(group_names[t]) << ", \"name\": " << jstr(group_names[t])
+                    << ", \"side\": " << (t < source_tokens ? "\"source\"" : "\"target\"") << "}";
+            out << "]";
+        }
+        emit_debug_and_extra();
+        return out.str();
+    }
+
     out << "{\n";
     out << "  \"ok\": true,\n";
     out << "  \"backend\": \"pando\",\n";
@@ -234,103 +429,10 @@ std::string to_query_result_json(const Corpus& corpus,
         << ", \"total_exact\": " << (ms.total_exact ? "true" : "false") << "},\n";
     out << "    \"hits\": [\n";
 
-    // fragment mode: highlight groups are the query's tokens (their labels, else t1, t2, …)
-    std::vector<std::string> group_names;
-    if (opts.fragment) {
-        try {
-            Parser parser(query_text, ParserOptions{opts.strict_quoted_strings});
-            Program prog = parser.parse();
-            if (!prog.empty() && prog[0].has_query)
-                for (size_t t = 0; t < prog[0].query.tokens.size(); ++t)
-                    group_names.push_back(prog[0].query.tokens[t].name.empty() ? "t" + std::to_string(t + 1)
-                                                                               : prog[0].query.tokens[t].name);
-        } catch (const std::exception&) {
-        }
-    }
-    auto group_name = [&](size_t t) {
-        return t < group_names.size() ? group_names[t] : "t" + std::to_string(t + 1);
-    };
 
     for (size_t i = start; i < end; ++i) {
-        const auto& m = ms.matches[i - matches_offset];
-        CorpusPos match_start = m.first_pos();
-        CorpusPos match_end   = m.last_pos();
-        auto doc_id = lookup_doc_id(corpus, match_start);
-        auto ctx = build_context(corpus, m, opts.context, opts.sentence);
-
         if (i > start) out << ",\n";
-        out << "      {";
-        out << "\"doc_id\": " << (doc_id.empty() ? "null" : jstr(doc_id));
-        out << ", \"match_start\": " << match_start << ", \"match_end\": " << match_end;
-        out << ", \"context\": {\"left\": " << jstr(ctx.left)
-            << ", \"match\": " << jstr(ctx.match) << ", \"right\": " << jstr(ctx.right) << "}";
-        if (!m.named_regions.empty()) {
-            out << ", \"named_regions\": {";
-            bool first_nr = true;
-            for (const auto& [nm, rr] : m.named_regions) {
-                if (!first_nr) out << ", ";
-                first_nr = false;
-                out << jstr(nm) << ": {\"struct\": " << jstr(rr.struct_name)
-                    << ", \"region_idx\": " << rr.region_idx << "}";
-            }
-            out << "}";
-        }
-        out << ", \"tokens\": [";
-        const auto& attr_names = opts.attrs.empty()
-            ? corpus.attr_names() : opts.attrs;
-        bool first_tok = true;
-        for (size_t t = 0; t < m.positions.size(); ++t) {
-            if (m.positions[t] == NO_HEAD) continue;
-            CorpusPos span_end = (!m.span_ends.empty()) ? m.span_ends[t] : m.positions[t];
-            for (CorpusPos p = m.positions[t]; p <= span_end; ++p) {
-                if (!first_tok) out << ", ";
-                first_tok = false;
-                out << "{\"pos\": " << p;
-                if (opts.fragment)
-                    out << ", \"id\": " << jstr(fragment_tok_id(corpus, p)) << ", \"group\": " << t;
-                for (const auto& attr_name : attr_names) {
-                    if (!corpus.has_attr(attr_name) || Corpus::is_internal_attr_name(attr_name)) continue;
-                    auto val = corpus.attr(attr_name).value_at(p);
-                    if (val == "_") continue;
-                    out << ", " << jstr(attr_name) << ": " << jstr(val);
-                }
-                out << "}";
-            }
-        }
-        out << "]";
-        if (opts.fragment) {
-            CorpusPos lo = 0, hi = 0;
-            context_bounds(corpus, m, opts.context, opts.sentence, lo, hi);
-            out << ", \"fragment\": " << jstr(build_fragment(corpus, lo, hi, attr_names));
-            // highlight_map (flexicorp highlight_contract): matched ids, by query token
-            std::vector<std::string> all;
-            std::map<size_t, std::vector<std::string>> by_group;
-            for (size_t t = 0; t < m.positions.size(); ++t) {
-                if (m.positions[t] == NO_HEAD) continue;
-                CorpusPos span_end = (!m.span_ends.empty()) ? m.span_ends[t] : m.positions[t];
-                for (CorpusPos p = m.positions[t]; p <= span_end; ++p) {
-                    std::string id = fragment_tok_id(corpus, p);
-                    by_group[t].push_back(id);
-                    all.push_back(std::move(id));
-                }
-            }
-            auto id_list = [&](const std::vector<std::string>& v) {
-                std::string o = "[";
-                for (size_t k = 0; k < v.size(); ++k) o += (k ? ", " : "") + jstr(v[k]);
-                return o + "]";
-            };
-            out << ", \"highlight_map\": {\"default\": {\"tok_ids\": " << id_list(all)
-                << "}, \"match\": " << id_list(all) << ", \"groups\": [";
-            if (by_group.size() > 1) {
-                bool fg = true;
-                for (const auto& [t, ids] : by_group) {
-                    out << (fg ? "" : ", ") << "{\"id\": " << jstr(group_name(t)) << ", \"tok_ids\": " << id_list(ids) << "}";
-                    fg = false;
-                }
-            }
-            out << "]}";
-        }
-        out << "}";
+        emit_hit_json(out, corpus, ms.matches[i - matches_offset], opts, group_name);
     }
     out << "\n    ]";
     if (opts.fragment && group_names.size() > 1) {
@@ -340,22 +442,7 @@ std::string to_query_result_json(const Corpus& corpus,
         out << "]";
     }
 
-    if (opts.debug) {
-        out << ",\n    \"debug\": {\n";
-        out << "      \"corpus_size\": " << corpus.size() << ",\n";
-        out << "      \"has_deps\": " << (corpus.has_deps() ? "true" : "false") << ",\n";
-        out << "      \"elapsed_ms\": " << elapsed_ms << ",\n";
-        out << "      \"plan_path\": " << jstr(ms.plan_path) << ",\n";
-        out << "      \"seed_token\": " << ms.seed_token << ",\n";
-        out << "      \"cardinalities\": [";
-        for (size_t i = 0; i < ms.cardinalities.size(); ++i) {
-            if (i > 0) out << ", ";
-            out << ms.cardinalities[i];
-        }
-        out << "]\n    }";
-    }
-    if (!extra_result_fields.empty()) out << ",\n    " << extra_result_fields;
-    out << "\n  }\n}\n";
+    emit_debug_and_extra();
     return out.str();
 }
 

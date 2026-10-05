@@ -724,14 +724,22 @@ ServerResponse ServerApi::query(const std::string& body) {
         return query_from(opts, total_async, timeout_ms, progress, from, lease, rl.tier, job_limit);
     }
 
+    // an aligned query (`a:[…] with b:[…] :: …`) computes all its pairs for any page: one
+    // cache entry serves every page ("load more" does not run it again), and its total
+    // is exact from the start (no background count)
+    const bool parallel_q = query_is_parallel(query_text, opts.strict_quoted_strings);
+
     // P6.4: the same query / page / count again (KonText: submit, view, each page)
     auto run_q = [&](const QueryOptions& o) -> std::pair<MatchSet, double> {
-        const bool sampled_now = o.sample > 0 || o.shuffle;
+        const bool sampled_now = (o.sample > 0 || o.shuffle) && !parallel_q;
         std::string ck;
         if (cache_.max_bytes() && !(sampled_now && o.seed == 0)) {
             std::string sig;
-            for (size_t v : {o.offset, o.limit, o.max_total, o.sample, static_cast<size_t>(o.seed)})
-                sig += std::to_string(v) + ",";
+            if (parallel_q)
+                sig = "parallel," + std::to_string(o.max_total) + ",";
+            else
+                for (size_t v : {o.offset, o.limit, o.max_total, o.sample, static_cast<size_t>(o.seed)})
+                    sig += std::to_string(v) + ",";
             sig += std::string(o.total ? "t" : "-") + (o.shuffle ? "s" : "-") + (o.strict_quoted_strings ? "q" : "-")
                    + (o.allow_empty_alignment ? "e" : "-");
             ck = cache_key({"query/1", query_text, sig});
@@ -756,6 +764,12 @@ ServerResponse ServerApi::query(const std::string& body) {
     };
 
     try {
+        if (parallel_q) {
+            auto [ms, elapsed] = run_q(opts);
+            if (!opts.total) return ok(ms, elapsed);
+            QueryJobStatus st = jobs_.record_finished(query_text, opts, ms.total_count, ms.total_exact);
+            return ok(ms, elapsed, job_fields(st));
+        }
         if (sampled) {
             // one pass over every hit: the page and its total (the sample's size, or
             // all hits when shuffled) are exact; no background count

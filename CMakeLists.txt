@@ -301,6 +301,11 @@ if(BUILD_TESTING)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/result_cache_test.py
                 --server $<TARGET_FILE:pando-server> --pando-index $<TARGET_FILE:pando-index>
                 --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/aligned.conllu)
+        # aligned `with` queries: joins == brute force; pando-server /query pairs, paged from one result
+        add_test(NAME parallel_join
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/parallel_join_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
+                --server $<TARGET_FILE:pando-server>)
         # P7.8: coll / dcoll via the hit sink and page-only tabulate = over all hits
         add_test(NAME coll_sink
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/coll_sink_test.py

@@ -796,6 +796,8 @@ struct MatchSet {
 
     // #16: Source | Target: pairs (source_match, target_match) when parallel query
     std::vector<std::pair<Match, Match>> parallel_matches;
+    /// set by execute_parallel: the result is parallel_matches (possibly none)
+    bool parallel = false;
 
     /// When set, group/count/freq used streaming buckets (matches may be empty).
     std::shared_ptr<AggregateBucketData> aggregate_buckets;
