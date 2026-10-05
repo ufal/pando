@@ -271,7 +271,9 @@ static void emit_hit_json(std::ostringstream& out, const Corpus& corpus, const M
             first_tok = false;
             out << "{\"pos\": " << p;
             if (opts.fragment)
-                out << ", \"id\": " << jstr(fragment_tok_id(corpus, p)) << ", \"group\": " << (t + group_offset);
+                out << ", \"id\": " << jstr(fragment_tok_id(corpus, p));
+            // the query token this one matched (its place in its own side of an aligned query)
+            out << ", \"group\": " << t;
             for (const auto& attr_name : attr_names) {
                 if (!corpus.has_attr(attr_name) || Corpus::is_internal_attr_name(attr_name)) continue;
                 auto val = corpus.attr(attr_name).value_at(p);
