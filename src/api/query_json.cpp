@@ -284,6 +284,22 @@ static void emit_hit_json(std::ostringstream& out, const Corpus& corpus, const M
         }
     }
     out << "]";
+    // the query tokens of this hit: position span and name (flexicorp's hit `groups`, so a
+    // UI can colour each query token; `index` is the `group` of the tokens above)
+    out << ", \"groups\": [";
+    {
+        bool first_g = true;
+        for (size_t t = 0; t < m.positions.size(); ++t) {
+            if (m.positions[t] == NO_HEAD) continue;
+            CorpusPos span_end = (!m.span_ends.empty()) ? m.span_ends[t] : m.positions[t];
+            out << (first_g ? "" : ", ") << "{\"index\": " << t
+                << ", \"id\": " << jstr("t" + std::to_string(t + group_offset + 1))
+                << ", \"name\": " << jstr(group_name(t + group_offset))
+                << ", \"start\": " << m.positions[t] << ", \"end\": " << span_end << "}";
+            first_g = false;
+        }
+    }
+    out << "]";
     if (opts.fragment) {
         CorpusPos lo = 0, hi = 0;
         context_bounds(corpus, m, opts.context, opts.sentence, lo, hi);
@@ -332,11 +348,11 @@ std::string to_query_result_json(const Corpus& corpus,
     size_t end   = std::min(start + opts.limit, stored);
     size_t returned = end - start;
 
-    // fragment mode: highlight groups are the query's tokens (their labels, else t1, t2, …);
-    // an aligned query numbers its target's tokens after the source's
+    // highlight groups are the query's tokens (their labels, else t1, t2, …); an aligned
+    // query numbers its target's tokens after the source's
     std::vector<std::string> group_names;
     size_t source_tokens = 0;
-    if (opts.fragment || ms.parallel) {
+    {
         try {
             Parser parser(query_text, ParserOptions{opts.strict_quoted_strings});
             Program prog = parser.parse();
@@ -437,6 +453,12 @@ std::string to_query_result_json(const Corpus& corpus,
         emit_hit_json(out, corpus, ms.matches[i - matches_offset], opts, group_name);
     }
     out << "\n    ]";
+    // the query's tokens (as flexicorp's result `groups`: index, positional id, name)
+    out << ",\n    \"groups\": [";
+    for (size_t t = 0; t < group_names.size(); ++t)
+        out << (t ? ", " : "") << "{\"index\": " << t << ", \"id\": " << jstr("t" + std::to_string(t + 1))
+            << ", \"name\": " << jstr(group_names[t]) << "}";
+    out << "]";
     if (opts.fragment && group_names.size() > 1) {
         out << ",\n    \"legend\": [";
         for (size_t t = 0; t < group_names.size(); ++t)
