@@ -552,12 +552,19 @@ ServerResponse ServerApi::context(const std::map<std::string, std::string>& para
     if (right < 0) right = 0;
     KwicContext ctx = build_context_at(corpus_, pos, left, right, sentence);
     std::string_view doc = lookup_doc_id(corpus_, pos);
+    // TEITOK token id (positional attr `id`, e.g. w-115) for token_connect / file links
+    std::string tok_id;
+    if (corpus_.has_attr("id")) {
+        tok_id = std::string(corpus_.attr("id").value_at(pos));
+        if (tok_id == "_") tok_id.clear();
+    }
     std::ostringstream out;
     out << "{\"ok\":true,\"pos\":" << pos
         << ",\"left\":" << jstr(ctx.left)
         << ",\"match\":" << jstr(ctx.match)
         << ",\"right\":" << jstr(ctx.right)
         << ",\"doc_id\":" << jstr(doc)
+        << ",\"id\":" << jstr(tok_id)
         << ",\"corpus_size\":" << corpus_.size() << "}\n";
     return json_ok(out.str());
 }
