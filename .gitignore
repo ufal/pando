@@ -42,3 +42,4 @@ Thumbs.db
 
 # local demo indexes
 test/data/sample_idx_local/
+test/data/sample_idx_tmp_tcnt/
