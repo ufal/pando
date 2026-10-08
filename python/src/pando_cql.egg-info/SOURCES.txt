@@ -1,0 +1,14 @@
+README.md
+pyproject.toml
+setup.py
+src/pando_cql/__init__.py
+src/pando_cql/cli_backend.py
+src/pando_cql/corpus.py
+src/pando_cql/parse.py
+src/pando_cql.egg-info/PKG-INFO
+src/pando_cql.egg-info/SOURCES.txt
+src/pando_cql.egg-info/dependency_links.txt
+src/pando_cql.egg-info/requires.txt
+src/pando_cql.egg-info/top_level.txt
+tests/test_flatten.py
+tests/test_validate.py

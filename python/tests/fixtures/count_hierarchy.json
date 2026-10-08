@@ -1,0 +1,33 @@
+{
+  "ok": true,
+  "operation": "count",
+  "last_command": "count",
+  "result": {
+    "total_matches": 14,
+    "groups": 4,
+    "groups_returned": 4,
+    "fields": ["form", "upos"],
+    "hierarchy": [
+      {
+        "field": "form",
+        "value": "book",
+        "count": 10,
+        "pct": 71.4,
+        "children": [
+          {"field": "upos", "value": "NOUN", "count": 7, "pct": 50.0, "pct_of_parent": 70.0},
+          {"field": "upos", "value": "VERB", "count": 3, "pct": 21.4, "pct_of_parent": 30.0}
+        ]
+      },
+      {
+        "field": "form",
+        "value": "books",
+        "count": 4,
+        "pct": 28.6,
+        "children": [
+          {"field": "upos", "value": "NOUN", "count": 3, "pct": 21.4, "pct_of_parent": 75.0},
+          {"field": "upos", "value": "VERB", "count": 1, "pct": 7.1, "pct_of_parent": 25.0}
+        ]
+      }
+    ]
+  }
+}

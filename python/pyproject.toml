@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pando-cql"
+version = "0.2.0"
+description = "Python client for pando CQL: run queries, hit tables and counts for pandas"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "See repository" }
+authors = [{ name = "Pando contributors" }]
+keywords = ["pando", "cql", "corpus"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Text Processing :: Linguistic",
+]
+dependencies = []
+
+[project.optional-dependencies]
+pandas = ["pandas>=1.5"]
+dev = ["pytest>=7.0"]
+
+[project.urls]
+Repository = "https://github.com/teitok/pando"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

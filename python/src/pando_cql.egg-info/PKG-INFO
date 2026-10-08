@@ -1,0 +1,77 @@
+Metadata-Version: 2.4
+Name: pando-cql
+Version: 0.1.0
+Summary: Thin Python client for pando CQL: run queries, flatten count JSON for pandas
+Author: Pando contributors
+License: See repository
+Project-URL: Repository, https://github.com/teitok/pando
+Keywords: pando,cql,corpus
+Classifier: Programming Language :: Python :: 3
+Classifier: Topic :: Text Processing :: Linguistic
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Provides-Extra: pandas
+Requires-Dist: pandas>=1.5; extra == "pandas"
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+
+# pando-cql
+
+Thin Python client for [pando](https://github.com/teitok/pando): run CQL via the `pando` CLI and turn **count/group** JSON into flat row dicts for **pandas**.
+
+- **No C++ changes** required — uses existing `pando --api --json`.
+- Multi-field count **hierarchy stays in the CLI**; this package flattens leaf rows in Python only.
+- CQL `as` aliases are **not** required (use `DataFrame.rename`).
+
+## Install
+
+From the pando repo:
+
+```bash
+# Prefer a venv; editable install needs a writable site-packages
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e './python[pandas,dev]'
+
+# Fallback without install:
+export PYTHONPATH=/path/to/pando/python/src
+pip install pandas pytest   # as needed
+```
+
+Requires a built `pando` binary on `PATH`, or set `PANDO_BIN` / pass `--pando-bin`.
+`Corpus.open` fails early with a clear error if the binary is missing/unusable or if the path is not a pando index (no `corpus.info`).
+
+## Quick example
+
+```python
+from pando_cql import Corpus
+import pandas as pd
+
+corp = Corpus.open("/path/to/corpus/index")
+corp.run('Matches = [lemma="book"]')
+df = pd.DataFrame(corp.run("count Matches by form, upos"))
+df = (
+    df.rename(columns={"form": "word", "upos": "pos"})
+      .query("freq >= 2")
+      .sort_values("freq", ascending=False)
+)
+print(df[["word", "pos", "freq"]])
+corp.close()
+```
+
+Or:
+
+```bash
+export PANDO_BIN=/path/to/build/pando
+export PANDO_CORPUS=/path/to/index
+python python/examples/pandas_count_filter.py
+```
+
+## Notes
+
+- Prefer `count … by form, upos` (attribute names). Token-qualified `a.form` can yield empty groups with some named-query patterns in current pando — use bare attrs or `Last` as in the CQL docs.
+- `Corpus` keeps a **persistent** CLI session so named queries survive across `run()` calls.
+- Metric column is always `freq` in Python (JSON still uses `count`).
+
+## Design tracker
+
+See [`../dev/pando_cql_python.md`](../dev/pando_cql_python.md).

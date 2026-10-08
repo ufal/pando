@@ -1,0 +1,16 @@
+{
+  "ok": true,
+  "operation": "count",
+  "last_command": "count",
+  "result": {
+    "total_matches": 1152,
+    "groups": 3,
+    "groups_returned": 3,
+    "fields": ["a.upos"],
+    "rows": [
+      {"key": "NOUN", "count": 277, "pct": 24.0},
+      {"key": "DET", "count": 188, "pct": 16.3},
+      {"key": "VERB", "count": 134, "pct": 11.6}
+    ]
+  }
+}
