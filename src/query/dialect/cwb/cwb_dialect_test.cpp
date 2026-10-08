@@ -1,5 +1,6 @@
 // assert() is the check here: keep it in Release (NDEBUG) builds too
 #undef NDEBUG
+#include "index/fold_map.h"
 #include "query/dialect/cwb/cwb_translate.h"
 
 #include <cassert>
@@ -118,7 +119,33 @@ int main() {
         assert(p.size() == 2);
         assert(p[1].command.type == pando::CommandType::SORT);
         assert(p[1].command.fields.size() == 1);
-        assert(p[1].command.fields[0] == "lemma");
+        // CQP: the key is the whole match unless boundaries are given
+        assert(p[1].command.fields[0] == "lemma on match..matchend");
+    }
+
+    {
+        // the named query is sorted (not skipped as a corpus id); flags and boundaries kept
+        auto p = pando::translate_cwb_program(
+            "Matches = [lemma=\"the\"]; sort Matches by word %cd on match[-1]..match[-5]", 0, nullptr);
+        assert(p.size() == 2);
+        assert(p[1].command.type == pando::CommandType::SORT);
+        assert(p[1].command.query_name == "Matches");
+        assert(p[1].command.fields.size() == 1);
+        assert(p[1].command.fields[0] == "word %cd on match[-1]..match[-5]");
+        auto q = pando::translate_cwb_program("[]; sort by word %c on matchend[1]..matchend[5]", 0, nullptr);
+        assert(q[1].command.fields[0] == "word %c on matchend[1]..matchend[5]");
+        // %c / %d fold UTF-8 (sort keys and query matching share FoldMap::fold)
+        assert(pando::FoldMap::fold("ŘEKA Čaj", true, false) == "řeka čaj");
+        assert(pando::FoldMap::fold("Žena Émile Ångström", true, true) == "zena emile angstrom");
+        assert(pando::FoldMap::fold("Ελλάδα Ёлка", true, true) == "ελλαδα елка");
+        assert(pando::FoldMap::fold("Øl Łódź straße", true, true) == "øl łodz straße");
+        bool threw = false;
+        try {
+            pando::translate_cwb_program("[]; sort by word %l", 0, nullptr);
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        assert(threw);
     }
 
     {

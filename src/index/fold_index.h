@@ -18,7 +18,7 @@ std::string fold_string(FoldMode m, std::string_view s);
 
 // P1.6: index-time lookup for folded values.
 //
-// `<attr_base>.fold_<suffix>.perm` holds the attribute's lexicon ids (int32)
+// `<attr_base>.fold_<suffix>.v2.perm` holds the attribute's lexicon ids (int32)
 // sorted by (fold(string), id): 4 bytes per lexicon entry and mode. A folded
 // query value is found by binary search over the permutation (folding the
 // ~log2(V) probed entries on the fly), so `[form="the" %c]` no longer builds

@@ -42,6 +42,11 @@ enum class StructRelType {
     SIBLING,     // same head
     DESCENDANT,  // transitive child
     ANCESTOR,    // transitive parent
+    // order relations (no dependency index needed)
+    NEXT,        // the token directly after
+    PREV,        // the token directly before
+    AFTER,       // a later token in the same sentence
+    BEFORE,      // an earlier token in the same sentence
 };
 
 // ── A single attribute condition inside [] ──────────────────────────────
@@ -99,6 +104,13 @@ struct AttrCondition {
     /// op == IN: the sorted token positions that satisfy the condition (set by
     /// QueryExecutor::bind_external_alignment; `value` then only describes it).
     std::shared_ptr<const std::vector<CorpusPos>> in_positions;
+    /// op == IN, alternatively: the token lies in one of these regions (sorted region
+    /// rows of structure `in_region_struct`); `in_region_tokens` = their tokens in all,
+    /// for the planner. Checked per token, or expanded to the regions' tokens when the
+    /// planner starts from this condition.
+    std::shared_ptr<const std::vector<int64_t>> in_regions;
+    std::string in_region_struct;
+    size_t in_region_tokens = 0;
 };
 
 // ── Boolean combination of conditions ───────────────────────────────────

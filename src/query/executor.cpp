@@ -985,6 +985,10 @@ static const char* struct_rel_keyword(StructRelType t) {
         case StructRelType::SIBLING: return "sibling";
         case StructRelType::DESCENDANT: return "descendant";
         case StructRelType::ANCESTOR: return "ancestor";
+        case StructRelType::NEXT: return "next";
+        case StructRelType::PREV: return "prev";
+        case StructRelType::AFTER: return "after";
+        case StructRelType::BEFORE: return "before";
     }
     return "structural";
 }
@@ -2090,7 +2094,116 @@ size_t QueryExecutor::bind_external_alignment(TokenQuery& query, const LabelLook
             else vals.insert(std::string(*v));
         }
 
-        // the local tokens that carry one of them
+        // A plain token attribute (upos, lemma, a token-level tuid): the token's value is
+        // one of the earlier statement's, as an id-set condition like `[upos="VERB" |
+        // upos="AUX"]` that the planner estimates from the index and checks by id, rather
+        // than a list of every position in the corpus that carries one of the values.
+        if (corpus_.has_attr(loc_an) && !corpus_.is_multivalue(loc_an)) {
+            const PositionalAttr& pa = corpus_.attr(loc_an);
+            AttrCondition ac;
+            ac.attr = loc_attr;
+            ac.op = CompOp::REGEX;
+            ac.regex_full_match = true;
+            std::string alt;   // the same set as a regex, for any path that reads the value
+            for (const auto& v : vals) {
+                const LexiconId id = pa.lexicon().lookup(v);
+                if (id != UNKNOWN_LEX) ac.id_set.push_back(static_cast<int32_t>(id));
+                if (!alt.empty()) alt += '|';
+                for (unsigned char ch : v) {
+                    if (ch < 0x80 && !std::isalnum(ch) && ch != '_') alt += '\\';
+                    alt += static_cast<char>(ch);
+                }
+            }
+            ac.value = vals.empty() ? std::string("(?!)") : "(?:" + alt + ")";
+            std::sort(ac.id_set.begin(), ac.id_set.end());
+            ac.id_set.erase(std::unique(ac.id_set.begin(), ac.id_set.end()), ac.id_set.end());
+            ac.id_set_resolved = true;
+            ac.id_set_total = id_set_count(pa, ac.id_set);
+            ConditionPtr leaf = ConditionNode::make_leaf(std::move(ac));
+            for (auto& t : query.tokens) {
+                if (t.is_anchor() || t.name != loc) continue;
+                t.conditions = t.conditions ? ConditionNode::make_branch(BoolOp::AND, t.conditions, leaf) : leaf;
+            }
+            ++bound;
+            continue;
+        }
+
+        // A region attribute (s_tuid): the regions with one of the values, as a region-set
+        // condition (see AttrCondition::in_regions)
+        if (!corpus_.has_attr(loc_an)) {
+            RegionAttrParts parts;
+            split_region_attr_name(loc_an, parts);
+            const StructuralAttr& sa = corpus_.structure(parts.struct_name);
+            const std::string key = *resolve_region_attr_key(sa, parts.struct_name, parts.attr_name);
+            std::vector<int64_t> regions;
+            auto add_regions_of = [&](const std::string& v) {
+                const int64_t* regs = nullptr;
+                size_t nreg = 0;
+                if (sa.regions_for_value(key, v, regs, nreg)) regions.insert(regions.end(), regs, regs + nreg);
+            };
+            if (!vals.empty()) {
+                // Few values compared with the distinct ones: look each one up (values with
+                // several components, `a|b`, are listed once per corpus and checked one by
+                // one). Many: one pass over the distinct values is cheaper than the lookups.
+                const LexiconId K = sa.has_region_value_reverse(key) ? sa.region_attr_lex_size(key) : 0;
+                if (K > 0 && vals.size() * 16 >= static_cast<size_t>(K)) {
+                    for (LexiconId id = 0; id < K; ++id) {
+                        if ((id & 0xFFFF) == 0) check_cancelled();
+                        const std::string_view v = sa.region_attr_lex_get(key, id);
+                        if (hits(v, vals)) add_regions_of(std::string(v));
+                    }
+                } else if (K > 0) {
+                    for (const auto& v : vals) add_regions_of(v);
+                    const std::string ck = "alignment-composites\x1f" + parts.struct_name + "\x1f" + key;
+                    std::shared_ptr<const Corpus::IdSet> composites = corpus_.cached_id_set(ck);
+                    if (!composites) {
+                        auto ids = std::make_shared<Corpus::IdSet>();
+                        for (LexiconId id = 0; id < K; ++id) {
+                            if ((id & 0xFFFF) == 0) check_cancelled();
+                            if (sa.region_attr_lex_get(key, id).find('|') != std::string_view::npos)
+                                ids->push_back(static_cast<int32_t>(id));
+                        }
+                        composites = ids;
+                        corpus_.cache_id_set(ck, composites);
+                    }
+                    for (int32_t id : *composites) {
+                        const std::string_view v = sa.region_attr_lex_get(key, static_cast<LexiconId>(id));
+                        if (hits(v, vals)) add_regions_of(std::string(v));
+                    }
+                } else {
+                    for (size_t ri = 0; ri < sa.region_count(); ++ri) {
+                        if ((ri & 0xFFFF) == 0) check_cancelled();
+                        if (hits(sa.region_value(key, ri), vals)) regions.push_back(static_cast<int64_t>(ri));
+                    }
+                }
+                std::sort(regions.begin(), regions.end());
+                regions.erase(std::unique(regions.begin(), regions.end()), regions.end());
+            }
+            size_t ntokens = 0;
+            const CorpusPos ntok = corpus_.size();
+            for (int64_t ri : regions) {
+                if (ri < 0 || static_cast<size_t>(ri) >= sa.region_count()) continue;
+                const Region r = sa.get(static_cast<size_t>(ri));
+                const CorpusPos a = std::max<CorpusPos>(r.start, 0), b = std::min<CorpusPos>(r.end, ntok - 1);
+                if (b >= a) ntokens += static_cast<size_t>(b - a + 1);
+            }
+            AttrCondition ac;
+            ac.attr = loc_attr;
+            ac.op = CompOp::IN;
+            ac.value = ext + "." + ext_attr;
+            ac.in_regions = std::make_shared<const std::vector<int64_t>>(std::move(regions));
+            ac.in_region_struct = parts.struct_name;
+            ac.in_region_tokens = ntokens;
+            ConditionPtr leaf = ConditionNode::make_leaf(std::move(ac));
+            for (auto& t : query.tokens) {
+                if (t.is_anchor() || t.name != loc) continue;
+                t.conditions = t.conditions ? ConditionNode::make_branch(BoolOp::AND, t.conditions, leaf) : leaf;
+            }
+            ++bound;
+            continue;
+        }
+
+        // the local tokens that carry one of them (a multivalue token attribute)
         std::vector<CorpusPos> pos;
         if (!vals.empty()) {
             if (corpus_.has_attr(loc_an)) {
@@ -2232,7 +2345,10 @@ void QueryExecutor::validate_query_name_bindings(const TokenQuery& query,
 // bound that's free to compute.
 
 size_t QueryExecutor::estimate_leaf(const AttrCondition& ac) const {
-    if (ac.op == CompOp::IN) return ac.in_positions ? ac.in_positions->size() : 0;
+    if (ac.op == CompOp::IN) {
+        if (ac.in_regions) return ac.in_region_tokens;
+        return ac.in_positions ? ac.in_positions->size() : 0;
+    }
     std::string name = normalize_attr(ac.attr);
     if (ac.is_nvals)
         return static_cast<size_t>(corpus_.size());
@@ -2467,8 +2583,28 @@ std::optional<int64_t> QueryExecutor::nvals_cardinality_at(
 }
 
 bool QueryExecutor::check_leaf(CorpusPos pos, const AttrCondition& ac) const {
-    if (ac.op == CompOp::IN)
+    if (ac.op == CompOp::IN) {
+        if (ac.in_regions) {
+            if (ac.in_regions->empty() || !corpus_.has_structure(ac.in_region_struct)) return false;
+            const StructuralAttr& sa = corpus_.structure(ac.in_region_struct);
+            auto in_set = [&](int64_t ri) {
+                return std::binary_search(ac.in_regions->begin(), ac.in_regions->end(), ri);
+            };
+            // regions that never overlap (sentences): the one region at pos, by binary search;
+            // nested / overlapping ones: every region at pos
+            if (!corpus_.is_nested(ac.in_region_struct) && !corpus_.is_overlapping(ac.in_region_struct)) {
+                const int64_t ri = sa.find_region(pos);
+                return ri >= 0 && in_set(ri);
+            }
+            bool in = false;
+            sa.for_each_region_at(pos, [&](size_t ri) {
+                in = in_set(static_cast<int64_t>(ri));
+                return !in;   // stop at the first one in the set
+            });
+            return in;
+        }
         return ac.in_positions && std::binary_search(ac.in_positions->begin(), ac.in_positions->end(), pos);
+    }
     if (ac.is_nvals) {
         auto n = nvals_cardinality_at(pos, ac.attr);
         if (!n) return false;
@@ -2664,23 +2800,56 @@ bool QueryExecutor::check_leaf(CorpusPos pos, const AttrCondition& ac) const {
     return false;
 }
 
+// The tokens related to `pos` by a relation inside a token (`child […]`, `next […]`, …):
+// dependency relations need the dependency index; next / prev are the adjacent tokens
+// (as in a sequence), after / before every later / earlier token of the same sentence.
+static std::vector<CorpusPos> related_positions(const Corpus& corpus, CorpusPos pos, StructRelType rel) {
+    std::vector<CorpusPos> related;
+    switch (rel) {
+        case StructRelType::NEXT:
+            if (static_cast<int64_t>(pos) + 1 < static_cast<int64_t>(corpus.size())) related.push_back(pos + 1);
+            return related;
+        case StructRelType::PREV:
+            if (pos > 0) related.push_back(pos - 1);
+            return related;
+        case StructRelType::AFTER:
+        case StructRelType::BEFORE: {
+            if (!corpus.has_structure("s"))
+                throw std::runtime_error("after / before need sentence regions (<s>) in the corpus");
+            const auto& sents = corpus.structure("s");
+            const int64_t r = sents.find_region(pos);
+            if (r < 0) return related;
+            const Region reg = sents.get(static_cast<size_t>(r));
+            if (rel == StructRelType::AFTER)
+                for (CorpusPos p = pos + 1; p <= reg.end; ++p) related.push_back(p);
+            else
+                for (CorpusPos p = pos; p > reg.start;) related.push_back(--p);
+            return related;
+        }
+        default:
+            break;
+    }
+    if (!corpus.has_deps())
+        throw std::runtime_error("Dependency relations (child, parent, sibling, descendant, ancestor) require dependency index");
+    const auto& deps = corpus.deps();
+    switch (rel) {
+        case StructRelType::CHILD:      related = deps.children(pos); break;
+        case StructRelType::PARENT:     { auto h = deps.head(pos); if (h != NO_HEAD) related.push_back(h); break; }
+        case StructRelType::SIBLING:    { auto h = deps.head(pos); if (h != NO_HEAD) { related = deps.children(h); related.erase(std::remove(related.begin(), related.end(), pos), related.end()); } break; }
+        case StructRelType::DESCENDANT: related = deps.subtree(pos); break;
+        case StructRelType::ANCESTOR:   related = deps.ancestors(pos); break;
+        default: break;
+    }
+    return related;
+}
+
 bool QueryExecutor::check_conditions(CorpusPos pos,
                                      const ConditionPtr& cond) const {
     if (!cond) return true;
     if (cond->is_leaf) return check_leaf(pos, cond->leaf);
 
     if (cond->is_count) {
-        if (!corpus_.has_deps())
-            throw std::runtime_error("Count conditions require dependency index");
-        const auto& deps = corpus_.deps();
-        std::vector<CorpusPos> related;
-        switch (cond->count_rel) {
-            case StructRelType::CHILD:      related = deps.children(pos); break;
-            case StructRelType::PARENT:     { auto h = deps.head(pos); if (h != NO_HEAD) related.push_back(h); break; }
-            case StructRelType::SIBLING:    { auto h = deps.head(pos); if (h != NO_HEAD) { related = deps.children(h); related.erase(std::remove(related.begin(), related.end(), pos), related.end()); } break; }
-            case StructRelType::DESCENDANT: related = deps.subtree(pos); break;
-            case StructRelType::ANCESTOR:   related = deps.ancestors(pos); break;
-        }
+        const std::vector<CorpusPos> related = related_positions(corpus_, pos, cond->count_rel);
         int64_t cnt = 0;
         for (CorpusPos rp : related) {
             if (!cond->count_filter || check_conditions(rp, cond->count_filter))
@@ -2700,17 +2869,7 @@ bool QueryExecutor::check_conditions(CorpusPos pos,
     }
 
     if (cond->is_structural) {
-        if (!corpus_.has_deps())
-            throw std::runtime_error("Structural conditions require dependency index");
-        const auto& deps = corpus_.deps();
-        std::vector<CorpusPos> related;
-        switch (cond->struct_rel) {
-            case StructRelType::CHILD:      related = deps.children(pos); break;
-            case StructRelType::PARENT:     { auto h = deps.head(pos); if (h != NO_HEAD) related.push_back(h); break; }
-            case StructRelType::SIBLING:    { auto h = deps.head(pos); if (h != NO_HEAD) { related = deps.children(h); related.erase(std::remove(related.begin(), related.end(), pos), related.end()); } break; }
-            case StructRelType::DESCENDANT: related = deps.subtree(pos); break;
-            case StructRelType::ANCESTOR:   related = deps.ancestors(pos); break;
-        }
+        const std::vector<CorpusPos> related = related_positions(corpus_, pos, cond->struct_rel);
         bool any_match = false;
         for (CorpusPos rp : related) {
             if (check_conditions(rp, cond->nested_conditions)) {
@@ -3029,6 +3188,23 @@ static std::vector<CorpusPos> union_id_postings(const PositionalAttr& pa, const 
 
 std::vector<CorpusPos> QueryExecutor::resolve_leaf(
         const AttrCondition& ac) const {
+    if (ac.op == CompOp::IN && ac.in_regions) {
+        // the tokens of the regions (in the operand window when windowed)
+        std::vector<CorpusPos> out;
+        if (!corpus_.has_structure(ac.in_region_struct)) return out;
+        const StructuralAttr& sa = corpus_.structure(ac.in_region_struct);
+        CorpusPos lo = 0, hi = corpus_.size();
+        if (windowed()) { lo = operand_window_.lo; hi = std::min(operand_window_.hi, corpus_.size()); }
+        out.reserve(std::min(ac.in_region_tokens, static_cast<size_t>(std::max<CorpusPos>(hi - lo, 0))));
+        for (int64_t ri : *ac.in_regions) {
+            if (ri < 0 || static_cast<size_t>(ri) >= sa.region_count()) continue;
+            const Region r = sa.get(static_cast<size_t>(ri));
+            for (CorpusPos p = std::max(r.start, lo); p <= r.end && p < hi; ++p) out.push_back(p);
+        }
+        std::sort(out.begin(), out.end());
+        out.erase(std::unique(out.begin(), out.end()), out.end());
+        return out;
+    }
     if (ac.op == CompOp::IN) {
         if (!ac.in_positions) return {};
         const auto& v = *ac.in_positions;

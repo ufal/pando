@@ -2812,13 +2812,23 @@ static void run_query(const Corpus& corpus, const std::string& input,
             if (stmt.command.type == CommandType::SET) {
                 const std::string& name = stmt.command.set_name;
                 const std::string& val  = stmt.command.set_value;
+                // JSON mode: a `set` that ends the program answers (clients wait for one
+                // JSON object per program line), with the error when the value is refused
+                const bool answer_json = opts.json && si + 1 == prog.size();
+                bool set_failed = false;
+                std::string set_error;
+                auto fail = [&](const std::string& msg) {
+                    set_failed = true;
+                    set_error = msg;
+                    if (!opts.json) std::cerr << "Error: " << msg << "\n";
+                };
                 auto to_size = [&](size_t& target) {
                     try { target = std::stoull(val); }
-                    catch (...) { std::cerr << "Error: invalid value for " << name << ": " << val << "\n"; }
+                    catch (...) { fail("invalid value for " + name + ": " + val); }
                 };
                 auto to_int = [&](int& target) {
                     try { target = std::stoi(val); }
-                    catch (...) { std::cerr << "Error: invalid value for " << name << ": " << val << "\n"; }
+                    catch (...) { fail("invalid value for " + name + ": " + val); }
                 };
                 auto split_csv = [](const std::string& s) -> std::vector<std::string> {
                     std::vector<std::string> out;
@@ -2860,9 +2870,12 @@ static void run_query(const Corpus& corpus, const std::string& input,
                 else if (name == "debug")     to_int(opts.debug_level);
                 else if (name == "threads")   { int t; to_int(t); opts.threads = static_cast<unsigned>(t); }
                 else if (name == "sample")    to_size(opts.sample);
+                else if (name == "seed")      { size_t v = 0; to_size(v); opts.sample_seed = static_cast<uint32_t>(v); }
                 else if (name == "anchor-binding" || name == "anchor_binding") {
                     if (val != "fanout" && val != "innermost") {
-                        std::cerr << "anchor-binding must be 'fanout' or 'innermost'\n";
+                        fail("anchor-binding must be 'fanout' or 'innermost'");
+                        if (answer_json)
+                            std::cout << "{\"ok\": false, \"operation\": \"set\", \"error\": " << jstr(set_error) << "}\n";
                         continue;
                     }
                     opts.anchor_binding = val;
@@ -2870,10 +2883,17 @@ static void run_query(const Corpus& corpus, const std::string& input,
                 else if (name == "allow-empty-alignment" || name == "allow_empty_alignment")
                     opts.allow_empty_alignment = (val == "true" || val == "1" || val == "on");
                 else {
-                    std::cerr << "Unknown setting: " << name << "\n";
-                    continue;
+                    fail("unknown setting: " + name);
                 }
-                if (!opts.json) std::cout << name << " = " << val << "\n";
+                if (answer_json) {
+                    if (set_failed)
+                        std::cout << "{\"ok\": false, \"operation\": \"set\", \"error\": " << jstr(set_error) << "}\n";
+                    else
+                        std::cout << "{\"ok\": true, \"operation\": \"set\", \"name\": " << jstr(name)
+                                  << ", \"value\": " << jstr(val) << "}\n";
+                } else if (!opts.json && !set_failed) {
+                    std::cout << name << " = " << val << "\n";
+                }
                 continue;
             }
             if (stmt.command.type == CommandType::SHOW_SETTINGS) {

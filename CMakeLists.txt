@@ -159,6 +159,7 @@ add_library(pando_core STATIC
     src/query/executor.cpp
     src/query/executor_aggregate.cpp
     src/query/executor_sort.cpp
+    src/query/sort_field.cpp
     src/query/executor_anchors.cpp
     src/query/executor_tabulate.cpp
     src/api/index_api.cpp
@@ -306,6 +307,11 @@ if(BUILD_TESTING)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/parallel_join_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
                 --server $<TARGET_FILE:pando-server>)
+        # alignment filters on an earlier statement's label (`eo.s_tuid = ang.s_tuid`,
+        # `eo.upos = ang.upos`) == brute force: region sets, id sets, components, missing values
+        add_test(NAME cross_statement_align
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/cross_statement_align_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
         # P7.8: coll / dcoll via the hit sink and page-only tabulate = over all hits
         add_test(NAME coll_sink
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/coll_sink_test.py

@@ -233,6 +233,11 @@ std::string read_tabulate_field(const Corpus& corpus, const Match& m,
             return render_date_part(*tg_val(m, "code"));
     }
 
+    // `cpos` (CWB's term): the token's corpus position, unless the corpus has an attribute
+    // of that name. `tabulate h.cpos, d.cpos` gives positions for computing distances,
+    // word order, … outside pando.
+    if (attr_spec == "cpos" && !corpus.has_attr("cpos"))
+        return std::to_string(pos);
     std::string attr = normalize_query_attr_name(corpus, attr_spec);
     std::string feat_name;
     if (feats_is_subkey(attr, feat_name) && corpus.has_attr("feats")) {

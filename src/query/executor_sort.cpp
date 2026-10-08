@@ -3,6 +3,7 @@
 #include "query/executor.h"
 #include "query/executor_aggregate_internal.h"
 #include "query/flat_agg_counter.h"
+#include "query/sort_field.h"
 
 #include <algorithm>
 #include <numeric>
@@ -21,12 +22,31 @@ struct SortKeys {
     uint64_t card() const { return keys.ncols == 2 ? keys.v1 * keys.v2 : keys.v1; }
     bool dense() const { return keys.v1 <= kDenseMax && (keys.ncols == 1 || keys.v2 <= kDenseMax) && card() <= kDenseMax; }
 
+    /// a field sorts on the whole match (`on match..matchend`): keyed on the first token,
+    /// so only one-token hits (the sinks check every hit)
+    bool single = false;
+
     SortKeys(const Corpus& corpus, const TokenQuery& q, const std::vector<std::string>& fields) {
         if (fields.empty() || fields.size() > 2) return;
-        if (!build_aggregate_plan(corpus, fields, plan)) return;
-        const NameIndexMap nm = QueryExecutor::build_name_map_for_stripped_query(q);
         size_t ntok = 0;
         for (const auto& t : q.tokens) ntok += !t.is_anchor();
+        // %c / %d: keyed on the attribute's own values; build_sort_index ranks them by their
+        // folded strings (equal ones share a rank). Other ranges: sort the kept hits.
+        std::vector<std::string> base;
+        for (const auto& f : fields) {
+            SortFieldSpec spec;
+            if (!parse_sort_field(f, spec)) {
+                base.push_back(f);
+                continue;
+            }
+            if (spec.range) {
+                if (!spec.whole_match() || ntok != 1) return;
+                single = true;
+            }
+            base.push_back(spec.attr);
+        }
+        if (!build_aggregate_plan(corpus, base, plan)) return;
+        const NameIndexMap nm = QueryExecutor::build_name_map_for_stripped_query(q);
         ok = keys.init(plan, nm, ntok, corpus, false);
     }
 };
@@ -42,6 +62,7 @@ struct CountSink : HitSink {
     std::vector<CorpusPos> rep;   // stride * 2 per key: starts, ends
     size_t stride = 0;
     bool bad = false;
+    bool single = false;   // one-token hits only (SortKeys::single)
     CountSink(FlatAggCounter& k, bool use_dense, uint64_t card) : keys(k) {
         if (use_dense) dense.assign(static_cast<size_t>(card), kNone);
     }
@@ -49,7 +70,7 @@ struct CountSink : HitSink {
         if (bad) return;
         if (stride == 0) stride = n;
         uint64_t k = 0;
-        if (n != stride || !keys.key_of(s, n, k)) { bad = true; return; }
+        if (n != stride || (single && (n != 1 || e[0] != s[0])) || !keys.key_of(s, n, k)) { bad = true; return; }
         uint32_t d;
         if (!dense.empty()) {
             if (k >= dense.size()) { bad = true; return; }
@@ -79,12 +100,13 @@ struct PageSink : HitSink {
     struct Kept { size_t at; std::vector<CorpusPos> pos; };
     std::vector<Kept> kept;
     bool bad = false;
+    bool single = false;
     PageSink(FlatAggCounter& k, const SortIndex& s, size_t f, size_t t)
         : keys(k), si(s), from(f), to(t), seen(s.start.size(), 0) {}
     void hit(const CorpusPos* s, const CorpusPos* e, size_t n) override {
         if (bad) return;
         uint64_t k = 0;
-        if (!keys.key_of(s, n, k)) { bad = true; return; }
+        if ((single && (n != 1 || e[0] != s[0])) || !keys.key_of(s, n, k)) { bad = true; return; }
         uint32_t r;
         if (!si.rank_dense.empty()) {
             if (k >= si.rank_dense.size() || !si.rank_dense[static_cast<size_t>(k)]) { bad = true; return; }
@@ -113,6 +135,7 @@ std::shared_ptr<const SortIndex> QueryExecutor::build_sort_index(const TokenQuer
     SortKeys sk(corpus_, q, fields);
     if (!sk.ok) return nullptr;
     CountSink sink(sk.keys, sk.dense(), sk.card());
+    sink.single = sk.single;
     set_hit_sink(&sink);
     MatchSet ms;
     try {
@@ -166,6 +189,7 @@ std::optional<MatchSet> QueryExecutor::sorted_page(const TokenQuery& q, const So
     if (!sk.ok) return std::nullopt;
     to = std::min(to, si.total);
     PageSink sink(sk.keys, si, from, to);
+    sink.single = sk.single;
     set_hit_sink(&sink);
     MatchSet ms;
     try {

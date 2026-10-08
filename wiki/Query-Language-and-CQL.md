@@ -40,7 +40,7 @@ To disable a dialect: configure with **`-DPANDO_CWB_DIALECT=OFF`** or **`-DPANDO
 - **`!=` with a pattern** (`[lemma != ".*e.*"]`: tokens whose lemma does not match), and the flags **`%c`** (also on patterns: `"the.*"%c`, as in CQP — native pando-CQL keeps `%c` for literal comparisons), **`%d`** (literal comparisons) and **`%l`** (literal, also after `!=`).
 - **`count by <attribute>`** with basic forms (see trace output for ignored modifiers).
 - **`group by <field>[, <field> …]`** mapped to the native **`group`** command. Fields use Pando’s **`name.attribute`** form; CWB-style **`name attribute`** (space instead of a dot) is accepted and normalized (e.g. `match lemma` → `match.lemma`). **`match.lemma`** is also accepted as a single dotted token.
-- **`sort by <field>[, …]`** → native **`sort`** (optional corpus id before **`by`** is skipped).
+- **`sort [Name] by <field> [%c|%d|%cd] [on <from>..<to>]`** → native **`sort`** of the named query (or `Last`), with CQP's semantics: the key is the whole match (`match`..`matchend`) unless boundaries are given; `%c` / `%d` sort case- / diacritic-insensitively; boundaries are `match`, `matchend` or a token label with an optional offset (`on matchend[1]..matchend[5]` sorts on the right context, `on match[-1]..match[-5]` on the left context read from right to left). Boundaries beyond the corpus are clamped to its first / last token, as in CQP. Equal keys keep corpus order (CQP's order among them is arbitrary).
 - **`size`** → native **`size`** (optional query name).
 - **`tabulate`** → native **`tabulate`**: `tabulate [offset limit] field[, …]`, `tabulate QueryName offset limit field[, …]`, or `tabulate field[, …]` (default offset `0`, limit `1000`).
 
@@ -49,7 +49,7 @@ To disable a dialect: configure with **`-DPANDO_CWB_DIALECT=OFF`** or **`-DPANDO
 - **CQP shell commands** at statement start: `cat`, `save`, `show`, `set`, `discard`, **`intersect` / `union` / `diff` / `join` / `subset`**, `meet`, `info`, `dump`, `cut`, `mu`, `tab`, `exec`, macros, and similar keywords.
 - **`meet` / `join` on named query results** (same class as shell combinators above).
 - **Pattern features** not mapped to the native condition AST, including: **`within` / `containing`** after the pattern; **global `::`** constraints after the pattern; **alternation `|`** between full token-sequence patterns at the top level; **parenthesised groups** with repetition in some forms; **lookahead** `[: … :]` / `[::]`; **boolean `!`** and **`->`** inside **`[ ]`**; **MU** / **TAB** query forms; **XML/anchor tags** in the pattern; **region append `<<`**; **`cut` / `show match …`** tails; **redirection** / **`into outfile`** (Pando has no query-directed file output).
-- **`count` / `group` / `sort` / `size` / `tabulate`**: `on match` / anchor boundaries, **`cut`**, shell-style **`>`** redirection.
+- **`count` / `group` / `size` / `tabulate`**: `on match` / anchor boundaries; for all of these and `sort`: **`cut`**, shell-style **`>`** redirection. `sort … descending` / `reverse` are accepted but not applied.
 
 **Security / I/O:** There is no **`into outfile`** or other query-driven disk write; use shell redirection on the CLI if you need a file.
 

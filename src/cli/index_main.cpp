@@ -113,7 +113,7 @@ static void write_overlay_info(const std::string& overlay_dir,
 // `pando-index --upgrade <corpus_dir>`: add derived files that newer versions
 // use when present, without re-indexing. Also run after every build.
 //   dep.head_rel                 (P1.8)  relative head offsets
-//   <attr>.fold_{lc,na,lcna}.perm (P1.6)  %c / %d / %cd lookups
+//   <attr>.fold_{lc,na,lcna}.v2.perm (P1.6)  %c / %d / %cd lookups (UTF-8 fold)
 //   <attr>.bm{,.idx}             (P3.1)  chunked bitmaps, low-cardinality attrs
 // P5.2 default: upos × upos edge postings (when the corpus has deps and upos).
 static const char* const kDefaultDepPairs = "upos:upos";

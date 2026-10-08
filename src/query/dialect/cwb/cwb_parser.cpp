@@ -756,34 +756,84 @@ Statement parse_cwb_size_cmd(TokStream& ts, std::ostringstream* trace) {
     return stmt;
 }
 
+// `match`, `matchend` or a token label, with an optional `[n]` offset (sort boundaries)
+static std::string parse_cwb_sort_anchor(TokStream& ts) {
+    if (ts.eof() || (ts.peek().kind != CwbTok::FIELD && ts.peek().kind != CwbTok::ID))
+        throw std::runtime_error("Expected `match`, `matchend` or a label in sort boundaries (`on …`)");
+    std::string anchor = ts.peek().text;
+    if (ts.peek().kind == CwbTok::FIELD && anchor != "match" && anchor != "matchend")
+        throw std::runtime_error("Unsupported in CWB sort boundaries: `" + anchor + "` (use match / matchend)");
+    ts.bump();
+    if (!ts.eof() && ts.peek().kind == CwbTok::LBRACK) {
+        ts.bump();
+        if (ts.eof() || ts.peek().kind != CwbTok::INTEGER)
+            throw std::runtime_error("Expected an offset in `" + anchor + "[…]`");
+        anchor += "[" + ts.peek().text + "]";
+        ts.bump();
+        expect_tok(ts, CwbTok::RBRACK, "']' after the offset");
+    }
+    return anchor;
+}
+
+// IMS parser.y: SortCmd → SORT_SYM OptionalCID SortClause …; SortClause → BY_SYM ID
+// OptionalFlag SortBoundaries SortDirection OptReverse. The key is the match (match ..
+// matchend) unless boundaries say otherwise; %c / %d fold it. The field keeps these
+// options in its text (query/sort_field.h).
 Statement parse_cwb_sort_cmd(TokStream& ts, std::ostringstream* trace) {
     expect_tok(ts, CwbTok::SORT_SYM, "sort");
 
+    Statement stmt;
+    stmt.has_command = true;
+    stmt.command.type = CommandType::SORT;
+
+    // OptionalCID: the named query to sort (`sort Matches by word`)
     if (!ts.eof() && ts.peek().kind == CwbTok::ID && peek2_kind(ts) == CwbTok::BY_SYM) {
-        if (trace)
-            *trace << "  (CWB sort: corpus id '" << ts.peek().text
-                   << "' skipped — pando uses the open corpus)\n";
+        stmt.command.query_name = ts.peek().text;
         ts.bump();
     }
 
     expect_tok(ts, CwbTok::BY_SYM, "'by' after sort");
 
-    Statement stmt;
-    stmt.has_command = true;
-    stmt.command.type = CommandType::SORT;
-    stmt.command.fields.push_back(parse_cwb_by_field(ts, "after 'sort by'"));
-
+    auto parse_key = [&](const char* ctx) {
+        std::string field = parse_cwb_by_field(ts, ctx);
+        if (!ts.eof() && ts.peek().kind == CwbTok::FLAG) {
+            std::string flags = ts.peek().text;
+            if (!flags.empty() && flags[0] == '%') flags.erase(0, 1);
+            for (char f : flags)
+                if (f != 'c' && f != 'd')
+                    throw std::runtime_error(std::string("Unsupported sort flag %") + f + " (use %c, %d)");
+            ts.bump();
+            if (!flags.empty()) field += " %" + flags;
+        }
+        if (!ts.eof() && ts.peek().kind == CwbTok::ON_SYM) {
+            ts.bump();
+            std::string from = parse_cwb_sort_anchor(ts);
+            std::string to = from;
+            if (!ts.eof() && ts.peek().kind == CwbTok::ELLIPSIS) {
+                ts.bump();
+                to = parse_cwb_sort_anchor(ts);
+            }
+            field += " on " + from + ".." + to;
+        } else {
+            field += " on match..matchend";
+        }
+        stmt.command.fields.push_back(field);
+    };
+    parse_key("after 'sort by'");
     while (!ts.eof() && ts.peek().kind == CwbTok::COMMA) {
         ts.bump();
-        stmt.command.fields.push_back(parse_cwb_by_field(ts, "after ',' in sort by"));
+        parse_key("after ',' in sort by");
     }
 
     parse_cwb_sort_cmd_tail(ts, trace, "sort");
 
     if (trace) {
-        *trace << "  statement: CWB sort by";
+        *trace << "  statement: CWB sort";
+        if (!stmt.command.query_name.empty())
+            *trace << " " << stmt.command.query_name;
+        *trace << " by";
         for (const std::string& f : stmt.command.fields)
-            *trace << " " << f;
+            *trace << " [" << f << "]";
         *trace << "\n";
     }
 

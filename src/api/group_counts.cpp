@@ -1,5 +1,6 @@
 #include "api/group_counts.h"
 #include "core/json_utils.h"
+#include "query/sort_field.h"
 
 #include <algorithm>
 #include <cctype>
@@ -104,7 +105,12 @@ std::string make_group_key(const Corpus& corpus, const Match& m, const NameIndex
     std::string key;
     for (size_t i = 0; i < fields.size(); ++i) {
         if (i > 0) key += '\t';
-        key += read_tabulate_field(corpus, m, name_map, fields[i]);
+        // a field with CQP options (`form %cd`, `form on match[-1]..match[-5]`)
+        SortFieldSpec spec;
+        if (parse_sort_field(fields[i], spec))
+            key += read_sort_field(corpus, m, name_map, spec);
+        else
+            key += read_tabulate_field(corpus, m, name_map, fields[i]);
     }
     return key;
 }

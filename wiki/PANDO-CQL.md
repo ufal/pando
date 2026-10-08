@@ -25,6 +25,8 @@ Slash-regex values are plain regular expressions. For example `[form = /.*tion/]
 
 The regex syntax is RE2's (a Perl / PCRE subset, as in CWB and Manatee) when pando is built with RE2 — the recommended build: `.` matches one character, including non-ASCII ones (`"h.t"` finds *hát*), `(?i)` makes a pattern case-insensitive (`[lemma = "(?i)praha"]`; for a plain word `%c` is faster: `[lemma = "praha" %c]`), classes like `\d`, `\w`, `[[:upper:]]` work. Backreferences and lookaround, which RE2 does not have, fall back to std::regex (ECMAScript). A build without RE2 uses std::regex throughout, where `.` matches one *byte* of UTF-8. A regex on an attribute is matched once per query against the attribute's lexicon (the distinct values), not per token: a literal prefix (`un.*`) narrows that to a range of the sorted lexicon, a literal the value must contain (`.*ung`, also with `%c` or `(?i)`) is checked before the regex, and a large lexicon is scanned by several threads. On a 38M-token corpus with 3.1M word forms `[form=".*ung"]` takes about 20 ms, `[form="[A-Z].*"]` (no literal) about 150 ms on two cores; a server reuses the matching values for the same regex.
 
+The flags `%c` (case-insensitive), `%d` (diacritic-insensitive) and `%cd` (both) on a literal comparison work on UTF-8: `[form="řeka" %c]` finds *Řeka*, *řeka* and *ŘEKA*, `[form="zena" %cd]` also *Žena*. Folding covers Latin (including Central European letters), Greek and Cyrillic; as in Unicode decomposition, letters such as *ø*, *ł*, *æ* and *ß* have no accent to remove. Indexes built before this fold (October 2026) get its lookup files from `pando-index --upgrade`; until then `%c` / `%d` still work, more slowly.
+
 A regex with a literal start (`"un.*"`) only looks at the matching part of the lexicon; one without (`".*ness"`) scans the whole lexicon. The set of lexicon entries a pattern matches is kept per corpus, so the page, the background total and later pages of the same query do not scan again.
 
 
@@ -55,7 +57,11 @@ With that, our query becomes `a:[upos="DET"] < [lemma="book"]`, which will find 
 
 Dependency and sequence relations can be combined, with the token being interpreted by the symbol between them, so `[upos="DET"] [upos="ADJ"] < [lemma="book"]` requires the adjective to be to the right of the determiner, as well as the adjective to be governed by the word *book*. And it is possible to negate dependencies: `[upos="DET"] !< [lemma="book"]` for occurrences of *book* without a determiner.
 
+A dependency operator always relates two single tokens: next to a repeated token (`[upos="DET"] [upos="ADJ"]* < [lemma="book"]`) it would be unclear which token it relates, and with zero repetitions it would relate the determiner instead, so such a query gives an error. Repetitions remain available in plain sequences (`[upos="DET"] [upos="ADJ"]* [lemma="book"]`), and relations can always be expressed inside a token (see below).
+
 Intead of using sequence notation, it is also possible to define dependency relations as token restriction, in a notation similar to that used in PML-TQ. In that case, to look for a noun modified by a determiner, we specify inside the token that we are looking for a child that is a determiner: `[upos="NOUN" & child [upos="DET"] ]`. This notation has the advantage that you can specify multiple children, and still have the option to furthermore look for words to the left or the right. And there are more option in the token-restriction notation: you can look not only for `child`, but also for `parent`, `ancestor`, `descendant`, or `sibling`.
+
+Besides these dependency relations, a token can also be restricted by its neighbours: `next [ … ]` and `prev [ … ]` are the token directly after and before it (as in a sequence), `after [ … ]` and `before [ … ]` any later or earlier token in the same sentence (they need `<s>` regions). That makes it possible to combine order and dependency in ways a single sequence cannot: `[upos="DET"] [upos="NOUN" & child [upos="ADJ" & prev [upos="ADV"]]]` finds a determiner followed by a noun that has an adjectival dependent which itself follows an adverb, wherever that adjective is. Like the dependency relations, they can be negated (`[upos="ADJ" & not next [upos="NOUN"]]`) and counted (`count(after[upos="PUNCT"]) >= 2`). Only before `[` are these words relations, so an attribute called `next` or `after` can still be queried as `[after="x"]`.
 
 Also for depenencies as token restrictions, we can use negations: `[upos="VERB" & not child [deprel="nsubj"]]` to look for any verbs without a nominal subject (*!>* as an operator leads to semantic problems so is not supported). 
 
@@ -287,7 +293,7 @@ Between the frequency and the output functions, the following functions are supp
 | size  | size [M] | count how many results there are in M |
 | count  | count [M] by att+ | count how many results there are for each token or region attribute |
 | group | group [M] by att+ | synonym for count |
-| sort | sort [M] by att+ | sort the result on a token or region attribute |
+| sort | sort [M] by att [%c\|%d\|%cd] [on from..to]+ | sort the result on a token or region attribute (see below) |
 | cat | cat [M] | produce a KWIC list of the results of M |
 | freq | freq [M] by att | similar to count but gives instances per million (IPM) |
 | stats | stats avg(expr), median(expr) [by att+] | numeric aggregates per group (or globally without `by`) |
@@ -297,7 +303,9 @@ Between the frequency and the output functions, the following functions are supp
 | dcoll | dcoll [M] [rels] by att | dependency-based collocations, optionally filtered by deprel/direction |
 | keyness | keyness [M] [vs N] by att | words overrepresented in M vs rest of corpus (or vs named query N), using log-likelihood G² |
 
-The tabulate command can also take a start and offset in the command: `M = a:[lemma="book"]; tabulate M 0 100 a.lemma, a.form` will tabulate the first 100 occurrences of *book* by lemma and form.
+`sort M by form` sorts on the attribute at the first token of each hit. As in CQP, `%c` and `%d` after the field sort case- and diacritic-insensitively (`sort M by form %cd`), and `on from..to` sorts on a range of tokens: `on match..matchend` (the whole hit), `on matchend[1]..matchend[5]` (the right context) or `on match[-1]..match[-5]` (the left context, compared from the nearest token outwards); `from` and `to` are `match`, `matchend` or a token label, with an optional offset. Hits with equal keys keep their corpus order. The CWB-style dialect (`--cql cwb`) sorts on the whole hit by default, as CQP does.
+
+Besides attributes, `tabulate` can give a token's corpus position: `cpos` (`tabulate M a.cpos, b.cpos`), the number to compute distances or word order from outside pando (unless the corpus has an attribute called `cpos`). The tabulate command can also take a start and offset in the command: `M = a:[lemma="book"]; tabulate M 0 100 a.lemma, a.form` will tabulate the first 100 occurrences of *book* by lemma and form.
 Date-part functions are also supported in `tabulate` fields, e.g. `tabulate M year(a.text_date), month(a.text_date), week(a.text_date), day(a.text_date)`.
 
 The `stats` command computes numeric aggregates over query hits. In `stats avg(expr), median(expr) by ...`, each metric is computed per `by` bucket; without `by`, all hits are one global bucket. Values that cannot be parsed as numbers are skipped per metric (`n_valid`), while bucket size is tracked separately (`n_total`). Example: `a:[]; stats avg(strlen(a.form)), median(strlen(a.form)) by a.text_id`.
@@ -313,6 +321,8 @@ In interactive mode, output settings can be changed at any time with `set` and i
 | right | 5 | right context / collocation window |
 | window | 5 | set left and right at once |
 | limit | 20 | maximum number of results to display (KWIC hits, collocates, keywords, etc.) |
+| sample | 0 | a random sample of this many hits of each query (0: all hits) |
+| seed | 0 | random seed for `sample` (the same seed gives the same sample; 0: a new one each time) |
 | offset | 0 | skip the first N results |
 | measures | logdice | association measures for coll/dcoll/keyness (comma-separated) |
 | min-freq | 5 | minimum co-occurrence frequency for collocations |

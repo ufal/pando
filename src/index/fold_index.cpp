@@ -32,7 +32,10 @@ std::string fold_string(FoldMode m, std::string_view s) {
 }
 
 std::string FoldIndex::path(const std::string& attr_base, FoldMode m) {
-    return attr_base + ".fold_" + fold_mode_suffix(m) + ".perm";
+    // ".v2": sorted by the UTF-8 fold (FoldMap::fold). Files of the earlier ASCII /
+    // Latin-1 fold (".fold_<m>.perm") are ordered differently and are not opened: %c / %d
+    // then fold in memory until `pando-index --upgrade` writes these.
+    return attr_base + ".fold_" + fold_mode_suffix(m) + ".v2.perm";
 }
 
 bool FoldIndex::build(const std::string& attr_base, const Lexicon& lex, FoldMode m,

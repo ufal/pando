@@ -698,14 +698,50 @@ GroupCommand Parser::parse_command() {
         return cmd;
     }
 
+    // sort: CQP options after a field — `%c` / `%d` (case / diacritic insensitive) and
+    // boundaries `on match[-1]..match[-5]`; kept in the field's text (query/sort_field.h)
+    auto parse_sort_anchor = [&]() -> std::string {
+        std::string a = lexer_.expect(TokType::IDENT).text;
+        if (lexer_.peek().type == TokType::LBRACKET) {
+            lexer_.consume();
+            a += "[" + lexer_.expect(TokType::NUMBER).text + "]";
+            lexer_.expect(TokType::RBRACKET);
+        }
+        return a;
+    };
+    auto parse_by_field = [&]() -> std::string {
+        std::string field = parse_field_expr();
+        if (cmd.type != CommandType::SORT) return field;
+        if (lexer_.peek().type == TokType::PERCENT) {
+            lexer_.consume();
+            const std::string flags = lexer_.expect(TokType::IDENT).text;
+            for (char f : flags)
+                if (f != 'c' && f != 'd')
+                    throw std::runtime_error(std::string("sort: unsupported flag %") + f + " (use %c, %d)");
+            field += " %" + flags;
+        }
+        if (lexer_.peek().type == TokType::IDENT && lexer_.peek().text == "on") {
+            lexer_.consume();
+            const std::string from = parse_sort_anchor();
+            std::string to = from;
+            if (lexer_.peek().type == TokType::DOT) {
+                lexer_.consume();
+                lexer_.expect(TokType::DOT);
+                to = parse_sort_anchor();
+            }
+            field += " on " + from + ".." + to;
+        }
+        return field;
+    };
+
     // "by" field_list
     if (lexer_.peek().type == TokType::IDENT && lexer_.peek().text == "by") {
         lexer_.consume();
-        cmd.fields.push_back(parse_field_expr());
+        cmd.fields.push_back(parse_by_field());
 
         while (lexer_.peek().type == TokType::COMMA) {
             lexer_.consume();
-            cmd.fields.push_back(parse_field_expr());
+            cmd.fields.push_back(parse_by_field());
         }
     }
 
@@ -720,6 +756,19 @@ TokenQuery Parser::parse_token_query() {
     while (try_parse_relation(rel)) {
         tq.relations.push_back(rel);
         tq.tokens.push_back(parse_token_expr());
+        // A dependency operator relates two single tokens: next to a repeated token
+        // ([A] [B]* > [C]) it is unclear which token it is about, and with zero
+        // repetitions it would silently relate the neighbouring tokens instead
+        if (rel.type != RelationType::SEQUENCE) {
+            const QueryToken& l = tq.tokens[tq.tokens.size() - 2];
+            const QueryToken& r = tq.tokens.back();
+            if (l.has_repetition() || r.has_repetition())
+                throw std::runtime_error(
+                    "A dependency relation (<, >, <<, >>) cannot involve a repeated token (*, +, ?, {n,m}): "
+                    "it would be unclear which token it relates (and with zero repetitions it would relate "
+                    "the neighbouring token instead). Relate single tokens, or use a restriction inside a "
+                    "token, e.g. [upos=\"NOUN\" & child [upos=\"DET\"]]");
+        }
     }
 
     // Structural clauses: within, not within, containing, not containing
@@ -964,6 +1013,27 @@ QueryToken Parser::parse_token_expr() {
     return qt;
 }
 
+// Relation keywords inside a token: dependency (child, parent, sibling, descendant, ancestor)
+// and order (next, prev, after, before). false for any other word.
+static bool relation_keyword(const std::string& lower, StructRelType& srt) {
+    if (lower == "child") srt = StructRelType::CHILD;
+    else if (lower == "parent") srt = StructRelType::PARENT;
+    else if (lower == "sibling") srt = StructRelType::SIBLING;
+    else if (lower == "descendant") srt = StructRelType::DESCENDANT;
+    else if (lower == "ancestor") srt = StructRelType::ANCESTOR;
+    else if (lower == "next") srt = StructRelType::NEXT;
+    else if (lower == "prev") srt = StructRelType::PREV;
+    else if (lower == "after") srt = StructRelType::AFTER;
+    else if (lower == "before") srt = StructRelType::BEFORE;
+    else return false;
+    return true;
+}
+
+static bool is_order_relation(StructRelType srt) {
+    return srt == StructRelType::NEXT || srt == StructRelType::PREV || srt == StructRelType::AFTER ||
+           srt == StructRelType::BEFORE;
+}
+
 void Parser::parse_repetition(QueryToken& qt) {
     Token t = lexer_.peek();
 
@@ -1074,12 +1144,8 @@ ConditionPtr Parser::parse_primary_condition() {
             std::string rel_lower = rel_tok.text;
             std::transform(rel_lower.begin(), rel_lower.end(), rel_lower.begin(), ::tolower);
             StructRelType srt;
-            if (rel_lower == "child")           srt = StructRelType::CHILD;
-            else if (rel_lower == "parent")     srt = StructRelType::PARENT;
-            else if (rel_lower == "sibling")    srt = StructRelType::SIBLING;
-            else if (rel_lower == "descendant") srt = StructRelType::DESCENDANT;
-            else if (rel_lower == "ancestor")   srt = StructRelType::ANCESTOR;
-            else throw std::runtime_error("Expected relation keyword (child/parent/sibling/descendant/ancestor) in count() at position " + std::to_string(rel_tok.pos));
+            if (!relation_keyword(rel_lower, srt))
+                throw std::runtime_error("Expected relation keyword (child/parent/sibling/descendant/ancestor/next/prev/after/before) in count() at position " + std::to_string(rel_tok.pos));
 
             // Optional filter: [conditions]
             ConditionPtr filter;
@@ -1125,13 +1191,13 @@ ConditionPtr Parser::parse_primary_condition() {
             if (lexer_.peek().type == TokType::IDENT) {
                 std::string next_lower = lexer_.peek().text;
                 std::transform(next_lower.begin(), next_lower.end(), next_lower.begin(), ::tolower);
-                if (next_lower == "child" || next_lower == "parent" || next_lower == "sibling" ||
-                    next_lower == "descendant" || next_lower == "ancestor") {
+                StructRelType probe;
+                if (relation_keyword(next_lower, probe)) {
                     negated = true;
                     lower = next_lower;
                 } else {
                     // Not a structural keyword after "not" — error, "not" isn't a valid attr name
-                    throw std::runtime_error("Expected structural keyword (child/parent/sibling/descendant/ancestor) after 'not' at position " + std::to_string(not_tok.pos));
+                    throw std::runtime_error("Expected relation keyword (child/parent/sibling/descendant/ancestor/next/prev/after/before) after 'not' at position " + std::to_string(not_tok.pos));
                 }
             } else {
                 throw std::runtime_error("Expected structural keyword after 'not' at position " + std::to_string(not_tok.pos));
@@ -1139,13 +1205,22 @@ ConditionPtr Parser::parse_primary_condition() {
         }
 
         StructRelType srt;
-        bool is_struct = true;
-        if (lower == "child") srt = StructRelType::CHILD;
-        else if (lower == "parent") srt = StructRelType::PARENT;
-        else if (lower == "sibling") srt = StructRelType::SIBLING;
-        else if (lower == "descendant") srt = StructRelType::DESCENDANT;
-        else if (lower == "ancestor") srt = StructRelType::ANCESTOR;
-        else is_struct = false;
+        bool is_struct = relation_keyword(lower, srt);
+        // next / prev / after / before are relations only before `[` or `name:[`, so an
+        // attribute of that name (`after="x"`) is still read as an attribute
+        if (is_struct && !negated && is_order_relation(srt)) {
+            Lexer ahead = lexer_;
+            ahead.next();
+            const TokType t2 = ahead.peek().type;
+            if (t2 != TokType::LBRACKET) {
+                bool named = false;
+                if (t2 == TokType::IDENT) {
+                    ahead.next();
+                    named = ahead.peek().type == TokType::COLON;
+                }
+                if (!named) is_struct = false;
+            }
+        }
 
         if (is_struct) {
             lexer_.consume();  // consume the keyword
@@ -1269,9 +1344,12 @@ ConditionPtr Parser::parse_primary_condition() {
     while (lexer_.peek().type == TokType::PERCENT) {
         lexer_.consume();
         Token flag = lexer_.expect(TokType::IDENT);
-        if (flag.text == "c") ac.case_insensitive = true;
-        else if (flag.text == "d") ac.diacritics_insensitive = true;
-        else throw std::runtime_error("Unknown flag '%" + flag.text + "' (expected %c or %d)");
+        // %c, %d, or both in one flag (%cd, as in CQP)
+        for (char f : flag.text) {
+            if (f == 'c') ac.case_insensitive = true;
+            else if (f == 'd') ac.diacritics_insensitive = true;
+            else throw std::runtime_error("Unknown flag '%" + flag.text + "' (expected %c, %d or %cd)");
+        }
     }
 
     return ConditionNode::make_leaf(std::move(ac));
