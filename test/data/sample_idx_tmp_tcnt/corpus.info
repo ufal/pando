@@ -1,0 +1,4 @@
+size=1152
+positional=deprel,feats,form,lemma,tuid,upos,xpos
+structural=contr,p,s,text
+region_attrs=s_tuid,s_sent_id,text_century,text_treebank,text_langcode,text_id,text_genre,text_lang,contr_form,p_tuid
