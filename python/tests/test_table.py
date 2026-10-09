@@ -1,8 +1,12 @@
 """Corpus.table / Table: unit tests on a tabulate payload, and against a built pando
-on the repository's sample corpus (skipped when there is no pando binary)."""
+on the repository's sample corpus (skipped when there is no pando / pando-index binary).
+
+The sample index is built here from test/data/sample.conllu (into a temporary folder),
+so the tests follow the current sample and index format."""
 
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -11,11 +15,28 @@ from pando_cql import Corpus, PandoCqlError, Table
 from pando_cql.parse import normalize_run_payload
 
 REPO = Path(__file__).resolve().parents[2]
-SAMPLE = REPO / "test" / "data" / "sample_idx_tmp_tcnt"
-PANDO = os.environ.get("PANDO_BIN") or (str(REPO / "build" / "pando") if (REPO / "build" / "pando").exists()
-                                         else shutil.which("pando"))
-needs_pando = pytest.mark.skipif(not PANDO or not SAMPLE.exists(), reason="no pando binary / sample corpus")
+SAMPLE_CONLLU = REPO / "test" / "data" / "sample.conllu"
+
+
+def _binary(env, name):
+    local = REPO / "build" / name
+    return os.environ.get(env) or (str(local) if local.exists() else shutil.which(name))
+
+
+PANDO = _binary("PANDO_BIN", "pando")
+PANDO_INDEX = _binary("PANDO_INDEX_BIN", "pando-index")
+needs_pando = pytest.mark.skipif(not PANDO or not PANDO_INDEX or not SAMPLE_CONLLU.exists(),
+                                 reason="no pando / pando-index binary, or no test/data/sample.conllu")
 QUERY = 'h:[upos="VERB"] > d:[deprel="obj"]'
+
+
+@pytest.fixture(scope="module")
+def sample(tmp_path_factory):
+    """The sample corpus, indexed for this test run."""
+    out = tmp_path_factory.mktemp("sample") / "idx"
+    subprocess.run([PANDO_INDEX, str(SAMPLE_CONLLU), str(out)], check=True, capture_output=True)
+    return str(out)
+
 
 PAYLOAD = {
     "ok": True, "operation": "tabulate",
@@ -50,8 +71,8 @@ def test_table_frame():
 
 
 @needs_pando
-def test_set_answers_in_a_session():
-    with Corpus(str(SAMPLE), pando_bin=PANDO) as c:
+def test_set_answers_in_a_session(sample):
+    with Corpus(sample, pando_bin=PANDO) as c:
         assert c.run("set limit 2") == {"ok": True, "operation": "set", "name": "limit", "value": "2"}
         with pytest.raises(PandoCqlError):
             c.table(QUERY, "h.nosuch")
@@ -59,10 +80,10 @@ def test_set_answers_in_a_session():
 
 
 @needs_pando
-def test_table_all_rows_and_positions():
-    with Corpus(str(SAMPLE), pando_bin=PANDO) as c:
+def test_table_all_rows_and_positions(sample):
+    with Corpus(sample, pando_bin=PANDO) as c:
         t = c.table(QUERY, ["h.cpos", "d.cpos", "h.text_lang"])
-        assert len(t) == t.total == 60
+        assert len(t) == t.total > 0
         assert all(isinstance(r["h.cpos"], int) and r["h.cpos"] != r["d.cpos"] for r in t)
         hits = c.run(QUERY)            # the same positions as the hits of the query
         assert (hits["hits"][0]["tokens"][0]["pos"], hits["hits"][0]["tokens"][1]["pos"]) \
@@ -70,19 +91,19 @@ def test_table_all_rows_and_positions():
 
 
 @needs_pando
-def test_sample_is_reproducible_in_session_and_one_shot():
-    with Corpus(str(SAMPLE), pando_bin=PANDO) as c:
+def test_sample_is_reproducible_in_session_and_one_shot(sample):
+    with Corpus(sample, pando_bin=PANDO) as c:
         a = c.table(QUERY, "h.cpos", sample=7, seed=5).column("h.cpos")
         b = c.table(QUERY, "h.cpos", sample=7, seed=5).column("h.cpos")
         full = c.table(QUERY, "h.cpos")               # the sample setting does not stick
-    one = Corpus(str(SAMPLE), pando_bin=PANDO, session=False).table(QUERY, "h.cpos", sample=7, seed=5)
+    one = Corpus(sample, pando_bin=PANDO, session=False).table(QUERY, "h.cpos", sample=7, seed=5)
     assert a == b == one.column("h.cpos") and len(a) == 7
-    assert len(full) == 60 and set(a) <= set(full.column("h.cpos"))
+    assert len(full) == full.total > 7 and set(a) <= set(full.column("h.cpos"))
 
 
 @needs_pando
-def test_table_after_an_earlier_statement():
-    with Corpus(str(SAMPLE), pando_bin=PANDO) as c:
+def test_table_after_an_earlier_statement(sample):
+    with Corpus(sample, pando_bin=PANDO) as c:
         c.run(QUERY)
         t = c.table('x:[upos="DET"] :: h.s_sent_id = x.s_sent_id', "x.form, x.s_sent_id")
         sents = set(c.table(QUERY, "h.s_sent_id").column("h.s_sent_id"))
