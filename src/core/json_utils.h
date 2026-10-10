@@ -64,19 +64,78 @@ inline size_t json_value_pos(const std::string& body, const char* key) {
     }
 }
 
-/// Extract a JSON string value for `key` (handles `\"` / `\\`). Empty if missing.
+/// Decode the JSON string whose opening quote is at `pos` (escapes as in RFC 8259:
+/// `\n`, `\t`, …, `\uXXXX` with surrogate pairs, to UTF-8); `*end` = one past the
+/// closing quote. A malformed `\u` is kept as written.
+inline std::string json_decode_string_at(const std::string& s, size_t pos, size_t* end = nullptr) {
+    std::string val;
+    if (pos >= s.size() || s[pos] != '"') { if (end) *end = pos; return val; }
+    ++pos;
+    auto hex4 = [&](size_t at, unsigned& cp) -> bool {
+        if (at + 4 > s.size()) return false;
+        cp = 0;
+        for (size_t k = at; k < at + 4; ++k) {
+            const char h = s[k];
+            cp <<= 4;
+            if (h >= '0' && h <= '9') cp |= static_cast<unsigned>(h - '0');
+            else if (h >= 'a' && h <= 'f') cp |= static_cast<unsigned>(h - 'a' + 10);
+            else if (h >= 'A' && h <= 'F') cp |= static_cast<unsigned>(h - 'A' + 10);
+            else return false;
+        }
+        return true;
+    };
+    auto put_utf8 = [&](unsigned cp) {
+        if (cp < 0x80) val += static_cast<char>(cp);
+        else if (cp < 0x800) { val += static_cast<char>(0xC0 | (cp >> 6)); val += static_cast<char>(0x80 | (cp & 0x3F)); }
+        else if (cp < 0x10000) {
+            val += static_cast<char>(0xE0 | (cp >> 12));
+            val += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            val += static_cast<char>(0x80 | (cp & 0x3F));
+        } else {
+            val += static_cast<char>(0xF0 | (cp >> 18));
+            val += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            val += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            val += static_cast<char>(0x80 | (cp & 0x3F));
+        }
+    };
+    while (pos < s.size()) {
+        char c = s[pos++];
+        if (c == '"') break;
+        if (c != '\\' || pos >= s.size()) { val += c; continue; }
+        c = s[pos++];
+        switch (c) {
+            case 'n': val += '\n'; break;
+            case 't': val += '\t'; break;
+            case 'r': val += '\r'; break;
+            case 'b': val += '\b'; break;
+            case 'f': val += '\f'; break;
+            case 'u': {
+                unsigned cp = 0;
+                if (!hex4(pos, cp)) { val += "\\u"; break; }
+                pos += 4;
+                if (cp >= 0xD800 && cp <= 0xDBFF) {
+                    unsigned lo = 0;
+                    if (pos + 1 < s.size() && s[pos] == '\\' && s[pos + 1] == 'u' && hex4(pos + 2, lo)
+                        && lo >= 0xDC00 && lo <= 0xDFFF) {
+                        pos += 6;
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                    }
+                }
+                put_utf8(cp);
+                break;
+            }
+            default: val += c;   // \" \\ \/
+        }
+    }
+    if (end) *end = pos;
+    return val;
+}
+
+/// Extract a JSON string value for `key` (escapes decoded). Empty if missing.
 inline std::string json_extract_str(const std::string& body, const char* key) {
     size_t pos = json_value_pos(body, key);
     if (pos == std::string::npos || pos >= body.size() || body[pos] != '"') return {};
-    ++pos;
-    std::string val;
-    while (pos < body.size()) {
-        char c = body[pos++];
-        if (c == '"') break;
-        if (c == '\\' && pos < body.size()) c = body[pos++];
-        val += c;
-    }
-    return val;
+    return json_decode_string_at(body, pos);
 }
 
 inline size_t json_extract_num(const std::string& body, const char* key, size_t default_val) {
@@ -193,12 +252,7 @@ inline std::vector<std::string> json_extract_str_array(const std::string& body, 
         if (raw[i] == '"') {
             const size_t e = json_value_end(raw, i);
             if (e == std::string::npos) break;
-            std::string v;
-            for (size_t j = i + 1; j + 1 < e; ++j) {
-                if (raw[j] == '\\' && j + 2 < e) ++j;
-                v += raw[j];
-            }
-            out.push_back(std::move(v));
+            out.push_back(json_decode_string_at(raw, i));
             i = e;
         } else {
             ++i;

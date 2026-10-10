@@ -159,6 +159,8 @@ Like in CWB, you can name queries, so that you can later refer back to them in r
 
 After a query has been executed, frequency results can be obtained from it, in which the name of the query, and the name(s) of the query tokens can be used: `Matches = a:[lemma="book" & text_genre="Book"]; count Matches by a.form;` will look for all occurences of the lemma *book*, store it as *Matches* and then provide the frequency of each form in which it is used in corpus. Counting can be done by more than one attribute: `count Matches by a.form, a.text_century` will give an overview of which form of *book* was used in which frequency in each century - and not only that, but if one of the attributes used in the grouping is not a token attribute but a region attribute, the system will futhermore return the *relative frequency*, that is to say in the example, how frequent each form is in each century, relative to the total number of tokens for that century.
 
+Named queries live on in the session (pando-server: a client session, or the server's shared program session): a later program can refer to `Matches` without repeating it. When a program defines a name again with exactly the same query (`Matches = …` unchanged), the session's set is used instead of running the query again — with the hits it still keeps, else re-derived from the query — and the answer lists those names in `"reused": ["Matches"]`. A changed query, a set that was sorted since, and the last statement of a program (its page is the answer) are run as usual. This is what makes a front end that re-sends its named queries with every command (`A = …; B = …; freq A, B by …`, then `coll`, …) cheap after the first run.
+
 ## Corpus position 
 
 It is possible to use comparisons between the corpus positions of tokens to ensure that one is after the other - for sequential searches that is not that relevant, but we can look for all modifying adjectives (in Spanish or French, where both occur) that appear before a noun, by making comparing their positions: `a:[upos="NOUN" & text_lang="French"] > b:[upos="ADJ"] :: a > b` (pre-nominal adjective in the French sentence in the sample).
@@ -300,7 +302,7 @@ Between the frequency and the output functions, the following functions are supp
 | raw | raw [M] | one line per match with corpus positions and token forms |
 | tabulate | tabulate [M] att+ | produce a table with the given columns |
 | coll | coll [M] by att | window-based collocations sorted by association measure |
-| dcoll | dcoll [M] [rels] by att | dependency-based collocations, optionally filtered by deprel/direction |
+| dcoll | dcoll [M] [rels] by att[, att2] | dependency-based collocations, optionally filtered by deprel/direction; `att2` (e.g. `deprel`, `upos`) is tallied per collocate |
 | keyness | keyness [M] [vs N] by att | words overrepresented in M vs rest of corpus (or vs named query N), using log-likelihood G² |
 
 `sort M by form` sorts on the attribute at the first token of each hit. As in CQP, `%c` and `%d` after the field sort case- and diacritic-insensitively (`sort M by form %cd`), and `on from..to` sorts on a range of tokens: `on match..matchend` (the whole hit), `on matchend[1]..matchend[5]` (the right context) or `on match[-1]..match[-5]` (the left context, compared from the nearest token outwards); `from` and `to` are `match`, `matchend` or a token label, with an optional offset. Hits with equal keys keep their corpus order. The CWB-style dialect (`--cql cwb`) sorts on the whole hit by default, as CQP does.

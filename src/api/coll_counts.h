@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -21,7 +22,14 @@ struct CollCounts {
     std::vector<std::pair<LexiconId, size_t>> items;
     /// all counted positions (window positions / related tokens)
     size_t total = 0;
+    /// `dcoll … by attr, attr2`: per (collocate id, attr2 id), how often the related
+    /// tokens counted for that collocate had that attr2 value; key = id << 32 | attr2 id
+    std::vector<std::pair<uint64_t, size_t>> breakdown;
 };
+
+/// `CollCounts::breakdown` per collocate id: (attr2 id, count), most frequent first.
+std::unordered_map<LexiconId, std::vector<std::pair<LexiconId, size_t>>>
+breakdown_by_collocate(const CollCounts& cc);
 
 /// `coll`: the tokens in a window around each hit.
 class CollCounter {
@@ -59,12 +67,19 @@ public:
     void add_node(CorpusPos node) { nodes_.push_back(node); }
     size_t nodes() const { return nodes_.size(); }
 
+    /// `dcoll … by attr, attr2`: also tally attr2 of every counted token (the
+    /// relation a collocate comes in, its upos, …); nullptr = none.
+    void set_breakdown(const PositionalAttr* attr) { bd_ = attr; }
+
     /// Does the counting (the nodes are buffered, so the children can be found
     /// from the child side when there are many).
     CollCounts finish();
 
 private:
     void count(CorpusPos p, uint32_t times = 1);
+    CollCounts done() const;
+    const PositionalAttr* bd_ = nullptr;
+    std::unordered_map<uint64_t, size_t> bd_counts_;
     const Corpus& corpus_;
     const PositionalAttr& pa_;
     bool want_head_ = false, want_descendants_ = false, want_all_children_ = false;

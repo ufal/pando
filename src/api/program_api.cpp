@@ -1605,6 +1605,12 @@ static std::string coll_attr_of(const Corpus& corpus, const GroupCommand& cmd) {
     return coll_attr;
 }
 
+// `dcoll … by attr, attr2`: attr2 is tallied per collocate (the relation it comes in,
+// its upos, …); "" = none
+static std::string dcoll_breakdown_name(const GroupCommand& cmd) {
+    return cmd.type == CommandType::DCOLL && cmd.fields.size() >= 2 ? cmd.fields[1] : std::string();
+}
+
 static void emit_coll_result_json(std::ostream& out, const Corpus& corpus, const GroupCommand& cmd,
                                   const ProgramOptions& opts, const CollCounts& cc, size_t coll_match_n);
 
@@ -1677,6 +1683,8 @@ static CollCounts count_dcoll_hits(const Corpus& corpus, const PositionalAttr& p
                                    const GroupCommand& cmd, const NameIndexMap& name_map,
                                    const NameIndexMap* target_name_map) {
     DcollCounter counter(corpus, pa, cmd.relations);
+    const std::string bd = dcoll_breakdown_name(cmd);
+    if (!bd.empty() && corpus.has_attr(bd)) counter.set_breakdown(&corpus.attr(bd));
     auto emit_one = [&](const Match& m, const Match* tgt) {
         CorpusPos node_pos = m.first_pos();
         if (!cmd.dcoll_anchor.empty()) {
@@ -1705,6 +1713,11 @@ static void emit_dcoll_json(std::ostream& out, const Corpus& corpus, const Match
                             const ProgramOptions& opts) {
     if (!corpus.has_deps()) {
         out << "{\"ok\": false, \"error\": \"dcoll requires dependency index\"}\n";
+        return;
+    }
+    const std::string bd = dcoll_breakdown_name(cmd);
+    if (!bd.empty() && !corpus.has_attr(bd)) {
+        out << "{\"ok\": false, \"error\": " << jstr("dcoll: unknown attribute " + bd + " after `by …,`") << "}\n";
         return;
     }
     const auto& pa = corpus.attr(coll_attr_of(corpus, cmd));
@@ -1739,7 +1752,10 @@ static bool sink_coll_json(std::ostream& out, const Corpus& corpus, HitSet& hs, 
         cc.emplace(pa, opts.coll_left, opts.coll_right, corpus.size());
         sink = std::make_unique<CollHitSink>(*cc, index_of(cmd.coll_on_label, -2));
     } else {
+        const std::string bd = dcoll_breakdown_name(cmd);
+        if (!bd.empty() && !corpus.has_attr(bd)) return false;   // emit_dcoll_json reports it
         dc.emplace(corpus, pa, cmd.relations);
+        if (!bd.empty()) dc->set_breakdown(&corpus.attr(bd));
         sink = std::make_unique<DcollHitSink>(*dc, index_of(cmd.dcoll_anchor, -1));
     }
     ex.set_hit_sink(sink.get());
@@ -1785,6 +1801,11 @@ static void emit_dcoll_result_json(std::ostream& out, const Corpus& corpus, cons
     for (size_t i = 0; i < cmd.relations.size(); ++i) { if (i > 0) out << ", "; out << jstr(cmd.relations[i]); }
     out << "],\n";
     if (!cmd.dcoll_anchor.empty()) out << "  \"anchor\": " << jstr(cmd.dcoll_anchor) << ",\n";
+    const std::string bd_name = dcoll_breakdown_name(cmd);
+    const PositionalAttr* bd_pa = !bd_name.empty() && corpus.has_attr(bd_name) ? &corpus.attr(bd_name) : nullptr;
+    const auto bd_map = bd_pa ? breakdown_by_collocate(cc)
+                              : std::unordered_map<LexiconId, std::vector<std::pair<LexiconId, size_t>>>{};
+    if (bd_pa) out << "  \"breakdown_attribute\": " << jstr(bd_name) << ",\n";
     out << "  \"matches\": " << dcoll_match_n << ",\n";
     out << "  \"stoplist\": " << opts.coll_stoplist << ",\n";
     out << "  \"measures\": [";
@@ -1796,6 +1817,17 @@ static void emit_dcoll_result_json(std::ostream& out, const Corpus& corpus, cons
             << ", \"freq\": " << entries[i].f_coll;
         for (const auto& meas : measures)
             out << ", " << jstr(meas) << ": " << std::fixed << std::setprecision(3) << compute_measure(meas, entries[i]);
+        if (bd_pa) {
+            // {"case": 360, "nmod": 5}: the values in order, most frequent first
+            out << ", \"breakdown\": {";
+            auto it = bd_map.find(entries[i].id);
+            if (it != bd_map.end())
+                for (size_t k = 0; k < it->second.size(); ++k) {
+                    if (k > 0) out << ", ";
+                    out << jstr(std::string(bd_pa->lexicon().get(it->second[k].first))) << ": " << it->second[k].second;
+                }
+            out << "}";
+        }
         out << "}";
     }
     out << "\n  ]\n}}\n";
@@ -2005,6 +2037,8 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
     // stored hit set keeps no hits (a later command re-derives them).
     std::optional<MatchSet> immediate;
     size_t immediate_si = 0;
+    // names whose set the session already held with the same recipe (reused, not run again)
+    std::vector<std::string> reused;
 
     // P6.4: a command's cached result: the set's recipe and sort steps, the
     // command as written and the options its output depends on
@@ -2073,6 +2107,19 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                                       : QueryExecutor::build_name_map_for_stripped_query(stmt.query);
             hs->tnm = stmt.is_parallel ? build_name_map(stmt.target_query) : NameIndexMap{};
 
+            // `A = q` again with the same query (same recipe): the session's set serves again —
+            // with the hits it keeps, or its recipe when its hits were dropped — instead of a new
+            // run. Not for the last statement (its page is the answer), nor a sorted set (`A = q`
+            // starts unsorted), nor a recipe that depends on the session.
+            if (!stmt.name.empty() && stmt.name != "Last" && !hs->recipe.empty() && si + 1 < prog->size()) {
+                HitSetPtr prev = S.find(stmt.name);
+                if (prev && prev->recipe == hs->recipe && prev->sorts.empty() && !prev->parallel()) {
+                    S.bind(stmt.name, prev);
+                    reused.push_back(stmt.name);
+                    goto statement_command;
+                }
+            }
+
             const std::vector<std::string>* aggregate_by = nullptr;
             if (next_is_command && !stmt.is_parallel) {
                 const GroupCommand& ncmd = (*prog)[si + 1].command;
@@ -2120,6 +2167,7 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
             // limit, admission) or counts it
             S.bind(stmt.name, hs);
         }
+    statement_command:
 
         if (stmt.has_command) {
             // Commands that don't need a MatchSet
@@ -2434,7 +2482,13 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
 
     std::string result = out.str();
     if (result.empty())
-        return "{\"ok\": true, \"operation\": \"assign\", \"result\": {}}\n";
+        result = "{\"ok\": true, \"operation\": \"assign\", \"result\": {}}\n";
+    if (!reused.empty()) {
+        std::string m = "\"reused\": [";
+        for (size_t i = 0; i < reused.size(); ++i) m += (i ? ", " : "") + jstr(reused[i]);
+        const size_t brace = result.find('{');
+        if (brace != std::string::npos) result.insert(brace + 1, m + "], ");
+    }
     return result;
 }
 

@@ -130,7 +130,10 @@ def main():
             for q, f, t in SORT:
                 lz = s.req("POST", "/run", {"cql": f"x = {q}; sort x by {f}; tabulate x {t}"})
                 kp = s.req("POST", "/run", {"cql": f"x = {q}; raw x; sort x by {f}; tabulate x {t}"})
-                check(lz[0] == 200 and lz == kp, f"/run sort {q} by {f}: {str(lz)[:300]} != {str(kp)[:300]}")
+                # `reused` says whether x was taken from the session (an unsorted x of an earlier
+                # program): the answers must be the same either way
+                plain = lambda r: (r[0], {k: v for k, v in r[1].items() if k != "reused"} if isinstance(r[1], dict) else r[1])
+                check(lz[0] == 200 and plain(lz) == plain(kp), f"/run sort {q} by {f}: {str(lz)[:300]} != {str(kp)[:300]}")
                 pages = {}
                 for kind, cql in (("lazy", f"sort S by {f}"), ("kept", f"raw S; sort S by {f}")):
                     sid = s.session()

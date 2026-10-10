@@ -297,6 +297,21 @@ if(BUILD_TESTING)
         add_test(NAME bare_string
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/bare_string_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
+        # year / decade / century in :: filters through a named token (a.text_year)
+        add_test(NAME date_func
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/date_func_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
+        # A = q again with the same query reuses the session's set ("reused": [...])
+        add_test(NAME named_reuse
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/named_reuse_test.py
+                --pando-index $<TARGET_FILE:pando-index> --server $<TARGET_FILE:pando-server>
+                --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu)
+        # dcoll … by attr, attr2: attr2 tallied per collocate; JSON request escapes decoded
+        add_test(NAME dcoll_breakdown
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/dcoll_breakdown_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
+                --server $<TARGET_FILE:pando-server>
+                --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu)
         # P6.4: the server's result cache changes no answer (aligned: persistent names)
         add_test(NAME result_cache
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/result_cache_test.py

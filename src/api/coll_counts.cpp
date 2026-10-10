@@ -62,6 +62,18 @@ static CollCounts collect(const std::vector<uint32_t>& counts, size_t total) {
 
 CollCounts CollCounter::finish() const { return collect(counts_, total_); }
 
+std::unordered_map<LexiconId, std::vector<std::pair<LexiconId, size_t>>>
+breakdown_by_collocate(const CollCounts& cc) {
+    std::unordered_map<LexiconId, std::vector<std::pair<LexiconId, size_t>>> out;
+    for (const auto& [key, n] : cc.breakdown)
+        out[static_cast<LexiconId>(key >> 32)].emplace_back(static_cast<LexiconId>(key & 0xffffffffu), n);
+    for (auto& [id, v] : out)
+        std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) {
+            return a.second != b.second ? a.second > b.second : a.first < b.first;
+        });
+    return out;
+}
+
 // ── dcoll ───────────────────────────────────────────────────────────────
 
 DcollCounter::DcollCounter(const Corpus& corpus, const PositionalAttr& pa,
@@ -89,10 +101,21 @@ inline void DcollCounter::count(CorpusPos p, uint32_t times) {
     if (id < 0 || static_cast<size_t>(id) >= counts_.size()) return;
     counts_[static_cast<size_t>(id)] += times;
     total_ += times;
+    if (bd_) {
+        const LexiconId b = bd_->id_at(p);
+        if (b >= 0) bd_counts_[static_cast<uint64_t>(id) << 32 | static_cast<uint32_t>(b)] += times;
+    }
+}
+
+CollCounts DcollCounter::done() const {
+    CollCounts out = collect(counts_, total_);
+    out.breakdown.assign(bd_counts_.begin(), bd_counts_.end());
+    std::sort(out.breakdown.begin(), out.breakdown.end());
+    return out;
 }
 
 CollCounts DcollCounter::finish() {
-    if (!corpus_.has_deps() || nodes_.empty()) return collect(counts_, total_);
+    if (!corpus_.has_deps() || nodes_.empty()) return done();
     const auto& deps = corpus_.deps();
     const CorpusPos n = corpus_.size();
 
@@ -107,7 +130,7 @@ CollCounts DcollCounter::finish() {
                 if (rp != node) count(rp);
 
     const bool want_children = want_all_children_ || deprel_filter_;
-    if (!want_children) return collect(counts_, total_);
+    if (!want_children) return done();
 
     // candidate children: every token (all children) or the tokens with one of the
     // deprels; their number decides between the two ways of finding children
@@ -138,7 +161,7 @@ CollCounts DcollCounter::finish() {
                 }
             }
         }
-        return collect(counts_, total_);
+        return done();
     }
 
     // node set as a bitmap; a node that is the node of several hits counts that often
@@ -185,7 +208,7 @@ CollCounts DcollCounter::finish() {
                     if (uint32_t k = times_of(h)) count(c, k);
                 return true;
             });
-    return collect(counts_, total_);
+    return done();
 }
 
 // ── sinks ───────────────────────────────────────────────────────────────

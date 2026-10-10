@@ -9087,6 +9087,17 @@ void QueryExecutor::apply_global_filters(const TokenQuery& query, const NameInde
                         if (p != NO_HEAD && corpus_.has_attr(attr_name)) {
                             return std::string(corpus_.attr(attr_name).value_at(p));
                         }
+                        // a region attribute of a named token (a.text_year): the region holding it
+                        RegionAttrParts tparts;
+                        if (p != NO_HEAD && split_region_attr_name(suffix, tparts)
+                            && corpus_.has_structure(tparts.struct_name)) {
+                            const auto& sa = corpus_.structure(tparts.struct_name);
+                            auto rkey = resolve_region_attr_key(sa, tparts.struct_name, tparts.attr_name);
+                            if (!rkey) return std::nullopt;
+                            int64_t rgn = sa.find_region(p);
+                            if (rgn < 0) return std::nullopt;
+                            return std::string(sa.region_value(*rkey, static_cast<size_t>(rgn)));
+                        }
 
                         auto nr = m.named_regions.find(prefix);
                         if (nr != m.named_regions.end() && corpus_.has_structure(nr->second.struct_name)) {

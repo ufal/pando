@@ -37,6 +37,7 @@ If the corpus has a **dependency index** (sentence structure `s` plus `dep.*` da
 - Relations can be **deprel** labels (`amod`, `nsubj`, …), or **`head`**, **`children`**, **`descendants`**.
 - Combine relations: `dcoll head, amod by lemma`.
 - For multi-token matches, **anchor** with a named token: `a:[upos="DET"] [upos="NOUN" & lemma="book"]; dcoll a.amod by lemma`.
+- A second attribute after `by` is tallied per collocate without changing the measures: `dcoll children by lemma, deprel` adds, for each collocate, how often it came in each relation (`de` → `case:27 det:12`); `dcoll head by lemma, upos` shows the word class of the heads. In JSON this is `"breakdown": {"case": 27, "det": 12}` per collocate (most frequent first) and `"breakdown_attribute"` on the result; an unknown attribute is an error.
 
 See [Dependency queries](Dependency-Queries.md) for how dependencies are encoded in queries.
 

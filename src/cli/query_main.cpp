@@ -2066,6 +2066,11 @@ static void emit_coll_result(const Corpus& corpus, const GroupCommand& cmd, cons
 
 // ── dcoll: dependency-based collocation ────────────────────────────────
 
+// `dcoll … by attr, attr2`: attr2 is tallied per collocate; "" = none
+static std::string dcoll_breakdown_name(const GroupCommand& cmd) {
+    return cmd.type == CommandType::DCOLL && cmd.fields.size() >= 2 ? cmd.fields[1] : std::string();
+}
+
 /// `dcoll` counts over materialised hits.
 static void count_dcoll_hits(DcollCounter& counter, const MatchSet& ms, const GroupCommand& cmd,
                              const NameIndexMap& name_map, const NameIndexMap* target_name_map) {
@@ -2100,8 +2105,14 @@ static void emit_dcoll(const Corpus& corpus, const MatchSet& ms,
         std::cerr << "Error: dcoll requires dependency index\n";
         return;
     }
+    const std::string bd = dcoll_breakdown_name(cmd);
+    if (!bd.empty() && !corpus.has_attr(bd)) {
+        std::cerr << "Error: dcoll: unknown attribute " << bd << " after `by …,`\n";
+        return;
+    }
     const auto& pa = corpus.attr(coll_attr_of(corpus, cmd));
     DcollCounter counter(corpus, pa, cmd.relations);
+    if (!bd.empty()) counter.set_breakdown(&corpus.attr(bd));
     count_dcoll_hits(counter, ms, cmd, name_map, target_name_map);
     const CollCounts cc = counter.finish();
     emit_dcoll_result(corpus, cmd, opts, cc,
@@ -2138,6 +2149,15 @@ static void emit_dcoll_result(const Corpus& corpus, const GroupCommand& cmd, con
 
     size_t show = std::min(entries.size(), opts.coll_max_items);
 
+    const std::string bd_name = dcoll_breakdown_name(cmd);
+    const PositionalAttr* bd_pa = !bd_name.empty() && corpus.has_attr(bd_name) ? &corpus.attr(bd_name) : nullptr;
+    const auto bd_map = bd_pa ? breakdown_by_collocate(cc)
+                              : std::unordered_map<LexiconId, std::vector<std::pair<LexiconId, size_t>>>{};
+    auto breakdown_of = [&](LexiconId id) -> const std::vector<std::pair<LexiconId, size_t>>* {
+        auto it = bd_map.find(id);
+        return it == bd_map.end() ? nullptr : &it->second;
+    };
+
     // Relations label for output
     std::string rel_label;
     if (cmd.relations.empty()) rel_label = "children";
@@ -2159,6 +2179,7 @@ static void emit_dcoll_result(const Corpus& corpus, const GroupCommand& cmd, con
         std::cout << "],\n";
         if (!cmd.dcoll_anchor.empty())
             std::cout << "  \"anchor\": " << jstr(cmd.dcoll_anchor) << ",\n";
+        if (bd_pa) std::cout << "  \"breakdown_attribute\": " << jstr(bd_name) << ",\n";
         std::cout << "  \"matches\": " << dcoll_match_n << ",\n";
         std::cout << "  \"stoplist\": " << opts.coll_stoplist << ",\n";
         std::cout << "  \"measures\": [";
@@ -2174,17 +2195,34 @@ static void emit_dcoll_result(const Corpus& corpus, const GroupCommand& cmd, con
                       << ", \"freq\": " << entries[i].f_coll;
             for (const auto& meas : measures)
                 std::cout << ", " << jstr(meas) << ": " << std::fixed << std::setprecision(3) << compute_measure(meas, entries[i]);
+            if (bd_pa) {
+                std::cout << ", \"breakdown\": {";
+                if (const auto* v = breakdown_of(entries[i].id))
+                    for (size_t k = 0; k < v->size(); ++k) {
+                        if (k > 0) std::cout << ", ";
+                        std::cout << jstr(std::string(bd_pa->lexicon().get((*v)[k].first))) << ": " << (*v)[k].second;
+                    }
+                std::cout << "}";
+            }
             std::cout << "}";
         }
         std::cout << "\n  ]\n}}\n";
     } else {
         std::cout << coll_attr << "\tobs\tfreq";
         for (const auto& meas : measures) std::cout << "\t" << meas;
+        if (bd_pa) std::cout << "\t" << bd_name;
         std::cout << "\n";
         for (size_t i = 0; i < show; ++i) {
             std::cout << entries[i].form << "\t" << entries[i].obs << "\t" << entries[i].f_coll;
             for (const auto& meas : measures)
                 std::cout << "\t" << std::fixed << std::setprecision(3) << compute_measure(meas, entries[i]);
+            if (bd_pa) {
+                // case:360 nmod:5 — most frequent first
+                std::cout << "\t";
+                if (const auto* v = breakdown_of(entries[i].id))
+                    for (size_t k = 0; k < v->size(); ++k)
+                        std::cout << (k ? " " : "") << bd_pa->lexicon().get((*v)[k].first) << ":" << (*v)[k].second;
+            }
             std::cout << "\n";
         }
     }
@@ -2637,9 +2675,12 @@ static void run_query(const Corpus& corpus, const std::string& input,
                                 corpus.size());
                         sink_state.sink = std::make_unique<CollHitSink>(*sink_state.coll,
                                                                         index_of(c.coll_on_label, -2));
-                    } else if (targets && c.type == CommandType::DCOLL && corpus.has_deps()) {
+                    } else if (targets && c.type == CommandType::DCOLL && corpus.has_deps()
+                               && (dcoll_breakdown_name(c).empty() || corpus.has_attr(dcoll_breakdown_name(c)))) {
                         sink_state.dcoll = std::make_unique<DcollCounter>(
                                 corpus, corpus.attr(coll_attr_of(corpus, c)), c.relations);
+                        if (!dcoll_breakdown_name(c).empty())
+                            sink_state.dcoll->set_breakdown(&corpus.attr(dcoll_breakdown_name(c)));
                         sink_state.sink = std::make_unique<DcollHitSink>(*sink_state.dcoll,
                                                                          index_of(c.dcoll_anchor, -1));
                     }
