@@ -248,14 +248,37 @@ static void emit_hit_json(std::ostringstream& out, const Corpus& corpus, const M
     out << ", \"match_start\": " << match_start << ", \"match_end\": " << match_end;
     out << ", \"context\": {\"left\": " << jstr(ctx.left)
         << ", \"match\": " << jstr(ctx.match) << ", \"right\": " << jstr(ctx.right) << "}";
-    if (!m.named_regions.empty()) {
+    // named regions (`np:<node …>`): span and id, so a UI can show the whole region
+    struct NamedSpan { std::string name, struct_name, id; size_t idx; CorpusPos start, end; };
+    std::vector<NamedSpan> named_spans;
+    for (const auto& [nm, rr] : m.named_regions) {
+        NamedSpan ns{nm, rr.struct_name, "", rr.region_idx, NO_HEAD, NO_HEAD};
+        if (corpus.has_structure(rr.struct_name)) {
+            const auto& sa = corpus.structure(rr.struct_name);
+            if (rr.region_idx < sa.region_count()) {
+                ns.start = sa.region_data()[rr.region_idx].start;
+                ns.end = sa.region_data()[rr.region_idx].end;
+                if (sa.has_region_attr("id")) ns.id = std::string(sa.region_value("id", rr.region_idx));
+            }
+        }
+        named_spans.push_back(std::move(ns));
+    }
+    // outer regions first, then by name (the map has no order)
+    std::sort(named_spans.begin(), named_spans.end(), [](const NamedSpan& a, const NamedSpan& b) {
+        if (a.start != b.start) return a.start < b.start;
+        if (a.end != b.end) return a.end > b.end;
+        return a.name < b.name;
+    });
+    if (!named_spans.empty()) {
         out << ", \"named_regions\": {";
         bool first_nr = true;
-        for (const auto& [nm, rr] : m.named_regions) {
-            if (!first_nr) out << ", ";
+        for (const auto& ns : named_spans) {
+            out << (first_nr ? "" : ", ") << jstr(ns.name) << ": {\"struct\": " << jstr(ns.struct_name)
+                << ", \"region_idx\": " << ns.idx;
+            if (ns.start != NO_HEAD) out << ", \"start\": " << ns.start << ", \"end\": " << ns.end;
+            if (!ns.id.empty()) out << ", \"id\": " << jstr(ns.id);
+            out << "}";
             first_nr = false;
-            out << jstr(nm) << ": {\"struct\": " << jstr(rr.struct_name)
-                << ", \"region_idx\": " << rr.region_idx << "}";
         }
         out << "}";
     }
@@ -298,6 +321,20 @@ static void emit_hit_json(std::ostringstream& out, const Corpus& corpus, const M
                 << ", \"start\": " << m.positions[t] << ", \"end\": " << span_end << "}";
             first_g = false;
         }
+        // the named regions: whole spans, by name (`region` says which structure)
+        for (const auto& ns : named_spans) {
+            if (ns.start == NO_HEAD) continue;
+            out << (first_g ? "" : ", ") << "{\"id\": " << jstr(ns.name) << ", \"name\": " << jstr(ns.name)
+                << ", \"region\": " << jstr(ns.struct_name) << ", \"start\": " << ns.start << ", \"end\": " << ns.end;
+            if (!ns.id.empty()) out << ", \"region_id\": " << jstr(ns.id);
+            // the region's token ids (TEITOK ids when the corpus has them): a UI highlights
+            // the whole region without knowing corpus positions
+            out << ", \"tok_ids\": [";
+            for (CorpusPos p = ns.start; p <= ns.end; ++p)
+                out << (p == ns.start ? "" : ", ") << jstr(fragment_tok_id(corpus, p));
+            out << "]}";
+            first_g = false;
+        }
     }
     out << "]";
     if (opts.fragment) {
@@ -323,8 +360,19 @@ static void emit_hit_json(std::ostringstream& out, const Corpus& corpus, const M
         };
         out << ", \"highlight_map\": {\"default\": {\"tok_ids\": " << id_list(all)
             << "}, \"match\": " << id_list(all) << ", \"groups\": [";
-        if (by_group.size() > 1) {
+        std::vector<std::pair<std::string, std::vector<std::string>>> region_groups;
+        for (const auto& ns : named_spans) {
+            if (ns.start == NO_HEAD) continue;
+            std::vector<std::string> ids;
+            for (CorpusPos p = ns.start; p <= ns.end; ++p) ids.push_back(fragment_tok_id(corpus, p));
+            region_groups.emplace_back(ns.name, std::move(ids));
+        }
+        if (by_group.size() + region_groups.size() > 1) {
             bool fg = true;
+            for (const auto& [name, ids] : region_groups) {
+                out << (fg ? "" : ", ") << "{\"id\": " << jstr(name) << ", \"tok_ids\": " << id_list(ids) << "}";
+                fg = false;
+            }
             for (const auto& [t, ids] : by_group) {
                 out << (fg ? "" : ", ") << "{\"id\": " << jstr(group_name(t)) << ", \"tok_ids\": " << id_list(ids) << "}";
                 fg = false;
@@ -351,6 +399,7 @@ std::string to_query_result_json(const Corpus& corpus,
     // highlight groups are the query's tokens (their labels, else t1, t2, …); an aligned
     // query numbers its target's tokens after the source's
     std::vector<std::string> group_names;
+    std::vector<std::pair<std::string, std::string>> region_names;   // named region anchors: (name, structure)
     size_t source_tokens = 0;
     {
         try {
@@ -358,8 +407,15 @@ std::string to_query_result_json(const Corpus& corpus,
             Program prog = parser.parse();
             if (!prog.empty() && prog[0].has_query) {
                 auto add = [&](const TokenQuery& q) {
-                    for (const auto& tok : q.tokens)
+                    // region anchors (`ip:<node …>`) are not query tokens: they bind a
+                    // region (named_regions), and Match.positions has no slot for them
+                    for (const auto& tok : q.tokens) {
+                        if (tok.is_anchor()) {
+                            if (!tok.name.empty()) region_names.emplace_back(tok.name, tok.anchor_region);
+                            continue;
+                        }
                         group_names.push_back(tok.name.empty() ? "t" + std::to_string(group_names.size() + 1) : tok.name);
+                    }
                 };
                 add(prog[0].query);
                 source_tokens = group_names.size();
@@ -458,11 +514,22 @@ std::string to_query_result_json(const Corpus& corpus,
     for (size_t t = 0; t < group_names.size(); ++t)
         out << (t ? ", " : "") << "{\"index\": " << t << ", \"id\": " << jstr("t" + std::to_string(t + 1))
             << ", \"name\": " << jstr(group_names[t]) << "}";
+    // named region anchors: their hits carry the whole region under this name
+    for (size_t k = 0; k < region_names.size(); ++k)
+        out << ((group_names.empty() && k == 0) ? "" : ", ") << "{\"id\": " << jstr(region_names[k].first)
+            << ", \"name\": " << jstr(region_names[k].first) << ", \"region\": " << jstr(region_names[k].second) << "}";
     out << "]";
-    if (opts.fragment && group_names.size() > 1) {
+    if (opts.fragment && group_names.size() + region_names.size() > 1) {
         out << ",\n    \"legend\": [";
-        for (size_t t = 0; t < group_names.size(); ++t)
-            out << (t ? ", " : "") << "{\"id\": " << jstr(group_names[t]) << ", \"name\": " << jstr(group_names[t]) << "}";
+        bool fl = true;
+        for (const auto& [name, st] : region_names) {
+            out << (fl ? "" : ", ") << "{\"id\": " << jstr(name) << ", \"name\": " << jstr(name) << "}";
+            fl = false;
+        }
+        for (size_t t = 0; t < group_names.size(); ++t) {
+            out << (fl ? "" : ", ") << "{\"id\": " << jstr(group_names[t]) << ", \"name\": " << jstr(group_names[t]) << "}";
+            fl = false;
+        }
         out << "]";
     }
 

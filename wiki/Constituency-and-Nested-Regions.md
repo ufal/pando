@@ -41,6 +41,15 @@ Normative syntax and the multivalue / region table is in [PANDO-CQL.md](PANDO-CQ
 
 Use **named tokens** and global `::` filters when you need to relate positions or add extra constraints; see the main CQL doc.
 
+## Named regions in hits
+
+A named region anchor (`np:<node cat="NP">`) binds a region for each hit. pando-server's
+`/query` reports it per hit in `named_regions` (`struct`, `region_idx`, `start`, `end`, and
+`id` when the structure has an `id` attribute) and as a hit group with the region's span and
+token ids (`{"name": "np", "region": "node", "start": …, "end": …, "region_id": …,
+"tok_ids": […]}`); the result's `groups` list the region names after the query tokens, so a
+UI (flexicorp) highlights the whole constituent under that name, not only the matched token.
+
 ## Dependencies vs constituents
 
 **Dependency** (UD-style) links are a **separate** index: governors, dependents, `child`/`parent`, `dcoll`, etc. See [Dependency queries](Dependency-Queries.md).

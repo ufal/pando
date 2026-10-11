@@ -301,6 +301,10 @@ if(BUILD_TESTING)
         add_test(NAME date_func
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/date_func_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
+        # named region anchors in /query hits: span, id, token ids per region group
+        add_test(NAME region_groups
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/region_groups_test.py
+                --pando-index $<TARGET_FILE:pando-index> --server $<TARGET_FILE:pando-server>)
         # A = q again with the same query reuses the session's set ("reused": [...])
         add_test(NAME named_reuse
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/named_reuse_test.py
