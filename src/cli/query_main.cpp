@@ -2425,8 +2425,13 @@ static void run_query(const Corpus& corpus, const std::string& input,
             std::cerr << pmltq_trace;
     } else if (d == "tiger") {
         std::string tiger_trace;
+        // category attribute of the node layer: `cat` (TEITOK) when the corpus has it, else `type`
+        std::string cat_attr = "type";
+        if (corpus.has_structure("node") && corpus.structure("node").has_region_attr("cat")
+            && !corpus.structure("node").has_region_attr("type"))
+            cat_attr = "cat";
         prog = translate_tiger_program(input, opts.debug_level,
-                                       opts.debug_level > 0 ? &tiger_trace : nullptr, parse_opts);
+                                       opts.debug_level > 0 ? &tiger_trace : nullptr, parse_opts, cat_attr);
         if (opts.debug_level > 0 && !tiger_trace.empty())
             std::cerr << tiger_trace;
     } else {

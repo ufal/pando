@@ -85,9 +85,9 @@ When the corpus is indexed with **`pando-index`**, region-attribute columns can 
 
 And of course, those can be combined in queries, so if we want to look for the lemma *cat* with an adjective, where *cat* has to appear in an English text, and the whole things has to be inside a text of genre *Book*, we can express that as `[lemma="cat" & text_lang="Book"] > [upos="ADJ"] within text_genre="Book"`. Since there are no texts within texts, the two restrictions in practice work in exactly the same way.
 
-Pando explicitly allows for zero-width regions: regions that have no tokens inside. Those are helpful in for instance spoken corpora, where pauses are often very relevant, but are between tokens, not tokens themselves. By treating pauses as zero-width regions, we can use them in corpus queries, so `[form="the" ] <pause>` will look for the word *the* followed by the beginning (as well as the end) of a pause "region".
+Pando explicitly allows for zero-width regions: regions that have no tokens inside. Those are helpful in for instance spoken corpora, where pauses are often very relevant, but are between tokens, not tokens themselves. By treating pauses as zero-width regions, we can use them in corpus queries, so `[form="the"] </pause>` looks for the word *the* followed by a pause, and `<pause> [form="the"]` for a pause right before *the*. A region anchor always attaches to a token: a start anchor to the token after it, an end anchor to the token before it; an anchor with no token to attach to is an error.
 
-In pando, regions are first-class citizens: we can look for regions directly, without relying on the tokens they contain or border. So we can directly look for regions all texts of the book genre: `<text genre="Book">`, so that we concentrate on the regions themselves, not on their tokens. 
+In pando, regions are first-class citizens: we can look for regions directly, without relying on the tokens they contain or border. So we can directly look for regions all texts of the book genre: `t:<text genre="Book">` (a region on its own needs a label), so that we concentrate on the regions themselves, not on their tokens. 
 
 
 ## Within and containing
@@ -117,7 +117,7 @@ You can **label** a region-start anchor like a token name: **`np:<s>`** binds th
 
 **`rcontains(ancestor, descendant)`** — same **named-region** rules, **`.par`** required. True iff **`ancestor`** is on the **parent chain** from **`descendant`** up to the root (reflexive: a row is its own ancestor). Example: **`:: rcontains(s, np) = 1`** when the sentence region **`s`** tree-dominates **`np`**. Differs from **`contains`** when spans alone are ambiguous: **`rcontains`** uses the tree index only.
 
-**Peer clauses on region anchors (whitespace-separated, any order):** **`rchild(vp)`** — same test as **`:: rchild(vp, …)`** on this binding (immediate parent row must be **`vp`**’s row; **`.par`** required). Use **`rchild`**, not **`child`**, so **`child`** stays reserved for **dependency** relations in **`[]`**. **`rcontains(vp)`** — this row must **tree-dominate** **`vp`** (same as **`:: rcontains(this, vp)`**). **`contains(vp)`** — this row’s span must geometrically **contain** **`vp`**’s span (Layer A). Example: **`np:<node contains(vp) type="NP" rchild(pp)>`**. Each peer label must be bound by an **earlier** anchor. At least one **non-anchor** token is required so anchors can bind to token positions.
+**Peer clauses on region anchors (whitespace-separated, any order):** **`rchild(vp)`** — same test as **`:: rchild(vp, …)`** on this binding (immediate parent row must be **`vp`**’s row; **`.par`** required). Use **`rchild`**, not **`child`**, so **`child`** stays reserved for **dependency** relations in **`[]`**. **`rcontains(vp)`** — this row must **tree-dominate** **`vp`** (same as **`:: rcontains(this, vp)`**). **`contains(vp)`** — this row’s span must geometrically **contain** **`vp`**’s span (Layer A). Example: **`np:<node contains(vp) type="NP" rchild(pp)>`**. Each peer label must be bound by an **earlier** anchor. At least one **non-anchor** token is required so anchors can bind to token positions. Without any token, one labeled region may stand alone (`np:<node cat="NP"> :: tcnt(np) > 5`); a second region without a token is an error for now — relating independent regions (region-to-region joins) is planned.
 
 With named regions, there are some functions to compare and count regions. For two named regions *a* and *b*, there are the following functions
 
@@ -228,7 +228,7 @@ Notice that that gives entire regions, not (just) the tokens inside them - which
 
 ### Dependency subtrees
 
-Another way to get from tokens to regions is by selecting the entire dependency subtree for a node, so that we can print it, count it, etc. in the same way we can with a discontinuous region. So to get long bare nouns, we can first search for bare nouns (nouns not have a determiner), and then select the subtrees for those, but only if they have more than 2 tokens in it: `barenoun:[upos="NOUN" & not child [upos="DET"] ]; longbarenp:dep_subtree(barenoun) :: tnct(longbarenp) > 2`.
+Another way to get from tokens to regions is by selecting the entire dependency subtree for a node, so that we can print it, count it, etc. in the same way we can with a discontinuous region. So to get long bare nouns, we can first search for bare nouns (nouns not have a determiner), and then select the subtrees for those, but only if they have more than 2 tokens in it: `barenoun:[upos="NOUN" & not child [upos="DET"] ]; longbarenp:dep_subtree(barenoun) :: tcnt(longbarenp) > 2`.
 
 
 ## Collocations
@@ -277,9 +277,9 @@ We can add counts as global queries in, adding additional restrictions on tokens
 | month | month(a.text_date) = 5 | month number from `YYYY-MM[-DD]` date values |
 | week | week(a.text_date) = 18 | ISO week number (1-53) from `YYYY-MM-DD` date values |
 | day | day(a.text_date) = 3 | day of month from `YYYY-MM-DD` date values |
-| nchildren | nchildren(a) > 3 | node a has more than 3 children |
+| nchildren | nchildren(a) > 3 | token a has more than 3 dependency children (dependency tree only, not regions) |
 | ndescendants | ndescendants(a) < 3 | node a has less than 3 children |
-| depth | depth(a) < 4 | node a appears less than 4 levels below the root |
+| depth | depth(a) < 4 | token a is less than 4 levels below the dependency root (dependency tree only) |
 | nvals | nvals(a.wsd) > 1 | pipe-separated component count of `a`’s attribute (see multivalue `nvals` in token conditions) |
 
 <!--{% comment %}

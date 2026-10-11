@@ -1165,6 +1165,8 @@ private:
     // Strip anchor tokens from a query, returning the cleaned query and constraints
     static TokenQuery strip_anchors(const TokenQuery& query,
                                     std::vector<AnchorConstraint>& constraints);
+    // Errors for anchors strip_anchors would drop (no token to attach to, second free region).
+    void check_anchor_bindings(const TokenQuery& query) const;
 
     // Apply anchor constraints as post-filter
     void apply_anchor_filters(const std::vector<AnchorConstraint>& constraints,

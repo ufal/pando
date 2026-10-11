@@ -26,25 +26,28 @@ static bool two_words(const std::string& rest, std::string* a, std::string* b) {
     return true;
 }
 
-static std::string expand_dom(const std::string& parent_cat, const std::string& child_cat) {
+// The macros below tie both nodes to the token `[]`, so they only find a pair that *starts on
+// the same word* (pando binds a region anchor to the next token). Real dominance between
+// independent nodes needs region-to-region joins: dev/REGION-JOINS-PLAN.md (P2/P5).
+static std::string expand_dom(const std::string& a, const std::string& parent_cat, const std::string& child_cat) {
     // Geometric containment: parent span ⊇ child span (Layer A).
-    return "p:<node type=\"" + parent_cat + "\"> c:<node type=\"" + child_cat
+    return "p:<node " + a + "=\"" + parent_cat + "\"> c:<node " + a + "=\"" + child_cat
            + "\"> [] :: contains(p, c) = 1";
 }
 
-static std::string expand_idom(const std::string& parent_cat, const std::string& child_cat) {
+static std::string expand_idom(const std::string& a, const std::string& parent_cat, const std::string& child_cat) {
     // Immediate dominance via .par (same as :: rchild(parent, child)).
-    return "p:<node type=\"" + parent_cat + "\"> c:<node type=\"" + child_cat
+    return "p:<node " + a + "=\"" + parent_cat + "\"> c:<node " + a + "=\"" + child_cat
            + "\"> [] :: rchild(p, c) = 1";
 }
 
-static std::string expand_cat(const std::string& cat) {
-    // One token hit inside a node of this category (innermost node_type at token).
-    return "n:<node type=\"" + cat + "\"> []";
+static std::string expand_cat(const std::string& a, const std::string& cat) {
+    // One token hit at the start of a node of this category.
+    return "n:<node " + a + "=\"" + cat + "\"> []";
 }
 
 // One line of tiger dialect → CQL fragment (no trailing newline required).
-static std::string expand_line(const std::string& line_in, std::string* err) {
+static std::string expand_line(const std::string& line_in, const std::string& cat_attr, std::string* err) {
     err->clear();
     std::string line = trim(line_in);
     if (line.empty())
@@ -67,7 +70,7 @@ static std::string expand_line(const std::string& line_in, std::string* err) {
             *err = "tiger: expected: dom <parent_cat> <child_cat> (two words)";
             return "";
         }
-        return expand_dom(a, b);
+        return expand_dom(cat_attr, a, b);
     }
     if (starts(line, kIdom)) {
         std::string a, b;
@@ -75,7 +78,7 @@ static std::string expand_line(const std::string& line_in, std::string* err) {
             *err = "tiger: expected: idom <parent_cat> <child_cat> (two words)";
             return "";
         }
-        return expand_idom(a, b);
+        return expand_idom(cat_attr, a, b);
     }
     if (starts(line, kCat)) {
         std::string rest = trim(line.substr(std::strlen(kCat)));
@@ -90,7 +93,7 @@ static std::string expand_line(const std::string& line_in, std::string* err) {
             *err = "tiger: cat takes exactly one category token";
             return "";
         }
-        return expand_cat(cat);
+        return expand_cat(cat_attr, cat);
     }
     // Pass through as native CQL.
     return line;
@@ -99,7 +102,8 @@ static std::string expand_line(const std::string& line_in, std::string* err) {
 } // namespace
 
 Program translate_tiger_program(const std::string& input, int debug_level,
-                                std::string* trace_out, ParserOptions parse_opts) {
+                                std::string* trace_out, ParserOptions parse_opts,
+                                const std::string& cat_attr) {
     if (trace_out)
         trace_out->clear();
 
@@ -109,7 +113,7 @@ Program translate_tiger_program(const std::string& input, int debug_level,
     bool first = true;
     while (std::getline(in, line)) {
         std::string e;
-        std::string frag = expand_line(line, &e);
+        std::string frag = expand_line(line, cat_attr, &e);
         if (!e.empty())
             throw std::runtime_error(e);
         if (frag.empty())

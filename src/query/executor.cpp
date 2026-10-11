@@ -4430,8 +4430,10 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
         if (page > 0 && sample_size == 0 && ms.matches.size() > page)
             ms.matches.erase(ms.matches.begin() + static_cast<std::ptrdiff_t>(page), ms.matches.end());
         if (!count_total && page > 0) {
+            // a page that is not full means the search ran to the end: the total is exact
+            const bool page_full = ms.matches.size() >= page;
             ms.total_count = ms.matches.size();
-            ms.total_exact = false;
+            ms.total_exact = ms.total_exact && !page_full;
         } else if (max_total_cap > 0 && ms.total_count >= max_total_cap) {
             ms.total_count = max_total_cap;
             ms.total_exact = false;
@@ -4451,6 +4453,9 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
             "filtering, or query the group as a top-level match.");
     }
     for (const auto& cc : query.containing_clauses) {
+        if (!cc.is_subtree && !cc.region.empty() && !corpus_.has_structure(cc.region)
+            && !corpus_.is_token_group(cc.region))
+            throw std::runtime_error("Unknown structure '" + cc.region + "' after `containing`");
         if (!cc.region.empty() && corpus_.is_token_group(cc.region)) {
             throw std::runtime_error(
                 "'" + cc.region + "' is a token-group (discontinuous) struct and cannot "
@@ -4538,6 +4543,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
         if (tok.is_anchor()) { has_anchors = true; break; }
     }
     TokenQuery stripped_query;
+    if (has_anchors) check_anchor_bindings(query);
     if (has_anchors) stripped_query = strip_anchors(query, anchor_constraints);
     const TokenQuery& q = has_anchors ? stripped_query : query;
 
@@ -4734,6 +4740,10 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
         return true;
     };
 
+    // hits that went through add_match are already fanned out over their anchor bindings;
+    // finish_query must not expand them a second time (n:<node> [] with two nodes starting
+    // at the token gave 4 hits instead of 2)
+    bool anchors_expanded = false;
     auto add_match = [&](std::vector<CorpusPos>&& positions) {
         if (sink_on) {
             hit_sink_->hit(positions.data(), positions.data() + n, n);
@@ -4764,6 +4774,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
         // RG-REG-5: fan out one output Match per valid anchor-binding assignment
         // (Cartesian product in Fanout mode; single innermost row in Innermost mode).
         // Each fanned-out match counts independently toward caps / limits.
+        anchors_expanded = true;
         expand_anchor_constraints(m, token_anchor_constraints,
                                   [&](Match& r) { return add_resolved_match(r); });
     };
@@ -4792,7 +4803,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
             result.aggregate_buckets = std::move(agg_storage);
             return std::move(result);
         }
-        apply_anchor_filters(token_anchor_constraints, result);
+        if (!anchors_expanded) apply_anchor_filters(token_anchor_constraints, result);
         if (!post_per_hit_) {   // (P1.12: already applied to each hit)
             apply_within_having(q, result);
             apply_not_within(q, result);
@@ -9348,6 +9359,49 @@ void QueryExecutor::apply_global_filters(const TokenQuery& query, const NameInde
 
 // ── Anchor preprocessing and filtering ───────────────────────────────────
 
+static bool has_real_token(const TokenQuery& q) {
+    for (const auto& t : q.tokens)
+        if (!t.is_anchor()) return true;
+    return false;
+}
+
+// Anchors strip_anchors cannot bind are dropped there (it is also used for name maps
+// without a corpus); on the execution path they are errors, never a silently different query.
+void QueryExecutor::check_anchor_bindings(const TokenQuery& query) const {
+    const bool any_token = has_real_token(query);
+    size_t free_regions = 0;
+    for (size_t i = 0; i < query.tokens.size(); ++i) {
+        const auto& tok = query.tokens[i];
+        if (!tok.is_anchor()) continue;
+        const bool is_start = tok.anchor == RegionAnchorType::REGION_START;
+        bool bound = false;
+        if (is_start) {
+            for (size_t j = i + 1; j < query.tokens.size() && !bound; ++j) bound = !query.tokens[j].is_anchor();
+        } else {
+            for (size_t j = 0; j < i && !bound; ++j) bound = !query.tokens[j].is_anchor();
+        }
+        if (bound) continue;
+        if (is_start && !tok.name.empty()) { ++free_regions; continue; }
+        // a lone token-group anchor (`<err>;`) has its own path; an unknown name gets the
+        // "Unknown region anchor" message further on
+        if (!any_token && (corpus_.is_token_group(tok.anchor_region) || !corpus_.has_structure(tok.anchor_region)))
+            continue;
+        const std::string a = is_start ? "<" + tok.anchor_region + ">" : "</" + tok.anchor_region + ">";
+        if (is_start && !any_token)
+            throw std::runtime_error("Region anchor " + a + " on its own needs a label to list regions, "
+                                     "e.g. `r:" + a + "`");
+        if (is_start)
+            throw std::runtime_error("Region anchor " + a + " has no token after it to attach to; put it "
+                                     "before a token (`" + a + " []`) — anchors at the end of a query are "
+                                     "not supported yet");
+        throw std::runtime_error("Region end anchor " + a + " has no token before it to attach to");
+    }
+    if (free_regions > 1)
+        throw std::runtime_error("Only one region without a token is supported per query for now; relate a "
+                                 "second region through a token (`a:<x> b:<y> [] :: …`). Region-to-region "
+                                 "joins: see dev/REGION-JOINS-PLAN.md");
+}
+
 TokenQuery QueryExecutor::strip_anchors(const TokenQuery& query,
                                         std::vector<AnchorConstraint>& constraints) {
     TokenQuery cleaned;
@@ -9695,6 +9749,14 @@ struct AnchorRowCheck {
                 if (!sa.has_parent_region_id()) return false;
                 int32_t par = sa.parent_region_id(ri);
                 if (par < 0 || static_cast<size_t>(par) != pr.region_idx) return false;
+            } else if (cl.kind == AnchorRegionClauseKind::RcontainsOf) {
+                // this row tree-dominates the peer (reflexive, as `:: rcontains(this, peer)`)
+                auto pit = m.named_regions.find(cl.peer_label);
+                if (pit == m.named_regions.end()) return false;
+                const RegionRef& pr = pit->second;
+                if (pr.struct_name != region_name) return false;
+                if (!sa.has_parent_region_id()) return false;
+                if (!sa.region_is_ancestor_of(ri, pr.region_idx)) return false;
             } else if (cl.kind == AnchorRegionClauseKind::Contains) {
                 auto inner = named_region_span(corpus, m, cl.peer_label);
                 if (!inner) return false;

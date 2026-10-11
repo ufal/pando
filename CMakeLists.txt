@@ -160,7 +160,6 @@ add_library(pando_core STATIC
     src/query/executor_aggregate.cpp
     src/query/executor_sort.cpp
     src/query/sort_field.cpp
-    src/query/executor_anchors.cpp
     src/query/executor_tabulate.cpp
     src/api/index_api.cpp
 )
@@ -305,6 +304,12 @@ if(BUILD_TESTING)
         add_test(NAME region_groups
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/region_groups_test.py
                 --pando-index $<TARGET_FILE:pando-index> --server $<TARGET_FILE:pando-server>)
+        # region correctness (dev/REGION-JOINS-PLAN.md P0): inline clauses, fanout, zero-width,
+        # token groups, loud errors for unbound anchors, TIGER category attribute
+        add_test(NAME region_p0
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/region_p0_test.py
+                --pando-index $<TARGET_FILE:pando-index> --server $<TARGET_FILE:pando-server>
+                --pando $<TARGET_FILE:pando>)
         # A = q again with the same query reuses the session's set ("reused": [...])
         add_test(NAME named_reuse
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/named_reuse_test.py
