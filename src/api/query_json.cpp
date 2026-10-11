@@ -76,6 +76,15 @@ std::vector<std::pair<std::string, size_t>> region_attr_show_values_mv(const Str
     return entries;
 }
 
+// (declared in query_json.h: program_api uses it for tabulate row contexts)
+std::string fragment_tok_id(const Corpus& corpus, CorpusPos p) {
+    if (corpus.has_attr("id")) {
+        std::string_view v = corpus.attr("id").value_at(p);
+        if (!v.empty() && v != "_") return std::string(v);
+    }
+    return "w-" + std::to_string(p + 1);
+}
+
 namespace {
 
 std::string corpus_json_name(const Corpus& corpus) { return corpus.display_name(); }
@@ -104,13 +113,6 @@ bool xml_name_ok(const std::string& n) {
 
 /// Token id for the fragment / highlight map: the corpus' own `id` attribute
 /// when it has one (TEITOK xml:ids), else `w-<position + 1>`.
-std::string fragment_tok_id(const Corpus& corpus, CorpusPos p) {
-    if (corpus.has_attr("id")) {
-        std::string_view v = corpus.attr("id").value_at(p);
-        if (!v.empty() && v != "_") return std::string(v);
-    }
-    return "w-" + std::to_string(p + 1);
-}
 
 /// The context [lo, hi] as TEITOK-style XML: `<s id="s-N">` around sentence
 /// parts, `<tok id=… attr=… head=…>form</tok>`, tokens separated by spaces.

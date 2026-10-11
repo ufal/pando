@@ -12,6 +12,9 @@
 
 namespace pando {
 
+/// The TEITOK id of the token at `p` (its `id` attribute, else `w-<p+1>`).
+std::string fragment_tok_id(const Corpus& corpus, CorpusPos p);
+
 struct QueryOptions {
     size_t limit   = 20;
     size_t offset  = 0;

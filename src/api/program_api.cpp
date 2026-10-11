@@ -1405,6 +1405,35 @@ static void emit_field_json(std::ostream& out, const std::string& val, bool is_m
     }
 }
 
+/// The sentence around a tabulate row, so a UI can show the example in context: the sentence's
+/// forms, the indices of the hit's own tokens in it (query tokens and bound subtrees, so a gap
+/// stays unmarked), the document and the first hit token's id. Without `s` regions: 15 tokens
+/// on either side.
+static void emit_row_context_json(std::ostream& out, const Corpus& corpus, const Match& m) {
+    std::vector<CorpusPos> hit = m.matched_positions();
+    if (hit.empty() || !corpus.has_attr("form")) { out << "null"; return; }
+    std::sort(hit.begin(), hit.end());
+    hit.erase(std::unique(hit.begin(), hit.end()), hit.end());
+    Match hull;
+    hull.positions = {hit.front()};
+    hull.span_ends = {hit.back()};
+    CorpusPos lo = 0, hi = 0;
+    context_bounds(corpus, hull, 15, true, lo, hi);
+    if (hi - lo > 200) { lo = std::max(lo, hit.front() - 60); hi = std::min(hi, hit.back() + 60); }
+    const auto& form = corpus.attr("form");
+    out << "{\"doc_id\": " << jstr(std::string(lookup_doc_id(corpus, hit.front())))
+        << ", \"tok_id\": " << jstr(fragment_tok_id(corpus, hit.front())) << ", \"tokens\": [";
+    for (CorpusPos p = lo; p <= hi; ++p) out << (p == lo ? "" : ", ") << jstr(std::string(form.value_at(p)));
+    out << "], \"hit\": [";
+    bool first = true;
+    for (CorpusPos p : hit) {
+        if (p < lo || p > hi) continue;
+        out << (first ? "" : ", ") << (p - lo);
+        first = false;
+    }
+    out << "]}";
+}
+
 /// `base`: ms.matches[0] is hit number `base` of the set (a sorted page, P7.10).
 static void emit_tabulate_json(std::ostream& out, const Corpus& corpus, const MatchSet& ms,
                                const GroupCommand& cmd, const NameIndexMap& name_map, size_t base = 0) {
@@ -1438,6 +1467,12 @@ static void emit_tabulate_json(std::ostream& out, const Corpus& corpus, const Ma
             emit_field_json(out, val, field_is_multi[f]);
         }
         out << "]";
+    }
+    // per row, the example in its sentence (not a column: a UI shows it on demand)
+    out << "\n  ],\n  \"row_contexts\": [\n";
+    for (size_t i = start; i < end; ++i) {
+        out << (i > start ? ",\n    " : "    ");
+        emit_row_context_json(out, corpus, ms.matches[i - base]);
     }
     out << "\n  ]\n}}\n";
     } catch (const std::exception& e) {
