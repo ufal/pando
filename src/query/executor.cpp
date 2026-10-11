@@ -9567,6 +9567,40 @@ MatchSet QueryExecutor::execute_region_enumeration(const std::vector<AnchorConst
         return count_total && max_total_cap > 0 && result.total_count >= max_total_cap;
     };
 
+    // The conditions after the anchor (`:: tcnt(np) > 5`, `within … having`, `containing`,
+    // order and alignment filters) decide which rows are hits, so they run on the
+    // candidates before a row counts for the page or the total: in batches, each batch
+    // through the same filters as a whole result. (They used to run after the page was
+    // cut, so `np:<node> :: tcnt(np) > 5` with a page of 2 often returned nothing.)
+    std::vector<Match> batch;
+    const size_t kBatch = 1024;
+    bool stopped_early = false;
+    auto page_full = [&]() {
+        return !count_total && sample_size == 0 && max_matches > 0 && result.matches.size() >= max_matches;
+    };
+    auto flush = [&]() {
+        if (batch.empty()) return;
+        MatchSet cand;
+        cand.num_tokens = 0;
+        cand.total_exact = true;
+        cand.matches = std::move(batch);
+        batch.clear();
+        apply_within_having(q, cand);
+        apply_not_within(q, cand);
+        apply_containing(q, cand);
+        apply_position_orders(q, name_map, cand);
+        apply_global_filters(q, name_map, cand);
+        for (auto& m : cand.matches) {
+            if (reached_total_cap()) break;
+            ++result.total_count;
+            if (sample_size > 0) {
+                sampler.offer(std::move(m));
+            } else if (max_matches == 0 || result.matches.size() < max_matches) {
+                result.matches.push_back(std::move(m));
+            }
+        }
+    };
+
     for (size_t ri = 0; ri < nreg; ++ri) {
         if (reached_total_cap()) break;
 
@@ -9602,27 +9636,24 @@ MatchSet QueryExecutor::execute_region_enumeration(const std::vector<AnchorConst
         if (!q.global_region_filters.empty() && !match_passes_inline_region_filters(m, q, name_map))
             continue;
 
-        ++result.total_count;
-        if (sample_size > 0) {
-            sampler.offer(std::move(m));
-        } else if (max_matches == 0 || result.matches.size() < max_matches) {
-            result.matches.push_back(std::move(m));
+        batch.push_back(std::move(m));
+        if (batch.size() >= kBatch) {
+            flush();
+            if (page_full()) {
+                stopped_early = ri + 1 < nreg;
+                break;
+            }
         }
-
-        if (!count_total && max_matches > 0 && result.matches.size() >= max_matches)
-            break;
     }
+    if (!page_full()) flush();
+    else batch.clear();
 
     if (sample_size > 0) result.matches = sampler.take();
 
-    if (count_total && max_total_cap > 0 && result.total_count > max_total_cap)
+    if (count_total && max_total_cap > 0 && result.total_count >= max_total_cap)
         result.total_exact = false;
-
-    apply_within_having(q, result);
-    apply_not_within(q, result);
-    apply_containing(q, result);
-    apply_position_orders(q, name_map, result);
-    apply_global_filters(q, name_map, result);
+    if (stopped_early)
+        result.total_exact = false;   // the page is full; the rest was not counted
     return result;
 }
 

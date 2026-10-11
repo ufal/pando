@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Named region anchors in /query hits: `named_regions` and the hit's `groups` carry the
 region's span, id and token ids (a UI highlights the whole region); token groups are
-numbered without the anchors.
+numbered without the anchors; a region-only query with a condition is filtered before
+the page is cut.
 
   test/region_groups_test.py --pando-index build/pando-index --server build/pando-server
 """
@@ -68,6 +69,14 @@ def main():
             hg = {g["id"]: g["tok_ids"] for g in f.get("highlight_map", {}).get("groups", [])}
             if hg.get("np") != ["w-1", "w-2", "w-3"]:
                 fails.append(f"fragment highlight np: {hg.get('np')}")
+            # a region-only query with a condition: filtered before the page is cut (the
+            # first NP-sized node is not long enough; a page of 1 used to come back empty)
+            e = query({"query": 'n:<node> :: tcnt(n) < 2', "limit": 1})
+            if len(e["hits"]) != 1 or e["hits"][0]["match_start"] != 3:
+                fails.append(f"region-only page of 1: {[(h['match_start'], h['match_end']) for h in e['hits']]}")
+            e = query({"query": 'n:<node> :: tcnt(n) < 2', "limit": 1, "total": True})
+            if e["page"]["total"] != 1 or e["hits"][0]["match_start"] != 3:
+                fails.append(f"region-only total: {e['page']} {[(h['match_start'], h['match_end']) for h in e['hits']]}")
             p = query({"query": '[form="man"]', "limit": 1})
             if [g["name"] for g in p["groups"]] != ["t1"] or "named_regions" in p["hits"][0]:
                 fails.append(f"plain query changed: {p['groups']}")
