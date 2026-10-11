@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Named region anchors in /query hits: `named_regions` and the hit's `groups` carry the
-region's span, id and token ids (a UI highlights the whole region); token groups are
+region's span, id, attributes and token ids (a UI highlights the whole region); token groups are
 numbered without the anchors; a region-only query with a condition is filtered before
 the page is cut.
 
@@ -60,6 +60,9 @@ def main():
             groups = {g["name"]: g for g in h.get("groups", [])}
             if groups.get("np", {}).get("tok_ids") != ["w-1", "w-2", "w-3"] or groups.get("np", {}).get("region") != "node":
                 fails.append(f"hit group np: {groups.get('np')}")
+            # the region's own attributes, all of them (the UI picks what to show)
+            if groups.get("np", {}).get("attrs") != {"cat": "NP", "id": "n2"} or nr.get("np", {}).get("attrs") != {"cat": "NP", "id": "n2"}:
+                fails.append(f"region attrs np: {groups.get('np', {}).get('attrs')} / {nr.get('np', {}).get('attrs')}")
             if groups.get("w", {}).get("index") != 0 or groups.get("w", {}).get("start") != 0:
                 fails.append(f"token group w (numbered without the anchors): {groups.get('w')}")
             names = [g["name"] for g in r.get("groups", [])]
@@ -77,6 +80,12 @@ def main():
             e = query({"query": 'n:<node> :: tcnt(n) < 2', "limit": 1, "total": True})
             if e["page"]["total"] != 1 or e["hits"][0]["match_start"] != 3:
                 fails.append(f"region-only total: {e['page']} {[(h['match_start'], h['match_end']) for h in e['hits']]}")
+            # a region-only query has no query token: no token group, tokens without one
+            ro = query({"query": 'n:<node cat="NP">', "limit": 1, "fragment": True})["hits"][0]
+            if [g["name"] for g in ro.get("groups", [])] != ["n"] or any("group" in t for t in ro.get("tokens", [])):
+                fails.append(f"region-only groups: {ro.get('groups')}")
+            if [g["id"] for g in ro.get("highlight_map", {}).get("groups", [])] != ["n"]:
+                fails.append(f"region-only highlight groups: {ro.get('highlight_map', {}).get('groups')}")
             p = query({"query": '[form="man"]', "limit": 1})
             if [g["name"] for g in p["groups"]] != ["t1"] or "named_regions" in p["hits"][0]:
                 fails.append(f"plain query changed: {p['groups']}")
