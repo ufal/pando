@@ -106,6 +106,9 @@ std::string CwbLexer::strip_quotes(std::string_view raw) {
     for (std::size_t i = 1; i + 1 < raw.size();) {
         char c = raw[i];
         if (c == '\\' && i + 1 < raw.size() - 1) {
+            // as in CQP, the backslash reaches the regex (`"\."` is a full stop); only an
+            // escaped delimiter is unescaped here
+            if (raw[i + 1] != d) out.push_back(c);
             out.push_back(raw[i + 1]);
             i += 2;
             continue;

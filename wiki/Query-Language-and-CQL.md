@@ -115,4 +115,4 @@ cat VP
 | **Typical use** | CQP-like token queries, `count by` | PML-TQ experiments, TEITOK token+region | Constituency macros |
 | **Full language parity** | No — subset | No — native grammar small; gold bridge optional | No — three macros + pass-through |
 
-For normative **native** syntax, **[PANDO-CQL.md](PANDO-CQL.md)** remains the reference. For CLI flags that affect parsing (e.g. **`--strict-quoted-strings`**), see [CLI reference](CLI-Reference.md).
+For **native** syntax, see the tutorial **[PANDO-CQL.md](PANDO-CQL.md)** and the **[reference](PANDO-CQL-Reference.md)**. For CLI flags that affect parsing (e.g. **`--strict-quoted-strings`**), see [CLI reference](CLI-Reference.md).

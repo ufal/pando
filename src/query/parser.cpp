@@ -100,15 +100,13 @@ Statement Parser::parse_statement() {
                 || t3.type == TokType::IDENT || t3.type == TokType::REGION_START) {
                 stmt.name = t1.text;
                 stmt.has_query = true;
-                // `Name = dep_subtree(src) [:: …]` — single-token query, not `[`…`]`
-                if (t3.type == TokType::IDENT && t3.text == "dep_subtree") {
-                    stmt.query.tokens.push_back(parse_token_expr());
-                    if (lexer_.peek().type == TokType::DCOLON) {
-                        lexer_.consume();
-                        parse_global_filters(stmt.query);
-                    }
-                    return stmt;
-                }
+                // `Name = dep_subtree(src)`: a subtree is a binding derived from a token
+                // of the same query, not a query of its own
+                if (t3.type == TokType::IDENT && t3.text == "dep_subtree")
+                    throw std::runtime_error(
+                            "`" + t1.text + " = dep_subtree(…)` is not supported: bind the subtree after "
+                            "`::` in the query that finds its head, e.g. "
+                            "`n:[deprel=\"nsubj\"] :: np:dep_subtree(n) & tcnt(np) > 6`");
                 stmt.query = parse_token_query();
                 return stmt;
             }
@@ -374,7 +372,7 @@ GroupCommand Parser::parse_command() {
                 std::string first = lexer_.next().text;
                 std::string low = first;
                 std::transform(low.begin(), low.end(), low.begin(), ::tolower);
-                if ((low == "tcnt" || low == "forms" || low == "spellout"
+                if ((low == "tcnt" || low == "gaps" || low == "forms" || low == "spellout"
                      || low == "year" || low == "century" || low == "decade"
                      || low == "month" || low == "week" || low == "day")
                     && lexer_.peek().type == TokType::LPAREN) {
@@ -417,7 +415,7 @@ GroupCommand Parser::parse_command() {
             {
                 std::string low = first;
                 std::transform(low.begin(), low.end(), low.begin(), ::tolower);
-                if ((low == "tcnt" || low == "forms" || low == "spellout"
+                if ((low == "tcnt" || low == "gaps" || low == "forms" || low == "spellout"
                      || low == "year" || low == "century" || low == "decade"
                      || low == "month" || low == "week" || low == "day")
                     && lexer_.peek().type == TokType::LPAREN) {
@@ -465,7 +463,7 @@ GroupCommand Parser::parse_command() {
                 {
                     std::string low2 = second;
                     std::transform(low2.begin(), low2.end(), low2.begin(), ::tolower);
-                    if ((low2 == "tcnt" || low2 == "forms" || low2 == "spellout"
+                    if ((low2 == "tcnt" || low2 == "gaps" || low2 == "forms" || low2 == "spellout"
                          || low2 == "year" || low2 == "century" || low2 == "decade"
                          || low2 == "month" || low2 == "week" || low2 == "day")
                         && lexer_.peek().type == TokType::LPAREN) {
@@ -638,7 +636,7 @@ GroupCommand Parser::parse_command() {
         std::string field = ft.text;
         std::string low = field;
         std::transform(low.begin(), low.end(), low.begin(), ::tolower);
-        if ((low == "tcnt" || low == "forms" || low == "spellout"
+        if ((low == "tcnt" || low == "gaps" || low == "forms" || low == "spellout"
              || low == "year" || low == "century" || low == "decade"
              || low == "month" || low == "week" || low == "day"
              || low == "strlen")
@@ -973,11 +971,11 @@ QueryToken Parser::parse_token_expr() {
         std::string raw = t.text;
         AttrCondition ac;
         ac.attr = "form";
-        interpret_quoted_eq_string(ac, raw, opts_.strict_quoted_strings);
+        interpret_quoted_eq_string(ac, raw, opts_.strict_quoted_strings, &t.raw);
         auto form_node = ConditionNode::make_leaf(std::move(ac));
         AttrCondition ac_contr;
         ac_contr.attr = "contr_form";
-        interpret_quoted_eq_string(ac_contr, std::move(raw), opts_.strict_quoted_strings);
+        interpret_quoted_eq_string(ac_contr, std::move(raw), opts_.strict_quoted_strings, &t.raw);
         auto contr_node = ConditionNode::make_leaf(std::move(ac_contr));
         qt.conditions = ConditionNode::make_branch(BoolOp::OR, std::move(form_node), std::move(contr_node));
         qt.min_repeat = 1;
@@ -1308,7 +1306,7 @@ ConditionPtr Parser::parse_primary_condition() {
             } else {
                 Token v = lexer_.next();
                 if (v.type == TokType::STRING) {
-                    interpret_quoted_eq_string(ac, std::string(v.text), opts_.strict_quoted_strings);
+                    interpret_quoted_eq_string(ac, std::string(v.text), opts_.strict_quoted_strings, &v.raw);
                 } else if (v.type == TokType::NUMBER) {
                     ac.op = CompOp::EQ;
                     ac.value = v.text;
@@ -1322,7 +1320,7 @@ ConditionPtr Parser::parse_primary_condition() {
         case TokType::NEQ: {
             Token v = lexer_.next();
             if (v.type == TokType::STRING) {
-                interpret_quoted_neq_string(ac, std::string(v.text), opts_.strict_quoted_strings);
+                interpret_quoted_neq_string(ac, std::string(v.text), opts_.strict_quoted_strings, &v.raw);
             } else {
                 ac.op = CompOp::NEQ;
                 ac.value = v.text;
@@ -1489,6 +1487,28 @@ void Parser::parse_global_filters(TokenQuery& tq) {
         if (t.type != TokType::IDENT)
             throw std::runtime_error("Expected identifier in global filter");
 
+        // A derived binding: `np:dep_subtree(n)` (dev/REGION-JOINS-PLAN.md §3.3 rule 4). It is
+        // not part of the token sequence; internally it is the same derived token as the
+        // (undocumented) inline form `n:[…] np:dep_subtree(n)`, which consumes no position.
+        if (lexer_.peek().type == TokType::COLON) {
+            lexer_.consume();
+            Token f = lexer_.next();
+            if (f.type != TokType::IDENT || f.text != "dep_subtree")
+                throw std::runtime_error("After `" + t.text + ":` in `::` a derived binding is expected, "
+                                         "e.g. `" + t.text + ":dep_subtree(n)`");
+            if (tq.tokens.empty())
+                throw std::runtime_error("dep_subtree(…) needs the token query that finds its head");
+            lexer_.expect(TokType::LPAREN);
+            QueryToken qt;
+            qt.name = t.text;
+            qt.is_dep_subtree = true;
+            qt.dep_subtree_source = lexer_.expect(TokType::IDENT).text;
+            lexer_.expect(TokType::RPAREN);
+            tq.relations.push_back(QueryRelation{RelationType::SEQUENCE});
+            tq.tokens.push_back(std::move(qt));
+            return;
+        }
+
         // Function call: distance(a, b) < 5, depth(a) > depth(b), etc.
         if (lexer_.peek().type == TokType::LPAREN) {
             // Helper lambda: parse func_name(args...) into a GlobalFuncCall.
@@ -1513,6 +1533,7 @@ void Parser::parse_global_filters(TokenQuery& tq) {
                 else if (name == "rchild")        fc.func = GlobalFunctionType::RCHILD;
                 else if (name == "rcontains")      fc.func = GlobalFunctionType::RCONTAINS;
                 else if (name == "tcnt")          fc.func = GlobalFunctionType::TCNT;
+                else if (name == "gaps")          fc.func = GlobalFunctionType::GAPS;
                 else throw std::runtime_error("Unknown function in global filter: " + name);
                 lexer_.consume(); // consume LPAREN
                 while (lexer_.peek().type != TokType::RPAREN) {
@@ -1614,6 +1635,13 @@ void Parser::parse_global_filters(TokenQuery& tq) {
                 else
                     gf.value = lexer_.expect(TokType::IDENT).text;
                 tq.global_region_filters.push_back(std::move(gf));
+            } else if (next.type == TokType::EQ) {
+                lexer_.consume();
+                if (lexer_.peek().type == TokType::IDENT && lexer_.peek().text == "dep_subtree")
+                    throw std::runtime_error("Write `" + t.text + ":dep_subtree(…)` to bind a subtree "
+                                             "(`=` compares, `name:` binds)");
+                throw std::runtime_error("Expected `" + t.text + ".attr`, a function or a "
+                                         "struct_attr before `=` in global filter");
             } else if (next.type == TokType::LT || next.type == TokType::GT) {
                 // Positional ordering: :: a < b or :: a > b (no '_' in first name — not struct_attr)
                 CompOp op = (next.type == TokType::LT) ? CompOp::LT : CompOp::GT;
@@ -1654,11 +1682,12 @@ void Parser::parse_global_filters(TokenQuery& tq) {
                         if (tok && !tok->is_anchor() && !tok->is_dep_subtree && !tok->has_repetition()) {
                             AttrCondition ac;
                             ac.attr = attr1;
-                            std::string v = lexer_.next().text;
+                            Token vt = lexer_.next();
+                            std::string v = vt.text;
                             if (op == CompOp::EQ)
-                                interpret_quoted_eq_string(ac, std::move(v), opts_.strict_quoted_strings);
+                                interpret_quoted_eq_string(ac, std::move(v), opts_.strict_quoted_strings, &vt.raw);
                             else
-                                interpret_quoted_neq_string(ac, std::move(v), opts_.strict_quoted_strings);
+                                interpret_quoted_neq_string(ac, std::move(v), opts_.strict_quoted_strings, &vt.raw);
                             auto leaf = ConditionNode::make_leaf(std::move(ac));
                             tok->conditions = tok->conditions
                                 ? ConditionNode::make_branch(BoolOp::AND, tok->conditions, leaf)

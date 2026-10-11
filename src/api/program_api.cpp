@@ -1361,7 +1361,7 @@ static void emit_size_json(std::ostream& out, const MatchSet& ms) {
 }
 
 static bool is_multi_value_field(const Corpus& corpus, const std::string& field) {
-    if (field.size() >= 5 && field.compare(0, 5, "tcnt(") == 0) return false;
+    if (field.size() >= 5 && (field.compare(0, 5, "tcnt(") == 0 || field.compare(0, 5, "gaps(") == 0)) return false;
     std::string attr_spec = field;
     if (field.rfind("match.", 0) == 0 && field.size() > 6) {
         attr_spec = field.substr(6);

@@ -282,6 +282,7 @@ enum class GlobalFunctionType {
     NVALS,
     /// :: tcnt(label) — token count for a named region anchor or dep_subtree binding
     TCNT,
+    GAPS,      // gaps(x): breaks in x's token positions (0 = contiguous; dep_subtree > 0 = non-projective)
     /// Layer A: B's token span ⊆ A's span (both args = named region bindings).
     CONTAINS,
     /// Layer B (nested + `.par`): child row's parent id == parent's region index.

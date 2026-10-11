@@ -24,4 +24,4 @@ All pages are Markdown in this folder (same convention as **flexipipe** / **flex
 
 Start with [Home](Home.md), or [Installation](Installation.md) + [Quick Start](Quick-Start.md).
 
-The canonical **language reference** remains [PANDO-CQL.md](PANDO-CQL.md) in the tree (long-form tutorial). Wiki pages summarize behavior and link there where appropriate.
+The query language is introduced in [PANDO-CQL.md](PANDO-CQL.md) (tutorial) and specified in [PANDO-CQL-Reference.md](PANDO-CQL-Reference.md) (reference). Wiki pages summarize behavior and link there where appropriate.

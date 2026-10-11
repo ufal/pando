@@ -12,6 +12,49 @@ void Lexer::skip_whitespace() {
         ++pos_;
 }
 
+// From `from` (just after `<`): name ( ws+ ( key[/sub]* = "…" | key = '…' | key = word | name(label) ) )* ws* `/`? `>`.
+// On success *end is the index of the closing `>`.
+bool Lexer::scan_region_anchor_body(size_t from, size_t* end) const {
+    const std::string& s = input_;
+    size_t i = from;
+    auto ident_char = [&](char ch) { return std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' || ch == '-' || ch == '.'; };
+    auto skip_ws = [&]() { while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i; };
+    size_t n0 = i;
+    while (i < s.size() && ident_char(s[i])) ++i;
+    if (i == n0) return false;
+    while (true) {
+        size_t before = i;
+        skip_ws();
+        if (i >= s.size()) return false;
+        if (s[i] == '/' && i + 1 < s.size() && s[i + 1] == '>') { *end = i + 1; return true; }
+        if (s[i] == '>') { *end = i; return true; }
+        if (i == before) return false;          // the name/item must be followed by space, `>` or `/>`
+        size_t k0 = i;
+        while (i < s.size() && (ident_char(s[i]) || s[i] == '/')) ++i;
+        if (i == k0) return false;
+        if (i < s.size() && s[i] == '(') {       // peer clause: rchild(ip), contains(x)
+            ++i;
+            size_t l0 = i;
+            while (i < s.size() && ident_char(s[i])) ++i;
+            if (i == l0 || i >= s.size() || s[i] != ')') return false;
+            ++i;
+            continue;
+        }
+        if (i >= s.size() || s[i] != '=') return false;
+        ++i;
+        if (i < s.size() && (s[i] == '"' || s[i] == '\'')) {
+            char q = s[i++];
+            while (i < s.size() && s[i] != q) i += (s[i] == '\\' && i + 1 < s.size()) ? 2 : 1;
+            if (i >= s.size()) return false;
+            ++i;
+        } else {
+            size_t v0 = i;   // unquoted value: anything up to space or `>` (as the anchor parser reads it)
+            while (i < s.size() && !std::isspace(static_cast<unsigned char>(s[i])) && s[i] != '>') ++i;
+            if (i == v0) return false;
+        }
+    }
+}
+
 Token Lexer::next() {
     if (has_lookahead_) {
         has_lookahead_ = false;
@@ -43,15 +86,16 @@ Token Lexer::next() {
                 }
             }
         }
-        // Check for <ident ...> (region start, possibly with attrs) — but NOT <<, <=
+        // Check for <ident ...> (region start, possibly with attrs) — but NOT <<, <=.
+        // Only a well-formed anchor body counts: a name, then `key="value"` pairs and
+        // `clause(label)` peer clauses (quote-aware, so `>` inside a value does not end it).
+        // Anything else is `<` (comparison / dependency): `:: a <b & distance(a, b) > 1` and
+        // `[] <n:[…]` must not be swallowed up to some later `>`.
         if (pos_ + 1 < input_.size() && (std::isalpha(input_[pos_ + 1]) || input_[pos_ + 1] == '_')) {
-            // Scan everything between < and > as raw content
-            size_t scan = pos_ + 1;
-            while (scan < input_.size() && input_[scan] != '>')
-                ++scan;
-            if (scan < input_.size() && input_[scan] == '>') {
-                std::string content(input_.data() + pos_ + 1, scan - pos_ - 1);
-                pos_ = scan + 1;
+            size_t end = 0;
+            if (scan_region_anchor_body(pos_ + 1, &end)) {
+                std::string content(input_.data() + pos_ + 1, end - pos_ - 1);
+                pos_ = end + 1;
                 return {TokType::REGION_START, content, start};
             }
         }
@@ -99,17 +143,22 @@ Token Lexer::next() {
     // String literal "..."
     if (c == '"') {
         ++pos_;
-        std::string text;
+        std::string text, raw;
         while (pos_ < input_.size() && input_[pos_] != '"') {
             if (input_[pos_] == '\\' && pos_ + 1 < input_.size()) {
+                raw += input_[pos_];
                 ++pos_;
+                raw += input_[pos_];
                 text += input_[pos_++];
             } else {
+                raw += input_[pos_];
                 text += input_[pos_++];
             }
         }
         if (pos_ < input_.size()) ++pos_; // consume closing quote
-        return {TokType::STRING, text, start};
+        Token tk{TokType::STRING, text, start};
+        tk.raw = std::move(raw);
+        return tk;
     }
 
     // Regex literal /pattern/

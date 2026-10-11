@@ -41,7 +41,7 @@ For **single-column** `count` / `freq` on a **multivalue** positional attribute,
 
 With **`split_feats` false** (the usual case for UD), the indexer keeps a **single** positional attribute **`feats`**. On disk you get the normal positional family: `feats.dat`, `feats.lex`, `feats.rev`, … — one lexicon entry per **full** bundle string.
 
-Queries use **`feats/Feature`** only — **`.`** is reserved for **`name.attr`** (token label or region binding), not UD sub-keys (see [PANDO-CQL.md](PANDO-CQL.md)). For those sub-keys the engine **does not** require a separate indexed column per feature: it resolves the value **at query time** by parsing the stored UD string on each candidate token (and uses the same logic for **`freq` / `tabulate` / aggregates** on `feats/Feature`). There are **no** `feats_Number.mv.*` style component indexes like MV: the “special filenames” story is different from multivalue sidecars.
+Queries use **`feats/Feature`** only — **`.`** is reserved for **`name.attr`** (token label or region binding), not UD sub-keys (see the [reference](PANDO-CQL-Reference.md#feature-fields-featsfeature)). For those sub-keys the engine **does not** require a separate indexed column per feature: it resolves the value **at query time** by parsing the stored UD string on each candidate token (and uses the same logic for **`freq` / `tabulate` / aggregates** on `feats/Feature`). There are **no** `feats_Number.mv.*` style component indexes like MV: the “special filenames” story is different from multivalue sidecars.
 
 ### Split feats (optional)
 
@@ -58,6 +58,6 @@ Some UD-style columns (notably **MISC** in CoNLL-U) can contain **flags without 
 
 ## See also
 
-- [PANDO-CQL.md](PANDO-CQL.md) — `feats/…` syntax and aggregates
+- [Reference](PANDO-CQL-Reference.md#feature-fields-featsfeature) — `feats/…` syntax and aggregates
 - [Index and corpus layout](Index-and-Corpus-Layout.md) — `corpus.info` keys
 - [CLI reference](CLI-Reference.md) — `pando` flags, `pando-index --split-feats`

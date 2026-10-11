@@ -24,7 +24,24 @@ int main() {
             R"(barenoun:[upos="NOUN"] longbarenp:dep_subtree(barenoun) :: tcnt(longbarenp) > 2)",
             {})
             .parse();
-    Parser(R"(longbarenp = dep_subtree(barenoun) :: tcnt(longbarenp) > 2)", {}).parse();
+    // the documented form: a derived binding after `::`
+    {
+        auto prog = Parser(R"(n:[deprel="nsubj"] :: np:dep_subtree(n) & tcnt(np) > 6)", {}).parse();
+        const auto& q = prog[0].query;
+        if (q.tokens.size() != 2 || !q.tokens[1].is_dep_subtree || q.tokens[1].name != "np"
+            || q.tokens[1].dep_subtree_source != "n" || q.relations.size() != 1
+            || q.global_function_filters.size() != 1) {
+            std::cerr << "`:: np:dep_subtree(n)` not parsed as a derived binding\n";
+            return 1;
+        }
+    }
+    // `Name = dep_subtree(…)` and `:: np = dep_subtree(n)` are errors with a hint
+    for (const char* bad : {R"(longbarenp = dep_subtree(barenoun) :: tcnt(longbarenp) > 2)",
+                            R"(n:[] :: np = dep_subtree(n))"}) {
+        bool threw = false;
+        try { Parser(bad, {}).parse(); } catch (const std::exception&) { threw = true; }
+        if (!threw) { std::cerr << "expected an error for: " << bad << "\n"; return 1; }
+    }
     Parser(R"(a:[]; stats avg(strlen(a.form)), median(strlen(a.form)) by a.text_id)", {}).parse();
 
     // coll / dcoll: parenthesized match-set name and (on label)

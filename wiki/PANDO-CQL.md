@@ -3,38 +3,35 @@
 The native query language of pando is called pando-CQL, heavily modeled after [CWB-CQL](https://cwb.sourceforge.io/files/CQP_Manual/), with additions that are partially taken from [SketchEngine](https://www.sketchengine.eu/documentation/corpus-querying/), and partially from [PML-TQ](https://ufal.mff.cuni.cz/pmltqdoc/doc/pmltq_tutorial_web_client.html). These guidelines give a general introduction to pando-CQL (henceforth simply CQL when there is no confusion), with example queries illustrated against the **sample corpus** shipped with this repository: `test/data/sample.conllu`, which is annotated using [Universal Dependencies](https://universaldependencies.org/).
 See [Sample-Corpora.md](Sample-Corpora.md) for the bundled CoNLL-U and the full-UD download script.
 
+This page starts from scratch: no experience with corpus queries is needed. If you already know CQL from CWB or Manatee, most of it will look familiar: things pando offers that traditional CQL does not are marked with a red star <span style="color:#d00">★</span>. All details and the complete lists of functions and commands are in the [reference](PANDO-CQL-Reference.md).
+
 ## Token Queries
 
-The base query in CQL searches for a token (a word or punctuation mark), with optionally one or more restrictions. A (query) token is represented with two square brackets, with any restrictions we want to place on the tokens we want to find inside the brackets. So if we want to look for a word with the lemma "book", we express that in CQL as `[lemma="book"]`, which will find all examples of *book* and *books*, as a noun, but also *book*, *books*, *booked* and *booking* as as a verb.
+The base query in CQL searches for a token (a word or punctuation mark), with optionally one or more restrictions. A (query) token is represented with two square brackets, with any restrictions we want to place on the tokens we want to find inside the brackets. So if we want to look for a word with the lemma "book", we express that in CQL as `[lemma="book"]`, which will find all examples of *book* and *books*, as a noun, but also *book*, *books*, *booked* and *booking* as a verb.
 
-We can add multiple restrictions an a token, putting a **&** between the restrictions to say that all restrictions should be met (a **|** would instead match if any of the restrictions is met). So if we only want to find occurrences of the verbs *book*: `[lemma="book" & upos="VERB"]` will match only examples of *book*, *booking*, etc. as a verb. We can instead also look for either the lemma *book* or *cat*: `[lemma="book" | lemma="cat"]`.
+We can add several restrictions on a token, putting a **&** between the restrictions to say that all restrictions should be met (a **|** would instead match if any of the restrictions is met). So if we only want to find occurrences of the verbs *book*: `[lemma="book" & upos="VERB"]` will match only examples of *book*, *booking*, etc. as a verb. We can instead also look for either the lemma *book* or *cat*: `[lemma="book" | lemma="cat"]`.
 
 CQL is a sequence-based query language, meaning we can look for sequences of tokens. This is done by putting several tokens in a row in our query. So if we want to only find occurrences of *book* that are preceded by a determiner, we express that as follows: `[upos="DET"] [lemma="book"]`.
 
+## What is in my corpus?
+
+Which restrictions you can use depends on how the corpus is annotated. In a corpus annotated with Universal Dependencies, every token typically has a `form` (the word as written), a `lemma` (its dictionary form), a `upos` (its part of speech, such as `NOUN`, `VERB` or `DET`), and more. To find out what your corpus has, ask it: `show attributes` lists the token attributes, `show values upos` lists all values of `upos` with how often each occurs, and `show regions` lists the larger units such as sentences and texts (see [Regions](#regions) below). A web interface usually shows the same information in its menus.
+
 ## Regular expressions
 
-To look for patterns inside words, CQL allows regular expressions in token restrictions. In regular expressions, you can look for optional letters, repeated letters, etc. In pando-CQL, the explicit regex form uses slash delimiters: `[form = /pan.*tion/]`.
+To look for patterns inside words, CQL allows *regular expressions*: patterns in which some characters have a special meaning. The most useful ones are `.`, which stands for any single letter, and `*`, which means "the previous thing any number of times", so `.*` stands for "anything". In pando-CQL, a pattern can be written in two ways. Between quotes, as in CWB and Manatee, the pattern has to match the whole word: `[form=".*tion"]` finds words that end in *-tion*. Between slashes, as in many programming languages, it can match anywhere in the word: `[form=/book/]` finds *book*, but also *notebook*, *booking* and *bookshelves*, and `[form=/^un.*able$/]` uses `^` and `$` to say where the word starts and ends. The [reference](PANDO-CQL-Reference.md#values-and-regular-expressions) lists what else regular expressions can do.
 
-For compatible behaviour with CWB and Mantee, normal string matches are interpreted as bound regular expressions when they contain regular expression characters. So `[form = ".*tion"]` matches words that end in *-tion*, like CWB. This behaviour can be turned off by setting `strict_quoted_strings`, which will make the previous query look for the literal string *.\*tion*.
+To find words that do *not* match, use `!=` instead of `=`: `[upos="NOUN" & lemma!="book"]` finds all nouns except *book*, and `[lemma!=/e/]` all lemmas without an *e*. A whole condition can be negated by putting `!` in front of it: `[!(upos="NOUN" | upos="VERB")]` finds everything that is neither a noun nor a verb.
 
-`!=` takes the same two forms and matches the tokens whose value does *not* match: `[lemma != ".*e.*"]` (whole token, as in CWB) and `[lemma != /e/]` (substring) both find every lemma without an *e*. With `strict_quoted_strings`, a quoted value after `!=` is a literal as well.
+Because `.`, `?`, `*` and a few other characters have a special meaning in patterns, you need a backslash to search for the character itself: `[form="\."]` finds full stops (without the backslash, `"."` means "any one character"). A single `?` or `*` on its own needs no backslash: `[form="?"]` finds question marks.
 
-A condition can also be negated as a whole with `!`: `[!(lemma="the" | upos="NOUN")]` is the same as `[lemma!="the" & upos!="NOUN"]`, and `[!lemma="be.*"]` the same as `[lemma!="be.*"]` (the CWB dialect accepts it too).
-
-Slash-regex values are plain regular expressions. For example `[form = /.*tion/]` matches any substring *tion* inside the token (e.g. *conditional*), not only *-tion* suffixes; anchoring is up to your pattern (e.g. `[form = /tion$/]`).
-
-The regex syntax is RE2's (a Perl / PCRE subset, as in CWB and Manatee) when pando is built with RE2 — the recommended build: `.` matches one character, including non-ASCII ones (`"h.t"` finds *hát*), `(?i)` makes a pattern case-insensitive (`[lemma = "(?i)praha"]`; for a plain word `%c` is faster: `[lemma = "praha" %c]`), classes like `\d`, `\w`, `[[:upper:]]` work. Backreferences and lookaround, which RE2 does not have, fall back to std::regex (ECMAScript). A build without RE2 uses std::regex throughout, where `.` matches one *byte* of UTF-8. A regex on an attribute is matched once per query against the attribute's lexicon (the distinct values), not per token: a literal prefix (`un.*`) narrows that to a range of the sorted lexicon, a literal the value must contain (`.*ung`, also with `%c` or `(?i)`) is checked before the regex, and a large lexicon is scanned by several threads. On a 38M-token corpus with 3.1M word forms `[form=".*ung"]` takes about 20 ms, `[form="[A-Z].*"]` (no literal) about 150 ms on two cores; a server reuses the matching values for the same regex.
-
-The flags `%c` (case-insensitive), `%d` (diacritic-insensitive) and `%cd` (both) on a literal comparison work on UTF-8: `[form="řeka" %c]` finds *Řeka*, *řeka* and *ŘEKA*, `[form="zena" %cd]` also *Žena*. Folding covers Latin (including Central European letters), Greek and Cyrillic; as in Unicode decomposition, letters such as *ø*, *ł*, *æ* and *ß* have no accent to remove. Indexes built before this fold (October 2026) get its lookup files from `pando-index --upgrade`; until then `%c` / `%d` still work, more slowly.
-
-A regex with a literal start (`"un.*"`) only looks at the matching part of the lexicon; one without (`".*ness"`) scans the whole lexicon. The set of lexicon entries a pattern matches is kept per corpus, so the page, the background total and later pages of the same query do not scan again.
 
 
 ## Token repetitions
 
-Since the original CQL is purely sequence based, the last query above will not find examples where there is anything between the determiner and the noun, like in *the green book*, which we probably intended to find. That is why CQL introduces token repetitions operators, that are placed directly after the closing bracket. For instance, `[]?` means any optional token (technically 0 or 1 occurrences of the token with in this case no restrictions). So the query `a:[upos="DET"] []? [lemma="book"]` will still find *the book*, but allows a single token in between the determiner and book, so *the green book*, *some interesting book*, etc. But it will also include probably unintented results like *some people book* (their hotel early). We could prevent that by tightening the query to only allow adjectives, and saying there can be multiple adjectives `a:[upos="DET"] [upos="ADJ"]* [lemma="book"]`, where the * stands for "0 or more". 
+CQL is originally purely sequence based, so a query like `[upos="DET"] [upos="NOUN"]` will not find cases with anything between the determiner and the noun, as in *the green book*, which we probably intended to find. That is why CQL has repetition operators, placed directly after the closing bracket. For instance, `[]?` means any optional token (technically 0 or 1 occurrences of the token with in this case no restrictions). So the query `[upos="DET"] []? [lemma="book"]` will still find *the book*, but allows a single token in between the determiner and book, so *the green book*, *some interesting books*, etc. But it will also include results we probably did not intend, like *some people book* (their hotel early). We could prevent that by tightening the query to only allow adjectives, and saying there can be any number of adjectives: `[upos="DET"] [upos="ADJ"]* [lemma="book"]`, where the * stands for "0 or more". 
 
-There are four different repititions, depending on how many tokens are allowed or required:
+There are several kinds of repetition, depending on how many tokens are allowed or required:
 
 | symbol | interpretation |
 | ----- | ----- |
@@ -45,306 +42,104 @@ There are four different repititions, depending on how many tokens are allowed o
 | []{m} | exactly m tokens |
 | []{m,} | m or more tokens |
 
-Repetition (**`+`**, **`*`**, **`{n,m}`**, …) on a **single** token uses **maximal contiguous** stretches: one hit per uninterrupted run of tokens that each satisfy the token condition (including the `form` \| `contr_form` OR). Shorter sub-spans inside that run are **not** returned as separate hits. **`*`** uses the **same** maximal-run logic as **`+`** for non-empty spans; `min_repeat == 0` only affects the **lower** bound (e.g. the last tile may be shorter when splitting a run longer than `max_repeat`). A **pure** zero-token match (matching nowhere in the corpus) is not emitted as a separate hit yet—`match_end` / `NO_HEAD` conventions need a dedicated representation first.
 
-If a run is longer than `max_repeat` (the engine’s practical cap, e.g. 100 for bare `+`/`*`), the run is split into consecutive tiles of at most `max_repeat` tokens. The same expansion applies to regex shorthands: `/can.*t/` → `[form=/can.*t/ | contr_form=/can.*t/]+`.
+## Giving tokens a name
 
-## Dependency relations
+You can give a query token a *name* by putting a name and a colon in front of it: `a:[upos="DET"]` is a token called *a*. The name does not change what is found, but it lets us refer to that token later in the query, after a double colon `::`. What comes after `::` are conditions on the match as a whole, which can talk about any named token.
 
-Our query `[upos="DET"] []* [lemma="book"]` was probably intended to look for any word *book* modified by a determiner, something that you cannot really express in CWB/CQL, only approximate by expressing what exactly can occur between a determiner and a noun inside an NP. That is why pando-CQL introduces the option to look for dependency relations. Dependency relations are expressed by two query tokens with an operator in between: < or > depending on which is the head. Or >> and << for descendants and ancestors.
+That makes it possible to compare tokens with each other, which you cannot do inside a single token. For instance, `a:[] b:[] :: a.form = b.form` finds two identical words in a row, like *that that* in *I knew that that book was yours*. A condition about just one named token works the same as putting it inside the token: `a:[upos="VERB"] :: a.lemma = "say"` finds exactly what `[upos="VERB" & lemma="say"]` finds.
 
-With that, our query becomes `a:[upos="DET"] < [lemma="book"]`, which will find any determiner governed by the word *book*, so it will not longer find *some people book*. The relation can also be expressed the other way around: `[lemma="book"] > [upos="DET"]`. It will find any relation, so if we look for `[upos="ADJ"] < [lemma="book"]`, it will find any adjective that has a dependency relation to *book* in the corpus, so it will not only find *green book*, but also the same words in longer expressions like *some green and when it is raining also wet books*, or predicative uses as in *The book that was on the table was green.*. 
+After `::` you can also use functions. For instance, `f` gives the frequency of a word in the whole corpus, so `a:[upos="NOUN"] :: f(a.lemma) > 10` only finds nouns whose lemma occurs more than 10 times, and `a:[upos="NOUN"] [] b:[upos="NOUN"] :: a.lemma = b.lemma` two occurrences of the same noun with one word in between. Several conditions are joined with `&`. You will see more functions along the way; the full list is in the [reference](PANDO-CQL-Reference.md#global-functions).
 
-Dependency and sequence relations can be combined, with the token being interpreted by the symbol between them, so `[upos="DET"] [upos="ADJ"] < [lemma="book"]` requires the adjective to be to the right of the determiner, as well as the adjective to be governed by the word *book*. And it is possible to negate dependencies: `[upos="DET"] !< [lemma="book"]` for occurrences of *book* without a determiner.
+<span style="color:#d00">★</span> Names do not disappear when the query is done. You can use them afterwards to count or show results (see [Counting and comparing](#counting-and-comparing)), and even in a later query, which is how [parallel corpora](#parallel-corpora) are searched.
 
-A dependency operator always relates two single tokens: next to a repeated token (`[upos="DET"] [upos="ADJ"]* < [lemma="book"]`) it would be unclear which token it relates, and with zero repetitions it would relate the determiner instead, so such a query gives an error. Repetitions remain available in plain sequences (`[upos="DET"] [upos="ADJ"]* [lemma="book"]`), and relations can always be expressed inside a token (see below).
+## Capitals and accents
 
-Intead of using sequence notation, it is also possible to define dependency relations as token restriction, in a notation similar to that used in PML-TQ. In that case, to look for a noun modified by a determiner, we specify inside the token that we are looking for a child that is a determiner: `[upos="NOUN" & child [upos="DET"] ]`. This notation has the advantage that you can specify multiple children, and still have the option to furthermore look for words to the left or the right. And there are more option in the token-restriction notation: you can look not only for `child`, but also for `parent`, `ancestor`, `descendant`, or `sibling`.
+`[form="the"]` finds *the*, but not *The* at the start of a sentence. To ignore the difference between capitals and small letters, put `%c` after the value: `[form="the" %c]`. In the same way, `%d` ignores accents, so `[form="een" %d]` finds the Dutch *een* as well as *één*, and `%cd` ignores both. In a regular expression, put `(?i)` at the start instead: `[form=/(?i)^the/]`.
 
-Besides these dependency relations, a token can also be restricted by its neighbours: `next [ … ]` and `prev [ … ]` are the token directly after and before it (as in a sequence), `after [ … ]` and `before [ … ]` any later or earlier token in the same sentence (they need `<s>` regions). That makes it possible to combine order and dependency in ways a single sequence cannot: `[upos="DET"] [upos="NOUN" & child [upos="ADJ" & prev [upos="ADV"]]]` finds a determiner followed by a noun that has an adjectival dependent which itself follows an adverb, wherever that adjective is. Like the dependency relations, they can be negated (`[upos="ADJ" & not next [upos="NOUN"]]`) and counted (`count(after[upos="PUNCT"]) >= 2`). Only before `[` are these words relations, so an attribute called `next` or `after` can still be queried as `[after="x"]`.
+## Words in quotes
 
-Also for depenencies as token restrictions, we can use negations: `[upos="VERB" & not child [deprel="nsubj"]]` to look for any verbs without a nominal subject (*!>* as an operator leads to semantic problems so is not supported). 
+For the most common query of all, a single word, there is a shortcut: `"book"` on its own means the same as `[form="book"]`, and `/book.*/` as `[form=/book.*/]`.
 
+<span style="color:#d00">★</span> In corpora that split contractions into their parts, like French *aux* (*à* + *les*) or English *can't* (*can* + *n't*), a word in quotes also finds the contraction as a whole: `"can't"` finds *can't*, whether it is stored as one token or as two. The [reference](PANDO-CQL-Reference.md#quoted-words-and-contractions) explains how.
 
+<a id="dependency-relations"></a>
+## Dependency relations <span style="color:#d00">★</span>
+
+Our query `[upos="DET"] [upos="ADJ"]* [lemma="book"]` was really an attempt to find the word *book* with a determiner that belongs to it. A sequence can only approximate that, by spelling out what may come in between. In a corpus annotated with dependency syntax, such as Universal Dependencies, every word is linked to the word it depends on (its *head*), and pando lets you search those links directly.
+
+A dependency relation is written as an arrow between two tokens, pointing from the head to its dependent: `[lemma="book"] > [upos="DET"]` finds *book* with a determiner that depends on it, and `[upos="DET"] < [lemma="book"]` is the same thing written the other way around. This no longer finds *some people book*, because there *some* does not depend on *book*. And it finds the relation wherever the words are: `[lemma="book"] > [upos="ADJ"]` finds *green book*, but also *books that are green and wet*, where *green* is far away from *book*. `>>` and `<<` do the same for any distance in the tree: a word anywhere below or above the other.
+
+Sequence and dependency can be mixed: in `[upos="DET"] [upos="ADJ"] < [lemma="book"]` the determiner comes directly before the adjective, and the adjective depends on *book*. A relation can also be negated: `[upos="DET"] !< [lemma="book"]` finds *book* without a determiner.
+
+The arrows always connect two single tokens, so they cannot be used next to a repeated token like `[upos="ADJ"]*`. For more complex cases there is a second notation, borrowed from PML-TQ: the relation is written *inside* the token, as a restriction. `[upos="NOUN" & child [upos="DET"]]` is a noun with a determiner as its dependent. This notation lets you ask for several dependents at once, and besides `child` you can use `parent`, `ancestor`, `descendant` and `sibling`. Negation works with `not`: `[upos="VERB" & not child [deprel="nsubj"]]` finds verbs without a subject.
+
+You can also count dependents: `[upos="NOUN" & count(child [upos="ADJ"]) >= 2]` finds nouns with at least two adjectives.
+
+Inside a token you can also look at the words around it: `next [...]` and `prev [...]` are the word right after and right before it, `after [...]` and `before [...]` any word later or earlier in the same sentence. That is useful mostly with `not`: `[upos="ADJ" & not next [upos="NOUN"]]` finds adjectives that are not directly followed by a noun, something a sequence cannot express.
+
+A dependency relation says nothing about word order: the adjective in `[upos="ADJ"] < [upos="NOUN"]` can come before or after its noun. With names, you can add the order after `::`, where `<` and `>` compare positions: `a:[upos="ADJ"] < b:[upos="NOUN"] :: a > b` finds adjectives that come *after* the noun they belong to, as in French *un livre vert*. (Inside the token sequence, `<` and `>` are dependency arrows; after `::` they compare.)
+
+Universal Dependencies stores grammatical features (number, case, tense, …) together in one field, `feats`, like `Number=Plur|Case=Nom`. You can search a single feature with a slash: `[upos="NOUN" & feats/Number="Plur"]` finds plural nouns.
 
 ## Regions
 
-Corpora not only have tokens, but also *regions* that group several tokens into a unit like a sentence, a paragraph, a text, an utterance, etc. And like tokens, regions can have attributes, in CWB called *sattributes*. 
+A corpus is more than a long row of words: the words are grouped into sentences, paragraphs, texts, or in spoken corpora into utterances by different speakers. We call such groups *regions*. Regions can have properties of their own: a text has a title, a genre, a language, perhaps a date; an utterance has a speaker. In CWB these are called *structural attributes*.
 
-We can restrict our query by properties of the region it is in. The notation for the attributes of regions is the name of the region, an underscore, and the name of the attribute, so the genre of the text is named `text_genre`, which can have values in the same way positions (token) attributes do. We can use those in a number of different ways:
+The property of a region is written as the name of the region, an underscore, and the name of the property: the genre of a text is `text_genre`, the speaker of an utterance `u_who`. The simplest way to use them is inside a token, like any other restriction: `[lemma="cat" & text_genre="Book"]` finds *cat* in texts of the genre *Book*.
 
-| example | type  | explanation |
-| ----- | -----  | ----- |
-| `[ text_genre="Book" ]` | token-restriction | the token is in a given region+attribute |
-| `<text genre="Book"> []` | region-hook | look only for tokens directly following the start of a region+attribute (attribute is optional) |
-| `a:[] :: a.text_genre = "Book"` | global condition | the named token lies in a text with those attributes |
-| `[] :: text_lang = "Dutch"` | global condition | shorthand for `:: match.text_lang = "Dutch"` (the attribute token must contain `_`, e.g. `text_lang`, `s_tuid`) |
-| `[] within text_genre="Book"` | within restriction | the whole match has to appear inside a region+attribute (attribute is optional) |
+Often we want the whole match to stay inside one region. `[upos="ADJ"] [lemma="book"] within s` does not find an adjective at the end of one sentence followed by *book* at the start of the next; `within text_genre="Book"` keeps the whole match inside a text of genre *Book*. You can also ask for a region that contains something else: `[upos="VERB"] within s having [lemma="cat"]` finds verbs in sentences that also contain the word *cat*. And `not within` does the opposite.
 
-When the corpus is indexed with **`pando-index`**, region-attribute columns can carry optional **reverse index** sidecars (next to the `.val` files). That speeds up equality on global `::` filters and improves query planning for region-attribute token restrictions, without changing which strings match. Older index directories without those files keep the same semantics with slower paths.
+Regions also have a beginning and an end, which you can use in a sequence, as in CWB: `<s>` is the start of a sentence and `</s>` its end, so `<s> [upos="PRON"]` finds pronouns at the start of a sentence, and `[upos="PUNCT"] </s>` punctuation at the end. You can add properties: `<text genre="Book"> []` is the first word of each book. Be careful that `<s> [lemma="cat"] </s>` means a sentence that consists of only the word *cat*; for *cat* anywhere in a sentence, use `within s`.
 
-And of course, those can be combined in queries, so if we want to look for the lemma *cat* with an adjective, where *cat* has to appear in an English text, and the whole things has to be inside a text of genre *Book*, we can express that as `[lemma="cat" & text_lang="Book"] > [upos="ADJ"] within text_genre="Book"`. Since there are no texts within texts, the two restrictions in practice work in exactly the same way.
+<span style="color:#d00">★</span> Pando also allows regions without any words in them. In a spoken corpus, a pause is not a word, but it is very relevant, so it can be stored as an empty region between two words. You use it in the same way: `[form="the"] </pause>` finds *the* followed by a pause, and `<pause> [form="the"]` a pause right before *the*.
 
-Pando explicitly allows for zero-width regions: regions that have no tokens inside. Those are helpful in for instance spoken corpora, where pauses are often very relevant, but are between tokens, not tokens themselves. By treating pauses as zero-width regions, we can use them in corpus queries, so `[form="the"] </pause>` looks for the word *the* followed by a pause, and `<pause> [form="the"]` for a pause right before *the*. A region anchor always attaches to a token: a start anchor to the token after it, an end anchor to the token before it; an anchor with no token to attach to is an error.
+<a id="searching-for-regions"></a>
+## Searching for regions <span style="color:#d00">★</span>
 
-In pando, regions are first-class citizens: we can look for regions directly, without relying on the tokens they contain or border. So we can directly look for regions all texts of the book genre: `t:<text genre="Book">` (a region on its own needs a label), so that we concentrate on the regions themselves, not on their tokens. 
+So far, regions only restricted where we looked for words. But in pando you can also look for the regions themselves. Give the region a name, as with tokens, and leave out the tokens: `t:<text genre="Book">` finds all texts of the genre *Book*, and `s:<s> :: tcnt(s) > 25` finds all sentences of more than 25 words (`tcnt` counts the tokens in a region). If the corpus has error annotation, `e:<err type="agr">` finds all agreement errors as a whole.
 
+A named region can also be combined with tokens: `s:<s> [upos="VERB"]` finds sentences that start with a verb, and gives that sentence the name *s*, so you can count or show its properties afterwards. For now, a query can contain only one region on its own like this; relating several regions to each other directly is being added.
 
-## Within and containing
+<a id="phrases-in-a-dependency-tree"></a>
+## Phrases in a dependency tree <span style="color:#d00">★</span>
 
-Like in Manatee, we can add a (single) token restriction on the the `within` clause - if we want to look for an interjection in a sentence that needs to contain the word *cat* we can do that by saying `[upos="INTJ"] within s having [form="cat"] :: match.text_genre = "Book" & match.text_lang = "English"` (Universal Dependencies tag `INTJ`; in the sample corpus that sentence is in the English book subcorpus).
+Dependency syntax has no regions for phrases: the noun phrase *the old man* is simply *man* with everything that depends on it, its *subtree*. Pando can turn such a subtree into something you can count and show like a region. You first find its head, and then, after `::`, give the subtree a name: `n:[deprel="nsubj"] :: np:dep_subtree(n) & tcnt(np) > 6` finds subjects (the whole phrase, not just its head word) of more than six words.
 
-Inversely, we can also say that a the match need to contain a given region, which we can express with `containing name`, meaning that our result has to contain an entire region named `<name>`. In CWB-CQL, a common example of that is to require something to contain an entire NP, but syntactic elements like NP are not regions, and in dependency parsed corpora, they are implicitly encoded in dependency subtrees. That is why in pando you can say `containing subtree [upos="NOUN"]`, which will require the result to contain all leaves of a dependency subtree heading by an noun, which is the dependency equivalent of a noun phrase. 
+A subtree is not always one continuous stretch of words: in *a man came who smiled*, the subject is *a man ... who smiled*, with *came* in between. `gaps(np)` counts such interruptions, so `n:[deprel="nsubj"] :: np:dep_subtree(n) & gaps(np) > 0` finds subjects that are split up, which in linguistics are called *non-projective*.
 
-Both within and containing can also be negated: `[] not within s`. The Manatee spelling `within <s/>` is accepted as well.
+<a id="attributes-with-several-values-and-regions-inside-regions"></a>
+## Attributes with several values, and regions inside regions <span style="color:#d00">★</span>
 
-A query is always one sequence of tokens: `|` between sequences (`[a] [b] | [c]`) and groups of several tokens (`([a] [b])+`) are not supported yet, and give an error rather than running only the first part. `|` inside one token (`[lemma="a" | lemma="b"]`) works. Note that `<s> [lemma="cat"] </s>` means a sentence consisting of the single token *cat*; for *cat* anywhere in a sentence use `[lemma="cat"] within s`.
+Some properties can have more than one value at the same time: a text can be both a *Poem* and a *Song*. In pando, such a property can be stored with several values, and `[text_genre="Song"]` then means that *Song* is one of them. In the same way, regions of the same kind can sit inside each other, like phrases in a syntax tree, where a noun phrase can be part of a verb phrase. `[node_type="NP"]` then means that the word is inside some noun phrase. You rarely have to think about this when writing a query, but it does change how some things are counted; the [reference](PANDO-CQL-Reference.md#multivalue-attributes-and-overlapping-regions) has the details.
 
-A global constraint on a named token's attribute, as in CQP, is the same as a condition in that token: `a:[upos="VERB"] :: a.lemma = "say"` equals `a:[upos="VERB" & lemma="say"]`. Region attributes always have an underscore (`a.text_lang`), so `a.form` is the token's *form*, also in `count … by a.form`.
+<a id="annotations-with-gaps"></a>
+## Annotations with gaps <span style="color:#d00">★</span>
 
-## Named region bindings
+Not every annotation covers neighbouring words. A phrasal verb can be split, as in *Which boss did he PICK the package UP FOR*, and an error can involve two words far apart. Pando stores such annotations as groups of words. You can search them as a whole, `<err code="SPLIT">` gives each such error with all its parts, or use their properties inside a token like anything else: `[lemma="over" & err_type="SPLIT"]`.
 
-You can **label** a region-start anchor like a token name: **`np:<s>`** binds the label **`np`** to the **sentence region row** that contains the match (structure type **`s`** in this example). Optional attributes on the anchor work as usual: **`<s sent_id="s01">`**.
+Such annotations can also come from someone else than the corpus makers: an *overlay* corpus adds your own annotations on top of an existing corpus, without changing it, and you search them in the same way: `<overlay-mine-mwe type="split-phrasal">` finds the split phrasal verbs annotated in the overlay *mine*.
 
-- **Global filters** can use that label with the usual **`struct_attr`** spelling (underscore between structure and attribute): **`:: np.s_sent_id = "s01"`** resolves the region via **`np`**, not via a token position.
-- **Region-only query** (no token in the query — only the anchor + `::`): **`np:<s> :: np.s_sent_id = "s01"`** enumerates sentence regions and keeps those that pass the filter. When you add tokens (e.g. **`np:<s> []`**) the anchor binds to the first real token as before.
-- **`tabulate`** (and similar commands on the last result) can project **short** region-attribute names on the bound structure: **`tabulate np.id`** or **`tabulate np.sent_id`**. The part after **`np.`** is resolved on that structure first; if missing, the same **super-region fallback** as anchor restrictions applies (e.g. **`tabulate a.text_id`** when **`a`** labels **`<article>`** reads **`text_id`** from the containing **`text`** region). Use the combined `s_sent_id` token form only inside token restrictions, not as the tabulate suffix.
-- **Anchors + named tokens:** Queries like **`<s> sent:[]`** strip the anchor before execution; **named token indices** in the session align with **`Match.positions`** (so **`tabulate sent.form`** resolves **`sent`** correctly).
+## Parallel corpora
 
-**Layer A global `::` geometry:** **`contains(outer, inner)`** — both arguments must be **named region bindings** (e.g. `s:<s> np:<node type="NP">`). True iff the inner region’s inclusive token span lies inside the outer’s (`inner.start ≥ outer.start` and `inner.end ≤ outer.end`). Example: **`:: contains(s, np) = 1`** (or **`> 0`**). Tabulate / aggregate fields support **`tcnt(label)`** for token counts inside a named region (separate from **`contains`**).
+In a parallel corpus, texts are aligned with their translations, for instance sentence by sentence. The simplest search is with `with`: `[form="property"] with [form="bezit"]` finds *property* in English sentences whose Dutch translation contains *bezit*.
 
-**Layer B (nested structural types with a `.par` parent index):** **`rchild(parent, child)`** — both arguments are **named region bindings** for the **same** structural type (e.g. two `node` labels). True iff **`child`’s** stored **`parent_region_id`** equals **`parent`’s** region row index (immediate dominance in the tree). Example: **`vp:<node type="VP"> np:<node type="NP"> [] :: rchild(vp, np) = 1`**. Requires the corpus to declare that type as **`nested`** and to ship **`.par`** (see indexing docs).
+For more control, you can use names across queries. Names in pando do not disappear after a query, so you can first look for English *property*, `eng:[lemma="property"] :: eng.text_lang = "English"`, and then for Dutch nouns in the translations of exactly those sentences: `nld:[upos="NOUN"] :: nld.text_lang = "Dutch" & eng.s_tuid = nld.s_tuid`, where `s_tuid` is the identifier that links a sentence to its translation. See [Aligned corpora and parallel queries](Aligned-Corpora-and-Parallel-Queries.md) for more.
 
-**`rcontains(ancestor, descendant)`** — same **named-region** rules, **`.par`** required. True iff **`ancestor`** is on the **parent chain** from **`descendant`** up to the root (reflexive: a row is its own ancestor). Example: **`:: rcontains(s, np) = 1`** when the sentence region **`s`** tree-dominates **`np`**. Differs from **`contains`** when spans alone are ambiguous: **`rcontains`** uses the tree index only.
+## Counting and comparing
 
-**Peer clauses on region anchors (whitespace-separated, any order):** **`rchild(vp)`** — same test as **`:: rchild(vp, …)`** on this binding (immediate parent row must be **`vp`**’s row; **`.par`** required). Use **`rchild`**, not **`child`**, so **`child`** stays reserved for **dependency** relations in **`[]`**. **`rcontains(vp)`** — this row must **tree-dominate** **`vp`** (same as **`:: rcontains(this, vp)`**). **`contains(vp)`** — this row’s span must geometrically **contain** **`vp`**’s span (Layer A). Example: **`np:<node contains(vp) type="NP" rchild(pp)>`**. Each peer label must be bound by an **earlier** anchor. At least one **non-anchor** token is required so anchors can bind to token positions. Without any token, one labeled region may stand alone (`np:<node cat="NP"> :: tcnt(np) > 5`); a second region without a token is an error for now — relating independent regions (region-to-region joins) is planned.
+Finding examples is often only the first step: we want to know how often something occurs. The simplest case is a frequency list: `[upos="NOUN"]; count by lemma` lists all nouns in the corpus, the most frequent first. The `;` separates the query from what you want to do with its results.
 
-With named regions, there are some functions to compare and count regions. For two named regions *a* and *b*, there are the following functions
+You can also give a whole query a name, and then ask questions about its results: `Books = a:[lemma="book"]; count Books by a.form` finds all forms of *book* and counts how often each of them occurs. If you do not name a query, it is called `Last`, and commands without a name use the last query, so `a:[lemma="book"]; count by a.form` does the same.
 
-| query | interpretation |
-| ------ | ------ | 
-| contains(a,b)  | the region *a* contains the region *b* (token span ⊆ span) |
-| rchild(a,b)  | only for nested regions: *b* is a direct child of *a* on `.par` |
-| rcontains(a,b)  | nested + `.par`: *a* is an ancestor of *b* on the parent chain (reflexive) |
-| tcnt(a)  | renders the amount of tokens inside the region a |
-| forms(a)  | renders the forms of the tokens inside the region a |
-| spellout(a, attr)  | renders the join of attr for the tokens inside the region a |
+You can count by several properties at once: `count Books by a.form, a.text_genre` gives the forms of *book* per genre. <span style="color:#d00">★</span> When one of the properties belongs to a region, like the genre here, pando also gives the *relative* frequency: how frequent each form is compared to the size of that genre in the corpus, so that a large and a small genre can be compared. `freq` gives the same as *instances per million* words. If the texts in your corpus have a date, you can also count over time: `a:[lemma="book"]; count by decade(a.text_date)` (or `year`, `century`).
 
+<span style="color:#d00">★</span> *Collocations* are the words that typically occur together with a word, more often than you would expect by chance. `[lemma="book" & upos="VERB"]; coll by lemma` lists the words most typical around the verb *book*. With dependencies, we can look at the words that are grammatically connected instead of just nearby: `[lemma="book" & upos="NOUN"]; dcoll amod by lemma` gives the adjectives that most typically modify the noun *book*, and `dcoll head by lemma` the words that *book* most typically depends on.
 
-## Named tokens and aligned corpora
+<span style="color:#d00">★</span> *Keyness* shows which words are typical for part of a corpus compared to the rest: `[text_lang="French"]; keyness by lemma` gives the lemmas that are most characteristic of the French texts, and `Fr = [text_lang="French"]; En = [text_lang="English"]; keyness Fr vs En by upos` compares two parts with each other.
 
-You can give a name to the tokens in your query, so that you can then refer back to it: `a:[] b:[] :: a.form = b.form` will find all sequence of two identical words in a row like in *I knew that that book was yours*. When a global condition refers to a named token (`eng.text_lang`, alignment, etc.), that name is required; restrictions that only concern the match as a whole can use `match.` or the `struct_attr = value` shorthand (`text_lang = "Dutch"`).
+## Choosing what you see
 
-In contrast to CWB-CQL, where the life-span of names is restricted to the query, names in pando-CQL are persistent, so that you can refer to them in subsequent grouping queries or other queries.
+By default, the results of a query are shown as a concordance (*keyword in context*): each match with a few words to its left and right. Instead, you can ask for a table with exactly the information you want: `Books = a:[lemma="book"]; tabulate Books a.form, a.upos, a.text_genre` gives the form, part of speech and genre of each match. `sort Books by form` sorts the matches, and `size Books` only tells you how many there are. When a query has thousands of results, `set sample 50` shows 50 random ones instead of the first 50, which gives a fairer picture; `set context 10` shows more words around each match.
 
-The fact that names are persistent allows us to use named tokens to search through aligned corpora, if the alignment is done in the set-up used by TEITOK. That settings models alignment by having a shared attribute, in TEITOK that is *tuid* for *translation unit identifier*, although it can also be used to align version of a text in the same language. How that works is best explained with an example. For **many-to-many** bitext, ids are often **pipe-separated** multivalues; see the wiki guide [Aligned corpora and parallel queries](../wiki/Aligned-Corpora-and-Parallel-Queries.md).
-
-If we have an aligned corpus English-Dutch, with a tuid on sentences, we can look for a word in our English text in the first query, say the word *property*. We do that by a regular token query, that we can then name *eng* for convenience: `eng:[lemma="property"] :: eng.text_lang = "English"`. Then in a subsequent query, we can look for nouns in Dutch, but only in sentences that are translations of the English sentences we found, which we can find by making sure that the tuid attribute of the sentence that the `eng` token is in (`eng.s_tuid`) is the same as the tuid of the sentence we are using for the translation: `nld:[upos="NOUN"] :: match.text_lang = "Dutch" & eng.s_tuid = nld.s_tuid`. This way, we get the nouns in translation of the English sentences containing the word *property*.
-
-Corpora that are aligned with *tuid* there can be alignments on various levels at the same time, so for instance also at a paragraph (*p_tuid*), or a the token-level (*tuid*). So `nld:[] :: match.text_lang = "Dutch" & eng.tuid = nld.tuid` will directly give us the Dutch words that are used as translations of the English word *property*.
-
-For a more efficient but more limited way of searching through sentence-aligned corpora, pando also offers an easier syntax: `[form="property"] with [form="bezit"]` will only find occurrences of *property* that are in a sentence that is aligned with a sentence in which the word *bezit* occurs.
-
-
-
-## Matching strategy flags
-
-It is often desirable to look for words case or diacritics insensitively. In CQL, that is done by putting a flag after the condition: `[ form = "the" %c ]` will match both *the* and *The*, and `[ form = "een" %d ] :: match.text_lang = "Dutch"` will match both *een* and *één* in Dutch texts. 
-
-The case flags only work on literal comparisons, not on regular expressions, to get a case-sensitive regular expression, you have to use regular expression flags like `/(?i)^hello/` to search for *hello* case-insensitively at the beginning of the word.
-
-## Named queries and frequencies
-
-Like in CWB, you can name queries, so that you can later refer back to them in results:  `Matches = a:[lemma="book" & text_genre="Book"]`. In fact, pando always names each query, where if no explicit name is provided, the query will be implicitly called `Last`.
-
-After a query has been executed, frequency results can be obtained from it, in which the name of the query, and the name(s) of the query tokens can be used: `Matches = a:[lemma="book" & text_genre="Book"]; count Matches by a.form;` will look for all occurences of the lemma *book*, store it as *Matches* and then provide the frequency of each form in which it is used in corpus. Counting can be done by more than one attribute: `count Matches by a.form, a.text_century` will give an overview of which form of *book* was used in which frequency in each century - and not only that, but if one of the attributes used in the grouping is not a token attribute but a region attribute, the system will futhermore return the *relative frequency*, that is to say in the example, how frequent each form is in each century, relative to the total number of tokens for that century.
-
-Named queries live on in the session (pando-server: a client session, or the server's shared program session): a later program can refer to `Matches` without repeating it. When a program defines a name again with exactly the same query (`Matches = …` unchanged), the session's set is used instead of running the query again — with the hits it still keeps, else re-derived from the query — and the answer lists those names in `"reused": ["Matches"]`. A changed query, a set that was sorted since, and the last statement of a program (its page is the answer) are run as usual. This is what makes a front end that re-sends its named queries with every command (`A = …; B = …; freq A, B by …`, then `coll`, …) cheap after the first run.
-
-## Corpus position 
-
-It is possible to use comparisons between the corpus positions of tokens to ensure that one is after the other - for sequential searches that is not that relevant, but we can look for all modifying adjectives (in Spanish or French, where both occur) that appear before a noun, by making comparing their positions: `a:[upos="NOUN" & text_lang="French"] > b:[upos="ADJ"] :: a > b` (pre-nominal adjective in the French sentence in the sample).
-
-## Raw queries and contractions
-
-Like in other dialects of CQL, you can use `"the"` as a shorthand to mean `[form="the"]`. But there are two differences with respect to for instance CWB-CQL. Firstly, we can also write `/the.*/` to get a regular-expression variant of a simple queries. And secondly, there is a special handling for contractions.
-
-In TEITOK and UD, a contraction is often described with multiple analysis layers (surface *aux* vs underlying *à* + *les*). **Pando does not duplicate that layered token graph:** the indexer stores normal **tokens** for the parts and, when the CoNLL-U has a multi-word token (MWT) range line, a reserved **`contr`** region over those token positions with a mandatory **`form`** attribute set to the **surface** string (e.g. *can't*, *aux*). No second “virtual” token tier is required for querying—only this **dual representation** (tokens + one region row) is enough.
-
-A **quoted raw word** expands to a **one-or-more repetition** of a disjunction so that a single hit can cover several token positions when matching a contraction:
-
-```text
-"can't"  →  [form="can't" | contr_form="can't"]+
-```
-
-The sample corpus sentence **`sample-en_p6-s1`** (*I can't believe it.*) indexes *can't* as an MWT: lemmas **`can`** + **`not`** on the sub-tokens (surface **`can`** + **`n't`**), with **`contr.form="can't"`** on the spanning region. Searching **`"can't"`** finds all the tokens within that contraction, as well as occurrences of *can't* that are in the corpus as single tokens. There is one side-effect: `"had"` in a sentence like *John had had enough* will find the two sequential occurrences of *had* as a single result, not as two separate ones. A corpus without contractions (no `contr_form`, e.g. most UD treebanks without multi-word tokens) has no such spans: there `"the"` is just the one token `[form="the"]`, as in CWB (*the the* gives two hits), and `/th.*/` is `[form=/th.*/]`; an explicit repetition (`"the"{2}`) stays as written. 
-
-## Multivalue fields and overlapping regions
-
-In pando, it is possible to have fields that can contains more than one value. For instance for texts genres, we might want to classify something as both *Poem* and *Song* if it is a song in poetry form. Likewise, it is possible for a single token to appear in two regions of the same type - in constituency syntax, we can have *node* regions with a *type* that indicates what kind of node it is - but an NP can be nested inside a VP. By default, token attributes are simple values and regions are non-overlapping. But in the registry, this behaviour can be modified for attributes and regions that need it (with a somewhat reduced query speed). 
-
-This does not really affect the query much, mostly how queries get interpreted. So if genre is a multi-value field, then `[genre="Book"]` does not mean the value only has to be *Book*, but rather that *Book* is in the set of genres of the token. Similarly, if *node* is a possibly overlapping region type, then `[node_type="NP"]` means that the token is in any NP region, not that it is uniquely inside an NP. Below is a list search queries that are affected by either multivalue fields or overlapping regions, with the way they are interpreted in pando.
-
-| query | interpretation |
-| ------ | ------ | 
-| genre="Book"  | *Book* is in the set of  genres |
-| genre!="Book"  | *Book* is not in the set of  genres |
-| genre=/B.+k/  | there is at least one item in the set of genres that matches the regex |
-| a.genre = b.genre  | the intersection of the genres of a and b is non-empty |
-| a.genre != b.genre  | the intersection of the genres of a and b is empty |
-| node_type="NP"  | the token is in any node region that has type NP |
-| within node_type="NP"  | the match has to stay within some NP |
-| count by genre | each value in the set of genres is counted separately |
-| tabulate a.genre | values joined by `|` in text output, arrays in JSON |
-
-Since aggregation functions count each item separately, the total counts for token-level attributes can exceed the number of tokens in the corpus, so percentages become more tricky to calculate.
-
-Notice that there is no straightforward way to look for tokens that have value in their genres that is not *Book*, but it can be done by looking for a regular expression that matches anything except Book, such as *genre = /^(?!Book$).+/*.
-
-The **`nvals(attr)`** function counts **non-empty** pipe-separated components of a value (or, for nested/overlapping region attributes, the number of **distinct** components across all covering regions at the token). Use a comparison and a numeric right-hand side: **`nvals(genre) > 2`**, **`nvals(wsd)=2`**. It applies to positional attributes, **`feats/Feature`** (0 or 1), and composite region attributes such as **`text_genre`**. For attributes not declared multivalue and with no `|` in the stored string, the count is 0 (empty or `_`) or 1 otherwise.
-
-
-## Stand-off regions
-
-Apart from overlapping, nesting and zero-width regions there is one more type of region in pando: discontinous regions. These are relevant if we for instance want to model phrasal verbs in preposition stranding cases, like *Which boss did he PICK the package UP FOR*. If we want to mark out only the phrasal verb, we have a gap inside the region. That is what discontinuous regions are for, also called stand-off annotations. 
-
-Stand-off annotations are not treated as full regions, since there are various region-related functions that are ill-defined when used with discontinuous regions. So instead, such regions are treated as grouped token-level attributes, that partially behave like regions. 
-
-Stand-off annotations can also be added as external additions to a corpus. Say we have a large online corpus, to which a user wants to add some custom annotations. In that case, we can have a separate folder with a "dependent" corpus that specifies additional annotations. Such corpora are called *overlay* corpora. When querying a corpus, we can specify one or more overlay corpora, that we can then search as if it was part of the main corpus. If I have an overlay corpus called *mine*, in which I annotate multi-word-expressions (mwe), with an attribute *type*, I can find all split phrasal verbs I annotated by using `<overlay-mine-mwe type="split-phrasal">`. 
-
-
-## Key-Value fields
-
-The pando system was built with support for UD in mind, and in UD, the features are stored as a single, structured field. To provide support for this, pando fields can be kv_pipe fileds, which are exactly of the type of the features in UD. To use those in searches, pando uses the syntax followed by PML-TQ: `[feats/Number="Plur"]` looks for all tokens that have a *Number=Plur* in the feats attribute. And this notation can be used like any other token attribute, so you can also look for the distribution of number over number for adjectives: `[upos="ADJ"]; freq by feats/Number`.
-
-
-## Tokens to Regions
-
-There are two types of result groups in pando: token results and region results, and it depends on what we want to count or see which of the two we should use. We can directly name a region query item, and aggregate over it, so we can count all error annotations by type simply as follows: `n:<err>; count by n.type`. 
-
-But if we want to find regions that contain specific things, a direct syntax becomes very tricky. Instead, to find regions with token-based restrictions, you use two different queries: you first look for the tokens(say all lemmas *over*) in a named query. And then we restrict our region search on regions that contain at least one token from that named query. So we can find all *split* errors that involve the lemma *over* as follows: `Over = [lemma="over"]; <err type="SPLIT"> where Over`. 
-
-Notice that that gives entire regions, not (just) the tokens inside them - which you could of course find more directly using `[ lemma="over" & err_type="SPLIT" ]`.
-
-### Dependency subtrees
-
-Another way to get from tokens to regions is by selecting the entire dependency subtree for a node, so that we can print it, count it, etc. in the same way we can with a discontinuous region. So to get long bare nouns, we can first search for bare nouns (nouns not have a determiner), and then select the subtrees for those, but only if they have more than 2 tokens in it: `barenoun:[upos="NOUN" & not child [upos="DET"] ]; longbarenp:dep_subtree(barenoun) :: tcnt(longbarenp) > 2`.
-
-
-## Collocations
-
-After keywords-in-context, collocations are one of the most popular queries in corpus processors. Pando offers the option to directly calculate collocations in the CQL, similar to the way *count* works - we search for something, and then look for the most characteristic (the most unexpectedly frequent) words in its context. So we can search for the most typical words to appear next to the verb *book* as follows: `[upos="VERB" & lemma="book"]; coll by lemma`. This will list the most prominent words appearing next to the verb *book* as counted by lemma. 
-
-Apart from the left/right context, we can also look in the dependency context to see which words most typically modify a given word. This is done with `dcoll`, which takes a list of dependency relations to traverse. Relations can be specific deprel labels like `amod` or `nsubj` (which select children with that label), or the special keywords `head` (go up to the governor), `children` (all children), or `descendants` (full subtree). If no relation is specified, all children are collected by default.
-
-For example: `[upos="NOUN" & lemma="book"]; dcoll amod by lemma` gives the most typical adjectival modifiers of the noun *book*. To see which words govern *book*: `dcoll head by lemma`. Relations can be combined: `dcoll head, amod by lemma` collects both heads and amod children.
-
-For multi-token queries, use a named token as anchor with dot notation: `a:[upos="DET"] [upos="NOUN" & lemma="book"]; dcoll a.amod by lemma` — this anchors the dependency collocation on the determiner rather than the default first matched token.
-
-The CQL commands only define the search, not the way the results are produced in the output. In pando, the context window, the collocation measures (logdice, mi, mi3, tscore, ll, dice), the minimum frequency, the maximum number of results, etc. are provided on the command line with flags like `--window`, `--measures`, `--min-freq`, and `--max-items`.
-
-## Keyness
-
-Keyness identifies words that are statistically overrepresented in a subcorpus compared to a reference. Since named queries in pando effectively define subcorpora, keyness works much like `count` and `coll` — you run a query that selects the tokens of interest, then ask which words stand out.
-
-For example, to find keywords in the French subcorpus compared to the rest of the corpus: `[text_lang="French"]; keyness by lemma`. Without an explicit reference, the comparison is against the complement — all corpus positions not in the target query.
-
-To compare two specific subcorpora, use the `vs` keyword: `Fr = [text_lang="French"]; En = [text_lang="English"]; keyness Fr vs En by upos`. This would show which parts of speech are statistically more common in French than in English — e.g. French might show overuse of `DET` (more articles) while English might show more `PART` (infinitival *to*). A more typical use would be to look for lemmas that are more frequent in one text genre versus another.
-
-Like collocations, the keyness measure (log-likelihood, log-ratio, chi-squared, etc.) and output settings are controlled via command-line flags.
-
-## Controlling the output
-
-By default, if no futher queries are provided, pando will return results as keywords-in-context (KWIC), that is to say, the matches in the middle, with some words to the left and some words to the right of the result, which can also be explicitly triggered with the command `cat Matches`, where *Matches* is the name of the query.  
-
-To get more control over the output, we can also explicitly choose what should appear in the output: `tabulate Matches a.form, a.lemma, a.upos, a.text_genre, a.text_lang`
-
-will give a table with those columns for query token *a* in a query named *Matches*: the form, lemma, and upos of the token, and the genre and the language of the text it is in.
-
-## Global condition functions
-
-We can add counts as global queries in, adding additional restrictions on tokens. Those include string functions, frequency functions, sequential functions, and tree functions. The use of those is hence always referring to a named token in the query: `a:[upos="NOUN"] :: f(a.lemma) > 100`. Multivalue cardinality also works as a global filter: `a:[] :: nvals(a.wsd) > 1` (same semantics as `[nvals(wsd) > 1]` on a single token, but the attribute is given as `namedtoken.attr`). Date-part helpers can target either `namedtoken.attr` or direct attribute specs such as `text_date`.
-
-| function | syntax | description |
-| ------ | ------ | ------ |
-| distance  | distance(a,b) < 5 | token a is more than 5 tokens before token b |
-| distabs  | distabs(a,b) < 5 | the sequential distance between tokens a and b is less than 5 |
-| strlen  | strlen(a.lemma) = 3 | the length of the lemma of a is 3  |
-| f | f(a.form) >= 100 | a.form occurs at least 100 times in the corpus |
-| year | year(text_date) >= 2000 | parses a 4-digit year prefix from a date-like text value |
-| century | century(a.text_date) = 21 | century computed from the parsed year (1-100 => 1, 2001 => 21) |
-| decade | decade(a.text_date) = 1990 | decade bucket computed from the parsed year (`(year/10)*10`) |
-| month | month(a.text_date) = 5 | month number from `YYYY-MM[-DD]` date values |
-| week | week(a.text_date) = 18 | ISO week number (1-53) from `YYYY-MM-DD` date values |
-| day | day(a.text_date) = 3 | day of month from `YYYY-MM-DD` date values |
-| nchildren | nchildren(a) > 3 | token a has more than 3 dependency children (dependency tree only, not regions) |
-| ndescendants | ndescendants(a) < 3 | node a has less than 3 children |
-| depth | depth(a) < 4 | token a is less than 4 levels below the dependency root (dependency tree only) |
-| nvals | nvals(a.wsd) > 1 | pipe-separated component count of `a`’s attribute (see multivalue `nvals` in token conditions) |
-
-<!--{% comment %}
-There is one additional counting function that is not a global filter but a token filter: `[upos="NOUN" & count(child[upos="ADJ"]) >= 3]` gives only nouns that have at least 3 adjectival children
-{% endcomment %}-->
-
-## Non-query functions overview
-
-Between the frequency and the output functions, the following functions are supported for a query name M :
-
-| function | syntax | description |
-| ------ | ------ | ------ |
-| size  | size [M] | count how many results there are in M |
-| count  | count [M] by att+ | count how many results there are for each token or region attribute |
-| group | group [M] by att+ | synonym for count |
-| sort | sort [M] by att [%c\|%d\|%cd] [on from..to]+ | sort the result on a token or region attribute (see below) |
-| cat | cat [M] | produce a KWIC list of the results of M |
-| freq | freq [M] by att | similar to count but gives instances per million (IPM) |
-| stats | stats avg(expr), median(expr) [by att+] | numeric aggregates per group (or globally without `by`) |
-| raw | raw [M] | one line per match with corpus positions and token forms |
-| tabulate | tabulate [M] att+ | produce a table with the given columns |
-| coll | coll [M] by att | window-based collocations sorted by association measure |
-| dcoll | dcoll [M] [rels] by att[, att2] | dependency-based collocations, optionally filtered by deprel/direction; `att2` (e.g. `deprel`, `upos`) is tallied per collocate |
-| keyness | keyness [M] [vs N] by att | words overrepresented in M vs rest of corpus (or vs named query N), using log-likelihood G² |
-
-`sort M by form` sorts on the attribute at the first token of each hit. As in CQP, `%c` and `%d` after the field sort case- and diacritic-insensitively (`sort M by form %cd`), and `on from..to` sorts on a range of tokens: `on match..matchend` (the whole hit), `on matchend[1]..matchend[5]` (the right context) or `on match[-1]..match[-5]` (the left context, compared from the nearest token outwards); `from` and `to` are `match`, `matchend` or a token label, with an optional offset. Hits with equal keys keep their corpus order. The CWB-style dialect (`--cql cwb`) sorts on the whole hit by default, as CQP does.
-
-Besides attributes, `tabulate` can give a token's corpus position: `cpos` (`tabulate M a.cpos, b.cpos`), the number to compute distances or word order from outside pando (unless the corpus has an attribute called `cpos`). The tabulate command can also take a start and offset in the command: `M = a:[lemma="book"]; tabulate M 0 100 a.lemma, a.form` will tabulate the first 100 occurrences of *book* by lemma and form.
-Date-part functions are also supported in `tabulate` fields, e.g. `tabulate M year(a.text_date), month(a.text_date), week(a.text_date), day(a.text_date)`.
-
-The `stats` command computes numeric aggregates over query hits. In `stats avg(expr), median(expr) by ...`, each metric is computed per `by` bucket; without `by`, all hits are one global bucket. Values that cannot be parsed as numbers are skipped per metric (`n_valid`), while bucket size is tracked separately (`n_total`). Example: `a:[]; stats avg(strlen(a.form)), median(strlen(a.form)) by a.text_id`.
-
-## Interactive settings
-
-In interactive mode, output settings can be changed at any time with `set` and inspected with `show settings`. The setting names are the same as the corresponding command-line flags (without the `--` prefix), so that behaviour is consistent between batch and interactive use. The most important settings are:
-
-| setting | default | description |
-| ------ | ------ | ------ |
-| context | 5 | symmetric KWIC context width in tokens |
-| left | 5 | left context / collocation window |
-| right | 5 | right context / collocation window |
-| window | 5 | set left and right at once |
-| limit | 20 | maximum number of results to display (KWIC hits, collocates, keywords, etc.) |
-| sample | 0 | a random sample of this many hits of each query (0: all hits) |
-| seed | 0 | random seed for `sample` (the same seed gives the same sample; 0: a new one each time) |
-| offset | 0 | skip the first N results |
-| measures | logdice | association measures for coll/dcoll/keyness (comma-separated) |
-| min-freq | 5 | minimum co-occurrence frequency for collocations |
-| attrs | (all) | token attributes to show in output |
-
-For example: `set context 10` widens the KWIC display, `set measures logdice, mi` changes the default collocation measures, and `show settings` prints all current values.
-
-## Corpus management
-
-Apart from corpus query options, pando-CQL also offers some options related to
-corpus management:
-
-| function | description |
-| ------ | ------ |
-| drop M | drop the named query (or drop all) |
-| show named | show all active named queries and token names |
-| show attributes | show all token attributes in the corpus |
-| show regions | show all region structures in the corpus |
-| show regions TYPE | list individual regions of TYPE with their attributes |
-| show values ATTR | list values + counts; pipe-separated segments are split into separate rows (same convention as multivalue `=`) |
-| show info | show corpus overview: name, size, structures, attributes |
-| show settings | show current values of all interactive settings |
-
+How much context you see, how many results, which collocation measures, and so on, are settings rather than part of the query. They, and all other commands and functions, are listed in the [reference](PANDO-CQL-Reference.md).

@@ -239,7 +239,13 @@ std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
 static void emit_hit_json(std::ostringstream& out, const Corpus& corpus, const Match& m,
                           const QueryOptions& opts,
                           const std::function<std::string(size_t)>& group_name,
-                          size_t group_offset = 0, bool region_only = false) {
+                          size_t group_offset = 0, bool region_only = false,
+                          const std::vector<bool>* derived = nullptr) {
+    // a derived binding (`np:dep_subtree(n)`) has a slot in Match.positions (its head) but is
+    // not a query token: it is reported as a region-like group with its own tokens
+    auto is_derived = [&](size_t t) {
+        return derived && t + group_offset < derived->size() && (*derived)[t + group_offset];
+    };
     CorpusPos match_start = m.first_pos();
     CorpusPos match_end   = m.last_pos();
     auto doc_id = lookup_doc_id(corpus, match_start);
@@ -301,12 +307,29 @@ static void emit_hit_json(std::ostringstream& out, const Corpus& corpus, const M
         }
         out << "}";
     }
+    // derived subtree bindings: sorted positions, their contiguous pieces, and the head
+    struct SubtreeGroup { std::string name, head_id; std::vector<CorpusPos> pos; std::vector<std::pair<CorpusPos, CorpusPos>> spans; };
+    std::vector<SubtreeGroup> subtree_groups;
+    for (const auto& [nm, pos] : m.named_dep_subtrees) {
+        if (pos.empty()) continue;
+        SubtreeGroup sg{nm, "", pos, {}};
+        for (CorpusPos p : pos) {
+            if (!sg.spans.empty() && sg.spans.back().second + 1 == p) sg.spans.back().second = p;
+            else sg.spans.emplace_back(p, p);
+        }
+        for (size_t t = 0; t < m.positions.size(); ++t)
+            if (is_derived(t) && group_name(t + group_offset) == nm && m.positions[t] != NO_HEAD)
+                sg.head_id = fragment_tok_id(corpus, m.positions[t]);
+        subtree_groups.push_back(std::move(sg));
+    }
+    std::sort(subtree_groups.begin(), subtree_groups.end(),
+              [](const SubtreeGroup& a, const SubtreeGroup& b) { return a.name < b.name; });
     out << ", \"tokens\": [";
     const auto& attr_names = opts.attrs.empty()
         ? corpus.attr_names() : opts.attrs;
     bool first_tok = true;
     for (size_t t = 0; t < m.positions.size(); ++t) {
-        if (m.positions[t] == NO_HEAD) continue;
+        if (m.positions[t] == NO_HEAD || is_derived(t)) continue;
         CorpusPos span_end = (!m.span_ends.empty()) ? m.span_ends[t] : m.positions[t];
         for (CorpusPos p = m.positions[t]; p <= span_end; ++p) {
             if (!first_tok) out << ", ";
@@ -332,7 +355,7 @@ static void emit_hit_json(std::ostringstream& out, const Corpus& corpus, const M
     {
         bool first_g = true;
         for (size_t t = 0; t < m.positions.size() && !region_only; ++t) {
-            if (m.positions[t] == NO_HEAD) continue;
+            if (m.positions[t] == NO_HEAD || is_derived(t)) continue;
             CorpusPos span_end = (!m.span_ends.empty()) ? m.span_ends[t] : m.positions[t];
             out << (first_g ? "" : ", ") << "{\"index\": " << t
                 << ", \"id\": " << jstr("t" + std::to_string(t + group_offset + 1))
@@ -355,6 +378,18 @@ static void emit_hit_json(std::ostringstream& out, const Corpus& corpus, const M
             out << "]}";
             first_g = false;
         }
+        for (const auto& sg : subtree_groups) {
+            out << (first_g ? "" : ", ") << "{\"id\": " << jstr(sg.name) << ", \"name\": " << jstr(sg.name)
+                << ", \"region\": \"dep_subtree\", \"start\": " << sg.pos.front() << ", \"end\": " << sg.pos.back();
+            if (!sg.head_id.empty()) out << ", \"region_id\": " << jstr(sg.head_id);
+            out << ", \"spans\": [";
+            for (size_t k = 0; k < sg.spans.size(); ++k)
+                out << (k ? ", " : "") << "[" << sg.spans[k].first << ", " << sg.spans[k].second << "]";
+            out << "], \"tok_ids\": [";
+            for (size_t k = 0; k < sg.pos.size(); ++k) out << (k ? ", " : "") << jstr(fragment_tok_id(corpus, sg.pos[k]));
+            out << "]}";
+            first_g = false;
+        }
     }
     out << "]";
     if (opts.fragment) {
@@ -367,9 +402,10 @@ static void emit_hit_json(std::ostringstream& out, const Corpus& corpus, const M
         for (size_t t = 0; t < m.positions.size(); ++t) {
             if (m.positions[t] == NO_HEAD) continue;
             CorpusPos span_end = (!m.span_ends.empty()) ? m.span_ends[t] : m.positions[t];
+            if (is_derived(t)) continue;
             for (CorpusPos p = m.positions[t]; p <= span_end; ++p) {
                 std::string id = fragment_tok_id(corpus, p);
-                if (!region_only) by_group[t + group_offset].push_back(id);
+                if (!region_only && !is_derived(t)) by_group[t + group_offset].push_back(id);
                 all.push_back(std::move(id));
             }
         }
@@ -386,6 +422,11 @@ static void emit_hit_json(std::ostringstream& out, const Corpus& corpus, const M
             std::vector<std::string> ids;
             for (CorpusPos p = ns.start; p <= ns.end; ++p) ids.push_back(fragment_tok_id(corpus, p));
             region_groups.emplace_back(ns.name, std::move(ids));
+        }
+        for (const auto& sg : subtree_groups) {
+            std::vector<std::string> ids;
+            for (CorpusPos p : sg.pos) ids.push_back(fragment_tok_id(corpus, p));
+            region_groups.emplace_back(sg.name, std::move(ids));
         }
         if (by_group.size() + region_groups.size() > 1 || (region_only && !region_groups.empty())) {
             bool fg = true;
@@ -419,6 +460,7 @@ std::string to_query_result_json(const Corpus& corpus,
     // highlight groups are the query's tokens (their labels, else t1, t2, …); an aligned
     // query numbers its target's tokens after the source's
     std::vector<std::string> group_names;
+    std::vector<bool> derived;   // per group_names slot: a derived binding (dep_subtree), not a query token
     std::vector<std::pair<std::string, std::string>> region_names;   // named region anchors: (name, structure)
     size_t source_tokens = 0;
     {
@@ -435,6 +477,8 @@ std::string to_query_result_json(const Corpus& corpus,
                             continue;
                         }
                         group_names.push_back(tok.name.empty() ? "t" + std::to_string(group_names.size() + 1) : tok.name);
+                        derived.push_back(tok.is_dep_subtree);
+                        if (tok.is_dep_subtree && !tok.name.empty()) region_names.emplace_back(tok.name, "dep_subtree");
                     }
                 };
                 add(prog[0].query);
@@ -523,24 +567,29 @@ std::string to_query_result_json(const Corpus& corpus,
         << ", \"total_exact\": " << (ms.total_exact ? "true" : "false") << "},\n";
     out << "    \"hits\": [\n";
 
-
+    size_t real_tokens = 0;
+    for (size_t t = 0; t < group_names.size(); ++t) real_tokens += (t < derived.size() && derived[t]) ? 0 : 1;
     for (size_t i = start; i < end; ++i) {
         if (i > start) out << ",\n";
         emit_hit_json(out, corpus, ms.matches[i - matches_offset], opts, group_name, 0,
-                      group_names.empty() && !region_names.empty());
+                      real_tokens == 0 && !region_names.empty(), &derived);
     }
     out << "\n    ]";
     // the query's tokens (as flexicorp's result `groups`: index, positional id, name)
     out << ",\n    \"groups\": [";
-    for (size_t t = 0; t < group_names.size(); ++t)
-        out << (t ? ", " : "") << "{\"index\": " << t << ", \"id\": " << jstr("t" + std::to_string(t + 1))
+    bool first_rg = true;
+    for (size_t t = 0; t < group_names.size(); ++t) {
+        if (t < derived.size() && derived[t]) continue;
+        out << (first_rg ? "" : ", ") << "{\"index\": " << t << ", \"id\": " << jstr("t" + std::to_string(t + 1))
             << ", \"name\": " << jstr(group_names[t]) << "}";
-    // named region anchors: their hits carry the whole region under this name
+        first_rg = false;
+    }
+    // named region anchors and derived bindings: their hits carry the whole span under this name
     for (size_t k = 0; k < region_names.size(); ++k)
-        out << ((group_names.empty() && k == 0) ? "" : ", ") << "{\"id\": " << jstr(region_names[k].first)
+        out << ((first_rg && k == 0) ? "" : ", ") << "{\"id\": " << jstr(region_names[k].first)
             << ", \"name\": " << jstr(region_names[k].first) << ", \"region\": " << jstr(region_names[k].second) << "}";
     out << "]";
-    if (opts.fragment && group_names.size() + region_names.size() > 1) {
+    if (opts.fragment && real_tokens + region_names.size() > 1) {
         out << ",\n    \"legend\": [";
         bool fl = true;
         for (const auto& [name, st] : region_names) {
@@ -548,6 +597,7 @@ std::string to_query_result_json(const Corpus& corpus,
             fl = false;
         }
         for (size_t t = 0; t < group_names.size(); ++t) {
+            if (t < derived.size() && derived[t]) continue;
             out << (fl ? "" : ", ") << "{\"id\": " << jstr(group_names[t]) << ", \"name\": " << jstr(group_names[t]) << "}";
             fl = false;
         }

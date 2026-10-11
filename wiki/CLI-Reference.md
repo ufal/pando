@@ -43,7 +43,7 @@ Exact options change over time; always run **`pando --help`**, **`pando-index --
 
 | Flag | Role |
 | --- | --- |
-| `--strict-quoted-strings` | In native CQL, only `/pattern/` uses regex; **`"..."` string literals are always literal** (no CWB-style “regex-looking” heuristic inside quotes). See [PANDO-CQL.md](PANDO-CQL.md) and `quoted_string_pattern` in sources. |
+| `--strict-quoted-strings` | In native CQL, only `/pattern/` uses regex; **`"..."` string literals are always literal** (no CWB-style “regex-looking” heuristic inside quotes). See the [CQL reference](PANDO-CQL-Reference.md#values-and-regular-expressions). |
 | `--max-gap N` | Cap for `+` and `*` token repetition (default: large internal cap; see `--help`) |
 
 ### Multivalue and aggregates

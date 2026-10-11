@@ -350,11 +350,28 @@ bool corpus_has_ud_split_feats_column(const Corpus& corpus, const std::string& f
 /// Value for one UD feature from a combined `feats` blob (`Key=Val|…`), or `"_"` if absent.
 std::string feats_extract_value(std::string_view feats_blob, const std::string& feat_name);
 
+/// Breaks in a sorted list of positions: 0 for a contiguous run.
+inline size_t count_position_gaps(const std::vector<CorpusPos>& pos) {
+    size_t g = 0;
+    for (size_t i = 1; i < pos.size(); ++i)
+        if (pos[i] > pos[i - 1] + 1) ++g;
+    return g;
+}
+
 /// If `field` is `tcnt(region_label)`, returns the number of token positions in that named
 /// region anchor, or in a `dep_subtree` binding. Returns `std::nullopt` if `field` is not `tcnt(...)`.
 inline std::optional<std::string> evaluate_tcnt_tabulate_field(
     const Corpus& corpus, const Match& m, const NameIndexMap& name_map,
     const std::string& field) {
+    // gaps(x): breaks in x's tokens (dep_subtree; regions are contiguous, token groups by members)
+    if (field.size() >= 7 && field.compare(0, 5, "gaps(") == 0 && field.back() == ')') {
+        const std::string g = field.substr(5, field.size() - 6);
+        auto gs = m.named_dep_subtrees.find(g);
+        if (gs != m.named_dep_subtrees.end()) return std::to_string(count_position_gaps(gs->second));
+        if (m.named_regions.count(g)) return std::string("0");
+        if (m.token_group_match) return std::to_string(count_position_gaps(m.matched_positions()));
+        throw std::runtime_error("gaps(...) requires a dep_subtree or region binding; got '" + g + "'");
+    }
     if (field.size() < 7 || field.compare(0, 5, "tcnt(") != 0 || field.back() != ')')
         return std::nullopt;
     const std::string inner = field.substr(5, field.size() - 6);

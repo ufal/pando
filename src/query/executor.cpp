@@ -1048,6 +1048,7 @@ static void append_func_call_token_args(const GlobalFuncCall& fc, std::vector<st
         case GlobalFunctionType::RCONTAINS:
             break;
         case GlobalFunctionType::TCNT:
+        case GlobalFunctionType::GAPS:
             if (!fc.args.empty()) out->push_back(fc.args[0]);
             break;
     }
@@ -1097,13 +1098,14 @@ static void validate_global_func_filter_token_labels(const GlobalFunctionFilter&
             }
             return;
         }
-        if (fc.func == GlobalFunctionType::TCNT) {
+        if (fc.func == GlobalFunctionType::TCNT || fc.func == GlobalFunctionType::GAPS) {
+            const char* fn = fc.func == GlobalFunctionType::TCNT ? "tcnt" : "gaps";
             if (fc.args.size() != 1)
-                throw std::runtime_error("tcnt(...) in global filter requires exactly one label");
+                throw std::runtime_error(std::string(fn) + "(...) in global filter requires exactly one label");
             const std::string& n = fc.args[0];
             if (token_labels.count(n) || region_labels.count(n)) return;
             throw std::runtime_error(
-                    "Global filter (:: …): tcnt(...) unknown label '" + n + "'");
+                    "Global filter (:: …): " + std::string(fn) + "(...) unknown label '" + n + "'");
         }
         if (fc.func == GlobalFunctionType::CONTAINS || fc.func == GlobalFunctionType::RCHILD
             || fc.func == GlobalFunctionType::RCONTAINS) {
@@ -7749,7 +7751,11 @@ void merge_aggregate_into(AggregateBucketData& dst, AggregateBucketData& src) {
 static bool simplify_bare_strings(const Corpus& corpus, const TokenQuery& q, TokenQuery& out) {
     bool any = false;
     for (const auto& t : q.tokens) any |= t.bare_string;
-    if (!any || corpus.has_attr("contr_form")) return false;
+    // contractions are a `contr` region with a `form` attribute (CoNLL-U multi-word tokens),
+    // or a positional `contr_form` column in older / hand-made indexes
+    const bool has_contr = corpus.has_attr("contr_form")
+        || (corpus.has_structure("contr") && corpus.structure("contr").has_region_attr("form"));
+    if (!any || has_contr) return false;
     out = q;
     for (auto& t : out.tokens) {
         if (!t.bare_string) continue;
@@ -9318,6 +9324,14 @@ void QueryExecutor::apply_global_filters(const TokenQuery& query, const NameInde
                         if (rg.start > rg.end) return {true, 0};
                         return {true, static_cast<int64_t>(rg.end - rg.start + 1)};
                     }
+                    return {false, 0};
+                }
+                case GlobalFunctionType::GAPS: {
+                    if (fc.args.size() != 1) return {false, 0};
+                    auto ds = m.named_dep_subtrees.find(fc.args[0]);
+                    if (ds != m.named_dep_subtrees.end())
+                        return {true, static_cast<int64_t>(count_position_gaps(ds->second))};
+                    if (m.named_regions.count(fc.args[0])) return {true, 0};   // a region is contiguous
                     return {false, 0};
                 }
                 }

@@ -310,6 +310,11 @@ if(BUILD_TESTING)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/region_p0_test.py
                 --pando-index $<TARGET_FILE:pando-index> --server $<TARGET_FILE:pando-server>
                 --pando $<TARGET_FILE:pando>)
+        # dependency subtrees as bindings (P0b): `:: np:dep_subtree(n)`, subtree in hits, gaps()
+        add_test(NAME subtree
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/subtree_test.py
+                --pando-index $<TARGET_FILE:pando-index> --server $<TARGET_FILE:pando-server>
+                --pando $<TARGET_FILE:pando>)
         # A = q again with the same query reuses the session's set ("reused": [...])
         add_test(NAME named_reuse
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/named_reuse_test.py

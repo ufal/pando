@@ -91,6 +91,7 @@ struct Token {
     TokType     type = TokType::END;
     std::string text;
     size_t      pos = 0;    // character position in input
+    std::string raw;        // STRING: the content with its backslash escapes kept (`"\."` → `\.`)
 };
 
 class Lexer {
@@ -98,6 +99,8 @@ public:
     explicit Lexer(const std::string& input);
 
     Token next();
+    // Whether `<…>` from `from` is a well-formed region anchor body (end = index of `>`).
+    bool scan_region_anchor_body(size_t from, size_t* end) const;
     Token peek();
     void  consume();
     bool  at_end() const;

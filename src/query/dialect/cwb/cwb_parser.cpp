@@ -358,10 +358,23 @@ QueryToken parse_wordform_pattern(TokStream& ts, std::ostringstream* trace) {
         throw std::runtime_error(
             "Unsupported: lookahead constraints [: … :] / [::] (not implemented)");
     if (k == CwbTok::STRING) {
+        // CQP: a bare "pattern" [flags] is [word="pattern" flags] (word is the default attribute)
+        AttrCondition ac;
+        ac.attr = "word";
+        ac.value = ts.peek().text;
         ts.bump();
-        throw std::runtime_error(
-            "Bare string token pattern is CQP ExtConstraint; use an explicit attribute, e.g. "
-            "[lemma=\"…\"] or [word=\"…\"]");
+        std::string flags;
+        while (!ts.eof() && ts.peek().kind == CwbTok::FLAG) {
+            flags += ts.peek().text;
+            ts.bump();
+        }
+        if (flags.find('l') != std::string::npos) ac.op = CompOp::EQ;
+        else set_attr_pattern(ac, ac.value, trace);
+        apply_string_flags(ac, flags);
+        if (trace) *trace << "  bare string → [word=\"" << ac.value << "\"" << (flags.empty() ? "" : " " + flags) << "]\n";
+        QueryToken qt;
+        qt.conditions = ConditionNode::make_leaf(std::move(ac));
+        return qt;
     }
     if (k == CwbTok::VARIABLE) {
         ts.bump();
