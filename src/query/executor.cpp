@@ -28,6 +28,9 @@
 
 namespace pando {
 
+static bool compare_value_maybe_mv(CompOp op, std::string_view stored,
+                                   const std::string& query_value, bool is_multivalue_attr);
+
 namespace {
 
 static bool regex_eval_sv(std::string_view val, const Regex& re, bool full_match) {
@@ -725,6 +728,50 @@ static std::vector<PosInterval> intersect_intervals(const std::vector<PosInterva
     return out;
 }
 
+/// P4.14: is `p` inside one of the sorted, disjoint, inclusive intervals?
+static bool intervals_contain(const std::vector<std::pair<int64_t, int64_t>>& iv, CorpusPos p) {
+    auto it = std::upper_bound(iv.begin(), iv.end(), p,
+                               [](CorpusPos v, const std::pair<int64_t, int64_t>& x) { return v < x.first; });
+    if (it == iv.begin()) return false;
+    --it;
+    return p <= it->second;
+}
+
+/// Region-attribute values beyond which a comparison filter is not turned into a
+/// mask (one lookup per distinct value; e.g. speech ids have millions).
+static constexpr int64_t kMaskMaxCompareValues = 1 << 20;
+
+/// P4.13: regions whose value passes a non-EQ comparison (`!=`, `<`, `>`, `<=`, `>=`),
+/// as the union of the regions of every distinct value that passes — the same
+/// comparison the post-filter applies per match (compare_value_maybe_mv), so the
+/// results are identical. False when it cannot be done exactly: no value reverse
+/// index, too many distinct values, or regions without a value (the post-filter
+/// compares those as ""; they would be missing from the union).
+static bool regions_for_comparison(const Corpus& corpus, const StructuralAttr& sa,
+                                   const std::string& struct_name, const std::string& rkey,
+                                   const GlobalRegionFilter& gf, std::vector<int64_t>& out) {
+    switch (gf.op) {
+        case CompOp::NEQ: case CompOp::LT: case CompOp::GT: case CompOp::LTE: case CompOp::GTE: break;
+        default: return false;
+    }
+    if (!sa.has_region_value_reverse(rkey)) return false;
+    const LexiconId nlex = sa.region_attr_lex_size(rkey);
+    if (nlex <= 0 || nlex > kMaskMaxCompareValues) return false;
+    const bool is_mv = corpus.is_multivalue(struct_name + "_" + rkey);
+    size_t covered = 0;
+    for (LexiconId id = 0; id < nlex; ++id) {
+        const std::string v(sa.region_attr_lex_get(rkey, id));
+        const int64_t* r = nullptr;
+        size_t n = 0;
+        if (!sa.regions_for_value(rkey, v, r, n)) return false;
+        covered += n;
+        if (compare_value_maybe_mv(gf.op, v, gf.value, is_mv)) out.insert(out.end(), r, r + n);
+    }
+    if (covered != sa.region_count()) return false;   // regions without a value
+    std::sort(out.begin(), out.end());
+    return true;
+}
+
 static RegionPosMask build_region_eq_position_mask(
         const Corpus& corpus,
         const std::vector<GlobalRegionFilter>& filters) {
@@ -734,7 +781,21 @@ static RegionPosMask build_region_eq_position_mask(
     CorpusPos ntok = corpus.size();
     bool any = false;
     for (const auto& gf : filters) {
-        if (gf.op != CompOp::EQ || !gf.anchor_name.empty()) {
+        if (gf.positions) {               // P4.14: computed before execution
+            std::vector<PosInterval> pre;
+            pre.reserve(gf.positions->size());
+            for (const auto& [a, b] : *gf.positions)
+                if (a <= b && a < ntok) pre.push_back({std::max<CorpusPos>(a, 0), std::min<CorpusPos>(b, ntok - 1)});
+            out.iv = any ? intersect_intervals(out.iv, pre) : std::move(pre);
+            any = true;
+            if (out.iv.empty()) {
+                out = RegionPosMask{};
+                out.status = RegionMaskStatus::Unsatisfiable;
+                return out;
+            }
+            continue;
+        }
+        if (!gf.anchor_name.empty()) {
             out = RegionPosMask{};
             out.status = RegionMaskStatus::Unsupported;
             return out;
@@ -755,7 +816,17 @@ static RegionPosMask build_region_eq_position_mask(
         }
         const int64_t* regions = nullptr;
         size_t nreg = 0;
-        if (!sa.regions_for_value(*rkey, gf.value, regions, nreg)) {
+        std::vector<int64_t> compared;   // P4.13: non-EQ comparisons
+        if (gf.op == CompOp::EQ) {
+            if (!sa.regions_for_value(*rkey, gf.value, regions, nreg)) {
+                out = RegionPosMask{};
+                out.status = RegionMaskStatus::Unsupported;
+                return out;
+            }
+        } else if (regions_for_comparison(corpus, sa, parts.struct_name, *rkey, gf, compared)) {
+            regions = compared.data();
+            nreg = compared.size();
+        } else {
             out = RegionPosMask{};
             out.status = RegionMaskStatus::Unsupported;
             return out;
@@ -3444,6 +3515,27 @@ static bool region_attr_is_multivalue(const Corpus& corpus,
 
 // ── Pre-resolved region filters ──────────────────────────────────────────
 
+std::shared_ptr<const std::vector<CorpusPos>> QueryExecutor::shared_seed_positions(
+        const ConditionPtr& cond) const {
+    Caches& cc = *caches_;
+    if (!cond || !cc.share_operands) return nullptr;
+    if (estimate_cardinality(cond) > materialize_max()) return nullptr;
+    // own key (node address + 1): the merge-operand entries of the same node hold
+    // another type
+    const void* key = reinterpret_cast<const char*>(cond.get()) + 1;
+    {
+        std::lock_guard<std::mutex> lk(cc.operands_mu);
+        auto it = cc.operands.find(key);
+        if (it != cc.operands.end())
+            return std::static_pointer_cast<const std::vector<CorpusPos>>(it->second.second);
+    }
+    auto v = std::make_shared<std::vector<CorpusPos>>(resolve_conditions(cond));   // sorted, unique
+    std::lock_guard<std::mutex> lk(cc.operands_mu);
+    auto [it, fresh] = cc.operands.emplace(key, std::make_pair(std::shared_ptr<const void>(cond),
+                                                               std::shared_ptr<void>(v)));
+    return std::static_pointer_cast<const std::vector<CorpusPos>>(it->second.second);
+}
+
 std::vector<ResolvedRegionFilter> QueryExecutor::resolve_region_filters(
         const TokenQuery& q) const {
     std::vector<ResolvedRegionFilter> out;
@@ -3453,6 +3545,11 @@ std::vector<ResolvedRegionFilter> QueryExecutor::resolve_region_filters(
         rf.op = gf.op;
         rf.value = gf.value;
         rf.anchor_name = gf.anchor_name;
+        rf.positions = gf.positions;
+        if (rf.positions) {
+            out.push_back(std::move(rf));
+            continue;
+        }
 
         RegionAttrParts parts;
         if (!split_region_attr_name(gf.region_attr, parts)) {
@@ -3619,7 +3716,7 @@ bool QueryExecutor::try_fast_aggregate(
         bool is_positional = true;
         const PositionalAttr* pa = nullptr;
         const StructuralAttr* sa = nullptr;
-        std::vector<LexiconId> region_to_lex;
+        std::shared_ptr<const std::vector<LexiconId>> region_to_lex;   // shared, see region_to_lex_shared
         LexiconId lex_size = 0;
         std::string attr_name;
         // >=0 → RegionFromBinding: row comes from anchor_infos[anchor_idx], not from
@@ -3641,20 +3738,38 @@ bool QueryExecutor::try_fast_aggregate(
             const size_t aidx = binding_to_anchor_idx[col.named_anchor];
             ci.sa = anchor_infos[aidx].sa;
             ci.attr_name = col.region_attr_name;
-            ci.region_to_lex = ci.sa->precompute_region_to_lex(col.region_attr_name);
+            ci.region_to_lex = ci.sa->region_to_lex_shared(col.region_attr_name);
             ci.lex_size = ci.sa->region_attr_lex_size(col.region_attr_name);
             ci.anchor_idx = static_cast<int>(aidx);
             sole_positional_col = false;
-            if (ci.region_to_lex.empty()) return false;  // no reverse index
+            if (ci.region_to_lex->empty()) return false;  // no reverse index
         } else {
             ci.is_positional = false;
             ci.sa = col.sa;
             ci.attr_name = col.region_attr_name;
-            ci.region_to_lex = col.sa->precompute_region_to_lex(col.region_attr_name);
+            ci.region_to_lex = col.sa->region_to_lex_shared(col.region_attr_name);
             ci.lex_size = col.sa->region_attr_lex_size(col.region_attr_name);
             sole_positional_col = false;
-            if (ci.region_to_lex.empty()) return false;  // no reverse index
+            if (ci.region_to_lex->empty()) return false;  // no reverse index
         }
+    }
+
+    // ── P4.15: region filters as a seed mask ─────────────────────────────
+    // When every region filter compiles into an interval mask (EQ, comparisons,
+    // `having`), the seeds are taken from inside the intervals only and no filter
+    // is checked per seed — the restriction acts as a subcorpus, as on the KWIC
+    // paths. PANDO_AGG_MASK=off keeps the per-seed filters (differential tests).
+    static const bool agg_mask_on = [] {
+        const char* v = std::getenv("PANDO_AGG_MASK");
+        return !(v && std::string(v) == "off");
+    }();
+    RegionPosMask seed_mask;
+    bool use_seed_mask = false;
+    if (agg_mask_on && !resolved_filters.empty() && fastpath_mode() == FastPathMode::On) {
+        seed_mask = build_region_eq_position_mask(corpus_, q.global_region_filters);
+        use_seed_mask = seed_mask.status == RegionMaskStatus::Ready
+                        || seed_mask.status == RegionMaskStatus::Unsatisfiable;
+        if (seed_mask.status == RegionMaskStatus::Unsatisfiable) seed_mask.iv.clear();
     }
 
     // ── Precompute filter cursors ────────────────────────────────────────
@@ -3671,6 +3786,7 @@ bool QueryExecutor::try_fast_aggregate(
     filter_cursors.reserve(resolved_filters.size());
     const size_t est_seeds = resolved_filters.empty() ? 0 : estimate_cardinality(q.tokens[0].conditions);
     for (const auto& rf : resolved_filters) {
+        if (use_seed_mask) break;          // P4.15: the mask restricts the seeds instead
         FilterCursor fc;
         fc.rf = &rf;
         if (rf.sa) {
@@ -3705,6 +3821,59 @@ bool QueryExecutor::try_fast_aggregate(
             agg_cursors[i] = RegionCursor(*col_info[i].sa);
     }
 
+    // P4.1 / P4.1b: the seeds of the first token, in this partition's range only
+    // (all of them without a range) — a plain EQ token walks the slice of its
+    // posting list, anything else skips the positions outside. Every branch below
+    // counts through this, so every branch honours the range (range_ok).
+    auto for_each_seed_in_range = [&](auto&& f) {
+        const ConditionPtr& tc = q.tokens[0].conditions;
+        if (!range_ && !use_seed_mask) {
+            for_each_seed_position(tc, f);
+            return;
+        }
+        // the positions to visit: the mask's intervals (P4.15) and/or this range (P4.1)
+        std::vector<PosInterval> iv;
+        if (use_seed_mask) iv = seed_mask.iv;
+        if (range_) {
+            std::vector<PosInterval> r;
+            if (range_->hi > range_->lo) r.push_back({range_->lo, range_->hi - 1});
+            iv = use_seed_mask ? intersect_intervals(iv, r) : std::move(r);
+        }
+        const AttrCondition* eq = (tc && tc->is_leaf && tc->leaf.op == CompOp::EQ
+                                   && !tc->leaf.case_insensitive && !tc->leaf.diacritics_insensitive
+                                   && tc->leaf.resolved_id >= 0) ? &tc->leaf : nullptr;
+        const std::string eq_attr = eq ? normalize_attr(eq->attr) : std::string();
+        if (eq && corpus_.has_attr(eq_attr) && !corpus_.is_multivalue(eq_attr)) {
+            const RevSpan sp = corpus_.attr(eq_attr).rev_span_of_id(static_cast<LexiconId>(eq->resolved_id));
+            size_t a = 0;
+            for (const auto& x : iv) {                   // the slices of the posting list
+                a = gallop_rev(sp, a, x.s);
+                const size_t b = gallop_rev(sp, a, x.e + 1);
+                for (size_t i = a; i < b; ++i)
+                    if (!f(sp.at(i))) { if (range_) result.range_ok = true; return; }
+                a = b;
+            }
+        } else if (auto seeds = shared_seed_positions(tc)) {
+            // anything but a plain EQ: the seeds sorted and materialised once per
+            // query (shared by its ranges), walked per interval
+            auto it = seeds->begin();
+            for (const auto& x : iv) {
+                it = std::lower_bound(it, seeds->end(), x.s);
+                for (; it != seeds->end() && *it <= x.e; ++it)
+                    if (!f(*it)) { if (range_) result.range_ok = true; return; }
+            }
+        } else {
+            // too large to materialise: walk every seed once, keep those in the mask;
+            // not split by range (range_ok stays unset: the probe is the whole answer)
+            for_each_seed_position(tc, [&](CorpusPos pos) -> bool {
+                if (use_seed_mask && !seed_mask.contains(pos)) return true;
+                return f(pos);
+            });
+            return;
+        }
+        if (range_) result.range_ok = true;
+    };
+
     // ── Special case: single positional column → flat array ─────────────
     // Both special cases require zero per-seed filtering work, so they're only
     // valid when there are no filter cursors AND no anchor constraints.
@@ -3721,6 +3890,7 @@ bool QueryExecutor::try_fast_aggregate(
         // each posting list in its range), no hit enumerated
         std::vector<char> ids;
         if (max_total_cap == 0 && q.within.empty() && fastpath_mode() == FastPathMode::On
+            && !use_seed_mask   // P4.15: posting lengths would ignore the mask
             && condition_ids_on_attr(q.tokens[0].conditions, pa, ids)) {
             for (size_t id = 0; id < ids.size(); ++id) {
                 if (!ids[id]) continue;
@@ -3752,30 +3922,7 @@ bool QueryExecutor::try_fast_aggregate(
             return true;
         };
 
-        // P4.1: a partition counts the hits in its range only — a plain EQ token
-        // walks the slice of its posting list, anything else skips the others.
-        const ConditionPtr& tc = q.tokens[0].conditions;
-        const AttrCondition* eq = (tc && tc->is_leaf && tc->leaf.op == CompOp::EQ
-                                   && !tc->leaf.case_insensitive && !tc->leaf.diacritics_insensitive
-                                   && tc->leaf.resolved_id >= 0) ? &tc->leaf : nullptr;
-        const std::string eq_attr = eq ? normalize_attr(eq->attr) : std::string();
-        if (range_ && eq && corpus_.has_attr(eq_attr) && !corpus_.is_multivalue(eq_attr)) {
-            const RevSpan sp = corpus_.attr(eq_attr).rev_span_of_id(static_cast<LexiconId>(eq->resolved_id));
-            const size_t a = gallop_rev(sp, 0, range_->lo);
-            const size_t b = gallop_rev(sp, a, range_->hi);
-            for (size_t i = a; i < b; ++i)
-                if (!count_pos(sp.at(i))) break;
-            result.range_ok = true;
-        } else if (range_) {
-            const CorpusPos rlo = range_->lo, rhi = range_->hi;
-            for_each_seed_position(tc, [&](CorpusPos pos) -> bool {
-                if (pos < rlo || pos >= rhi) return true;
-                return count_pos(pos);
-            });
-            result.range_ok = true;
-        } else {
-            for_each_seed_position(tc, count_pos);
-        }
+        for_each_seed_in_range(count_pos);
 
         agg.total_hits = total;
         // P7.2 buckets: the dense array as is (read through for_each_bucket), no
@@ -3799,11 +3946,11 @@ bool QueryExecutor::try_fast_aggregate(
         size_t total = 0;
         RegionCursor cursor(*ci.sa);
 
-        for_each_seed_position(q.tokens[0].conditions, [&](CorpusPos pos) -> bool {
+        for_each_seed_in_range([&](CorpusPos pos) -> bool {
             if (max_total_cap > 0 && total >= max_total_cap) return false;
             int64_t rgn = cursor.find(pos);
             if (rgn < 0) return true;
-            LexiconId lid = ci.region_to_lex[static_cast<size_t>(rgn)];
+            LexiconId lid = (*ci.region_to_lex)[static_cast<size_t>(rgn)];
             if (lid == UNKNOWN_LEX) return true;
             ++flat[static_cast<size_t>(lid)];
             ++total;
@@ -3894,6 +4041,10 @@ bool QueryExecutor::try_fast_aggregate(
 
     auto pass_filters = [&](CorpusPos pos) -> bool {
         for (auto& fc : filter_cursors) {
+            if (fc.rf && fc.rf->positions) {         // P4.14
+                if (!intervals_contain(*fc.rf->positions, pos)) return false;
+                continue;
+            }
             if (!fc.valid) return false;
             int64_t rgn = fc.cursor.find(pos);
             if (rgn < 0) return false;
@@ -3915,7 +4066,7 @@ bool QueryExecutor::try_fast_aggregate(
         return true;
     };
 
-    for_each_seed_position(q.tokens[0].conditions, [&](CorpusPos pos) -> bool {
+    for_each_seed_in_range([&](CorpusPos pos) -> bool {   // P4.1b: a hit belongs to its seed's range
         if (max_total_cap > 0 && total >= max_total_cap) {
             capped = true;
             return false;
@@ -3938,7 +4089,7 @@ bool QueryExecutor::try_fast_aggregate(
                     rgn = agg_cursors[i].find(pos);
                     if (rgn < 0) return true;
                 }
-                LexiconId lid = ci.region_to_lex[static_cast<size_t>(rgn)];
+                LexiconId lid = (*ci.region_to_lex)[static_cast<size_t>(rgn)];
                 if (lid == UNKNOWN_LEX) return true;
                 // 0-based lex id; remapped to 1-based intern ID below
                 key_buf[i] = static_cast<int64_t>(lid);
@@ -7988,6 +8139,15 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
     if (TokenQuery simple; simplify_bare_strings(corpus_, query, simple))
         return execute(simple, max_matches, count_total, max_total_cap, sample_size, random_seed, num_threads,
                        aggregate_by_fields, skip_name_validation);
+    // P4.14: `within R having COND` → a precomputed restriction (unless PANDO_HAVING_MASK=off)
+    static const bool having_mask = [] {
+        const char* v = std::getenv("PANDO_HAVING_MASK");
+        return !(v && std::string(v) == "off");
+    }();
+    if (having_mask && !range_)
+        if (TokenQuery hq; rewrite_within_having_mask(query, hq))
+            return execute(hq, max_matches, count_total, max_total_cap, sample_size, random_seed, num_threads,
+                           aggregate_by_fields, skip_name_validation);
     if (head_attrs_enabled())
         if (TokenQuery pq; rewrite_parent_query(corpus_, query, pq))
             return execute(pq, max_matches, count_total, max_total_cap, sample_size, random_seed,
@@ -8969,6 +9129,10 @@ void QueryExecutor::apply_region_filters(const TokenQuery& query, const NameInde
         bool pass = true;
 
         for (const auto& gf : query.global_region_filters) {
+            if (gf.positions) {                      // P4.14
+                if (!intervals_contain(*gf.positions, m.first_pos())) { pass = false; break; }
+                continue;
+            }
             std::string struct_name;
             std::string attr_name;
             const StructuralAttr* sa_ptr = nullptr;
@@ -9529,6 +9693,10 @@ TokenQuery QueryExecutor::strip_anchors(const TokenQuery& query,
 bool QueryExecutor::match_passes_inline_region_filters(const Match& m, const TokenQuery& q,
                                                        const NameIndexMap& name_map) const {
     for (const auto& gf : q.global_region_filters) {
+        if (gf.positions) {                          // P4.14
+            if (!intervals_contain(*gf.positions, m.first_pos())) return false;
+            continue;
+        }
         std::string struct_name;
         std::string attr_name;
         const StructuralAttr* sa_ptr = nullptr;
@@ -9977,6 +10145,56 @@ bool QueryExecutor::passes_within_having(const TokenQuery& query, const Match& m
 
 bool QueryExecutor::within_having_active(const TokenQuery& query) const {
     return query.within_having && !query.within.empty() && corpus_.has_structure(query.within);
+}
+
+bool QueryExecutor::rewrite_within_having_mask(const TokenQuery& query, TokenQuery& out) const {
+    if (!within_having_active(query) || query.not_within) return false;
+    if (fastpath_mode() == FastPathMode::Off) return false;
+    if (corpus_.is_nested(query.within) || corpus_.is_overlapping(query.within)) return false;
+    // COND must resolve through postings: attribute leaves (=, !=, regex) under & / |
+    std::function<bool(const ConditionPtr&)> resolvable = [&](const ConditionPtr& c) -> bool {
+        if (!c) return false;
+        if (c->is_structural || c->is_count) return false;
+        if (!c->is_leaf) return resolvable(c->left) && resolvable(c->right);
+        const AttrCondition& ac = c->leaf;
+        if (ac.is_nvals) return false;
+        if (ac.op != CompOp::EQ && ac.op != CompOp::NEQ && ac.op != CompOp::REGEX) return false;
+        const std::string name = normalize_attr(ac.attr);
+        return corpus_.has_attr(name) || (name.rfind("feats", 0) == 0 && corpus_.has_attr("feats"));
+    };
+    if (!resolvable(query.within_having)) return false;
+    compile_conditions(query.within_having);
+
+    const auto& sa = corpus_.structure(query.within);
+    std::vector<int64_t> regions;
+    int64_t hint = -1;
+    for_each_seed_position(query.within_having, [&](CorpusPos p) -> bool {
+        const int64_t r = sa.find_region_from(p, hint);
+        if (r >= 0) {
+            hint = r;
+            if (regions.empty() || regions.back() != r) regions.push_back(r);
+        }
+        return true;
+    });
+    std::sort(regions.begin(), regions.end());            // `|` may not come in order
+    regions.erase(std::unique(regions.begin(), regions.end()), regions.end());
+
+    auto iv = std::make_shared<std::vector<std::pair<int64_t, int64_t>>>();
+    iv->reserve(regions.size());
+    for (int64_t r : regions) {
+        const Region reg = sa.get(static_cast<size_t>(r));
+        if (reg.start > reg.end) continue;
+        if (!iv->empty() && reg.start <= iv->back().second + 1)
+            iv->back().second = std::max<int64_t>(iv->back().second, reg.end);
+        else
+            iv->push_back({reg.start, reg.end});
+    }
+    out = query;
+    out.within_having = nullptr;          // `within R` itself stays: the match must still fit one R
+    GlobalRegionFilter gf;
+    gf.positions = std::move(iv);
+    out.global_region_filters.push_back(std::move(gf));
+    return true;
 }
 
 bool QueryExecutor::not_within_active(const TokenQuery& query) const {

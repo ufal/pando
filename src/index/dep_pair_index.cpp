@@ -1,4 +1,5 @@
 #include "index/dep_pair_index.h"
+#include "index/postings_writer.h"
 #include "corpus/corpus.h"
 #include <cstdio>
 #include <filesystem>
@@ -61,36 +62,18 @@ bool DepPairIndex::build(const Corpus& corpus, const std::string& head_attr,
     for (size_t k = 1; k < idx.size(); ++k) idx[k] += idx[k - 1];
     const int64_t total = idx.back();
 
-    // pass 2: fill .rev through a writable mapping
+    // pass 2 (P4.7c): fill .rev by key ranges, written sequentially
     const std::string rev_tmp = base + ".rev.tmp", idx_tmp = base + ".rev.idx.tmp";
-    const size_t bytes = static_cast<size_t>(total) * static_cast<size_t>(width);
-    int fd = ::open(rev_tmp.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) return fail("cannot create " + rev_tmp);
-    if (bytes > 0) {
-        if (ftruncate(fd, static_cast<off_t>(bytes)) != 0) {
-            ::close(fd);
-            return fail("cannot size " + rev_tmp);
-        }
-        void* raw = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-        if (raw == MAP_FAILED) {
-            ::close(fd);
-            return fail("cannot mmap " + rev_tmp);
-        }
-        std::vector<int64_t> cur(idx.begin(), idx.end() - 1);
-        for (CorpusPos c = 0; c < n; ++c) {
-            const int64_t k = key_of(c);
-            if (k < 0) continue;
-            const int64_t at = cur[static_cast<size_t>(k)]++;
-            switch (width) {
-                case 2: static_cast<int16_t*>(raw)[at] = static_cast<int16_t>(c); break;
-                case 4: static_cast<int32_t*>(raw)[at] = static_cast<int32_t>(c); break;
-                default: static_cast<int64_t*>(raw)[at] = static_cast<int64_t>(c); break;
+    try {
+        postings_writer::write(rev_tmp, idx, width, [&](auto&& emit) {
+            for (CorpusPos c = 0; c < n; ++c) {
+                const int64_t k = key_of(c);
+                if (k >= 0) emit(static_cast<size_t>(k), c);
             }
-        }
-        msync(raw, bytes, MS_SYNC);
-        munmap(raw, bytes);
+        });
+    } catch (const std::exception& e) {
+        return fail(e.what());
     }
-    ::close(fd);
     try {
         write_vec(idx_tmp, idx);
     } catch (const std::exception& e) {

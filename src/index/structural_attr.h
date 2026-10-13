@@ -1,4 +1,6 @@
 #pragma once
+#include <mutex>
+#include <memory>
 
 #include "core/types.h"
 #include "core/mmap_file.h"
@@ -153,6 +155,14 @@ public:
     // Walks the .rev postings once. Regions not covered get UNKNOWN_LEX (-1).
     // O(num_regions) — call once at query plan time.
     std::vector<LexiconId> precompute_region_to_lex(const std::string& attr_name) const;
+    /// P4.1b: the same mapping, built once per attribute and shared (by the ranges of a
+    /// partitioned query and by later queries) — it costs O(regions), e.g. 75M sentences
+    /// = 300 MB, so rebuilding it per range made partitioned `count by` slower. Empty
+    /// vector when there is no reverse index. Kept while the corpus is open.
+    std::shared_ptr<const std::vector<LexiconId>> region_to_lex_shared(const std::string& attr_name) const;
+    /// True when the attribute's reverse index lists exactly one value per region (every
+    /// region has a value): O(1), from the last offset of `.rev.idx`.
+    bool region_attr_covers_all_regions(const std::string& attr_name) const;
 
     // Get raw pointer + count of sorted region indices matching a value.
     // Returns false if no reverse index. The pointer is into mmap'd memory.
@@ -172,6 +182,12 @@ private:
     std::unordered_map<std::string, std::pair<MmapFile, MmapFile>> region_attrs_;
     std::unordered_map<std::string, RegionValueRev> region_value_rev_;
     std::vector<std::string> region_attr_names_;
+    struct RegionLexCache {
+        std::mutex mu;
+        std::unordered_map<std::string, std::shared_ptr<const std::vector<LexiconId>>> maps;
+    };
+    // shared_ptr: StructuralAttr stays movable; copies share the (identical) cache
+    mutable std::shared_ptr<RegionLexCache> region_lex_cache_ = std::make_shared<RegionLexCache>();
 };
 
 /// TEITOK CQP uses composite names like \c s_id (region \c s, attribute \c id). The indexer

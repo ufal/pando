@@ -335,3 +335,17 @@ a:[upos="VERB" & text_langcode!="en"] > b:[upos="NOUN"]; count by a.lemma
 [form="(?i).*kraft"]
 [lemma="(?i)th.*" & upos="NOUN"]
 [form="[A-Z].*"] [upos="NOUN"]
+# P4.13 part A: comparisons on region attributes as interval masks (2026-10-13)
+[upos="NOUN"] :: match.text_lang!="English"
+[upos="DET"] [upos="NOUN"] within text_lang!="Dutch"
+[upos="ADJ"] [upos="NOUN"] :: match.text_lang>="F"
+[upos="NOUN"] within text_lang<"French"
+[upos="NOUN"] :: match.text_lang<="English" & match.text_genre="Book"
+# P4.14: within R having COND as a precomputed restriction (2026-10-13)
+[upos="NOUN"] within s having [lemma="the" | lemma="a"]
+[upos="NOUN"] within s having [lemma=/^b.*/]
+[upos="ADJ"] [upos="NOUN"] within text having [upos="VERB"]
+[upos="NOUN"] within s having [upos="VERB" & lemma="be"]
+[upos="DET"] []{0,2} [upos="NOUN"] within s having [lemma="the"]
+[upos="NOUN"] within s having [lemma="zzzneverthere"]
+[upos="NOUN"] within s having [lemma="the"] :: match.text_lang="English"

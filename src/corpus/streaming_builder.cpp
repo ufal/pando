@@ -1,9 +1,11 @@
 #include "corpus/streaming_builder.h"
 #include "core/build_info.h"
+#include "index/postings_writer.h"
 #include <future>
 #include <thread>
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -1211,6 +1213,31 @@ void StreamingBuilder::remap_dat(const std::string& dat_path,
     fs::rename(tmp_path, dat_path);
 }
 
+namespace {
+
+/// Calls fn(id, pos) for every token of .dat, in position order.
+template <typename Fn>
+void scan_dat(FILE* dat, int dat_width, Fn&& fn) {
+    rewind(dat);
+    CorpusPos pos = 0;
+    size_t nread;
+    if (dat_width == 1) {
+        std::vector<uint8_t> buf(IO_CHUNK);
+        while ((nread = fread(buf.data(), 1, IO_CHUNK, dat)) > 0)
+            for (size_t i = 0; i < nread; ++i) fn(static_cast<size_t>(buf[i]), pos++);
+    } else if (dat_width == 2) {
+        std::vector<uint16_t> buf(IO_CHUNK);
+        while ((nread = fread(buf.data(), 2, IO_CHUNK, dat)) > 0)
+            for (size_t i = 0; i < nread; ++i) fn(static_cast<size_t>(buf[i]), pos++);
+    } else {
+        std::vector<int32_t> buf(IO_CHUNK);
+        while ((nread = fread(buf.data(), sizeof(int32_t), IO_CHUNK, dat)) > 0)
+            for (size_t i = 0; i < nread; ++i) fn(static_cast<size_t>(buf[i]), pos++);
+    }
+}
+
+}  // namespace
+
 // ── build_reverse_index: two-pass (count + fill via mmap) ──────────────
 
 void StreamingBuilder::build_reverse_index(const std::string& base,
@@ -1272,63 +1299,9 @@ void StreamingBuilder::build_reverse_index(const std::string& base,
         return;
     }
 
-    // Pass 2: fill .rev via writable mmap (at chosen rev_width)
-    size_t rev_bytes = static_cast<size_t>(total_pos) * static_cast<size_t>(rev_width);
-    int fd = ::open(rev_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) throw std::runtime_error("Cannot create " + rev_path);
-    if (ftruncate(fd, static_cast<off_t>(rev_bytes)) != 0) {
-        ::close(fd);
-        throw std::runtime_error("Cannot set size of " + rev_path);
-    }
-
-    void* rev_raw = mmap(nullptr, rev_bytes, PROT_READ | PROT_WRITE,
-                         MAP_SHARED, fd, 0);
-    if (rev_raw == MAP_FAILED) {
-        ::close(fd);
-        throw std::runtime_error("Cannot mmap " + rev_path + " for writing");
-    }
-
-    // Cursors: where to write the next position for each lex ID
-    std::vector<int64_t> cursor(rev_idx.begin(),
-                                rev_idx.begin() + lex_size);
-
-    // Helper to write a position at cursor[id] with the right width
-    auto write_pos = [&](size_t id, CorpusPos pos) {
-        int64_t idx = cursor[id]++;
-        switch (rev_width) {
-            case 2:
-                static_cast<int16_t*>(rev_raw)[idx] = static_cast<int16_t>(pos);
-                break;
-            case 4:
-                static_cast<int32_t*>(rev_raw)[idx] = static_cast<int32_t>(pos);
-                break;
-            default:
-                static_cast<int64_t*>(rev_raw)[idx] = static_cast<int64_t>(pos);
-                break;
-        }
-    };
-
-    rewind(dat);
-    CorpusPos pos = 0;
-
-    if (dat_width == 1) {
-        std::vector<uint8_t> buf(IO_CHUNK);
-        while ((nread = fread(buf.data(), 1, IO_CHUNK, dat)) > 0)
-            for (size_t i = 0; i < nread; ++i) write_pos(buf[i], pos++);
-    } else if (dat_width == 2) {
-        std::vector<uint16_t> buf(IO_CHUNK);
-        while ((nread = fread(buf.data(), 2, IO_CHUNK, dat)) > 0)
-            for (size_t i = 0; i < nread; ++i) write_pos(buf[i], pos++);
-    } else {
-        std::vector<int32_t> buf(IO_CHUNK);
-        while ((nread = fread(buf.data(), sizeof(int32_t), IO_CHUNK, dat)) > 0)
-            for (size_t i = 0; i < nread; ++i)
-                write_pos(static_cast<size_t>(buf[i]), pos++);
-    }
-
-    msync(rev_raw, rev_bytes, MS_SYNC);
-    munmap(rev_raw, rev_bytes);
-    ::close(fd);
+    // Pass 2 (P4.7c): fill .rev by key ranges, written sequentially (postings_writer.h).
+    postings_writer::write(rev_path, rev_idx, rev_width,
+                           [&](auto&& emit) { scan_dat(dat, dat_width, emit); });
     fclose(dat);
 }
 
@@ -1514,67 +1487,12 @@ void StreamingBuilder::build_mv_reverse_index(const std::string& base,
         return;
     }
 
-    // Pass 2: fill .mv.rev via writable mmap
-    size_t rev_bytes = static_cast<size_t>(total_pos) * static_cast<size_t>(rev_width);
-    int fd = ::open(rev_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) throw std::runtime_error("Cannot create " + rev_path);
-    if (ftruncate(fd, static_cast<off_t>(rev_bytes)) != 0) {
-        ::close(fd);
-        throw std::runtime_error("Cannot set size of " + rev_path);
-    }
-
-    void* rev_raw = mmap(nullptr, rev_bytes, PROT_READ | PROT_WRITE,
-                         MAP_SHARED, fd, 0);
-    if (rev_raw == MAP_FAILED) {
-        ::close(fd);
-        throw std::runtime_error("Cannot mmap " + rev_path + " for writing");
-    }
-
-    // Cursors: where to write the next position for each MV lex ID
-    std::vector<int64_t> cursor(mv_rev_idx.begin(),
-                                mv_rev_idx.begin() + mv_lex_size);
-
-    auto write_pos = [&](int32_t mvid, CorpusPos pos) {
-        int64_t idx = cursor[static_cast<size_t>(mvid)]++;
-        switch (rev_width) {
-            case 2:
-                static_cast<int16_t*>(rev_raw)[idx] = static_cast<int16_t>(pos);
-                break;
-            case 4:
-                static_cast<int32_t*>(rev_raw)[idx] = static_cast<int32_t>(pos);
-                break;
-            default:
-                static_cast<int64_t*>(rev_raw)[idx] = static_cast<int64_t>(pos);
-                break;
-        }
-    };
-
-    rewind(dat);
-    CorpusPos pos = 0;
-
-    auto fill_id = [&](size_t orig_id) {
-        for (int32_t mvid : orig_to_mvids[orig_id])
-            write_pos(mvid, pos);
-        ++pos;
-    };
-
-    if (dat_width == 1) {
-        std::vector<uint8_t> buf(IO_CHUNK);
-        while ((nread = fread(buf.data(), 1, IO_CHUNK, dat)) > 0)
-            for (size_t i = 0; i < nread; ++i) fill_id(buf[i]);
-    } else if (dat_width == 2) {
-        std::vector<uint16_t> buf(IO_CHUNK);
-        while ((nread = fread(buf.data(), 2, IO_CHUNK, dat)) > 0)
-            for (size_t i = 0; i < nread; ++i) fill_id(buf[i]);
-    } else {
-        std::vector<int32_t> buf(IO_CHUNK);
-        while ((nread = fread(buf.data(), sizeof(int32_t), IO_CHUNK, dat)) > 0)
-            for (size_t i = 0; i < nread; ++i) fill_id(static_cast<size_t>(buf[i]));
-    }
-
-    msync(rev_raw, rev_bytes, MS_SYNC);
-    munmap(rev_raw, rev_bytes);
-    ::close(fd);
+    // Pass 2 (P4.7c): fill .mv.rev by key ranges, written sequentially.
+    postings_writer::write(rev_path, mv_rev_idx, rev_width, [&](auto&& emit) {
+        scan_dat(dat, dat_width, [&](size_t orig_id, CorpusPos pos) {
+            for (int32_t mvid : orig_to_mvids[orig_id]) emit(static_cast<size_t>(mvid), pos);
+        });
+    });
     fclose(dat);
 
     std::cerr << "    mv_reverse: " << mv_lex_size << " components, "

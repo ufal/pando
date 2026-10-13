@@ -309,6 +309,24 @@ std::vector<LexiconId> StructuralAttr::precompute_region_to_lex(
     return mapping;
 }
 
+bool StructuralAttr::region_attr_covers_all_regions(const std::string& attr_name) const {
+    auto it = region_value_rev_.find(attr_name);
+    if (it == region_value_rev_.end()) return false;
+    const RegionValueRev& rv = it->second;
+    const size_t k = rv.rev_idx.count<int64_t>();
+    if (k == 0) return false;
+    return static_cast<size_t>(rv.rev_idx.as<int64_t>()[k - 1]) == region_count();
+}
+
+std::shared_ptr<const std::vector<LexiconId>> StructuralAttr::region_to_lex_shared(
+        const std::string& attr_name) const {
+    std::lock_guard<std::mutex> lk(region_lex_cache_->mu);
+    auto& slot = region_lex_cache_->maps[attr_name];
+    if (!slot)
+        slot = std::make_shared<const std::vector<LexiconId>>(precompute_region_to_lex(attr_name));
+    return slot;
+}
+
 bool StructuralAttr::regions_for_value(const std::string& attr_name,
                                         const std::string& value,
                                         const int64_t*& out_regions,

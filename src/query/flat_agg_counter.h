@@ -24,18 +24,34 @@ struct FlatRegionCol {
     size_t n = 0, cur = 0;
     std::vector<uint32_t> rid;
     std::vector<std::string> values;   // value id - 1 → value
+    // P4.1b: when every region has a value in the reverse index, the shared
+    // region → lexicon-id table is read directly (id + 1) instead of copying it
+    // into `rid`: building `rid` per partition was O(regions) each time (75M
+    // sentences), which made partitioned `count by` slower than one thread.
+    std::shared_ptr<const std::vector<LexiconId>> r2l_shared;
+    const LexiconId* r2l = nullptr;
+    uint32_t id_at(size_t r) const {
+        if (r2l) return r2l[r] == UNKNOWN_LEX ? 0u : static_cast<uint32_t>(r2l[r]) + 1;
+        return rid[r];
+    }
 
     /// The region values as fill_aggregate_key reads them (region_value); false when
     /// the attribute has no reverse index or too many values.
     bool build(const StructuralAttr& sa, const std::string& attr) {
         const LexiconId L = sa.region_attr_lex_size(attr);
         if (L <= 0 || static_cast<size_t>(L) > kMaxValues) return false;
-        const std::vector<LexiconId> r2l = sa.precompute_region_to_lex(attr);
-        if (r2l.empty()) return false;
         regions = sa.region_data();
         n = sa.region_count();
         values.reserve(static_cast<size_t>(L));
         for (LexiconId i = 0; i < L; ++i) values.emplace_back(sa.region_attr_lex_get(attr, i));
+        if (sa.region_attr_covers_all_regions(attr)) {      // the usual case: share, no copy
+            r2l_shared = sa.region_to_lex_shared(attr);
+            if (r2l_shared->size() < n) return false;
+            r2l = r2l_shared->data();
+            return true;
+        }
+        const std::vector<LexiconId> r2l = sa.precompute_region_to_lex(attr);
+        if (r2l.empty()) return false;
         rid.assign(n, 0);
         std::unordered_map<std::string, uint32_t> extra;
         for (size_t r = 0; r < n && r < r2l.size(); ++r) {
@@ -56,7 +72,7 @@ struct FlatRegionCol {
     uint32_t at(CorpusPos pos) {
         if (cur < n && regions[cur].start <= pos) {
             for (int k = 0; k < 4; ++k) {
-                if (pos <= regions[cur].end) return rid[cur];
+                if (pos <= regions[cur].end) return id_at(cur);
                 if (cur + 1 >= n || regions[cur + 1].start > pos) return 0;   // a gap
                 ++cur;
             }
@@ -65,7 +81,7 @@ struct FlatRegionCol {
                                             [](CorpusPos p, const Region& r) { return p < r.start; });
         if (it == regions) return 0;
         cur = static_cast<size_t>(it - regions) - 1;
-        return pos <= regions[cur].end ? rid[cur] : 0;
+        return pos <= regions[cur].end ? id_at(cur) : 0;
     }
     uint64_t card() const { return values.size() + 1; }
 };

@@ -257,6 +257,11 @@ struct GlobalRegionFilter {
     std::string region_attr;   // e.g. "text_year" (region type + attr)
     CompOp      op = CompOp::EQ;
     std::string value;
+    /// P4.14: a restriction computed before execution (`within s having COND` → the
+    /// sentences containing COND): sorted, disjoint, inclusive position intervals.
+    /// When set, region_attr / op / value are unused: a match passes when its first
+    /// position lies in one of the intervals.
+    std::shared_ptr<const std::vector<std::pair<int64_t, int64_t>>> positions;
 };
 
 struct GlobalAlignmentFilter {

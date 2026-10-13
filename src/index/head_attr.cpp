@@ -1,4 +1,5 @@
 #include "index/head_attr.h"
+#include "index/postings_writer.h"
 #include "corpus/corpus.h"
 
 #include <cstdio>
@@ -189,34 +190,15 @@ bool HeadAttr::build(const Corpus& corpus, const std::string& attr, std::string*
     for (size_t i = 1; i < idx.size(); ++i) idx[i] += idx[i - 1];
     if (!write_vec_ok(base + ".rev.idx.tmp", idx)) return fail("cannot write " + base + ".rev.idx.tmp");
 
-    // .rev: positions per value (same width as the source attribute's postings)
+    // .rev: positions per value (same width as the source attribute's postings),
+    // by key ranges, written sequentially (P4.7c)
     const int rw = A.rev_width();
-    const size_t bytes = static_cast<size_t>(n) * static_cast<size_t>(rw);
-    {
-        const std::string rp = base + ".rev.tmp";
-        const int fd = ::open(rp.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
-        if (fd < 0) return fail("cannot write " + rp);
-        if (bytes && ::ftruncate(fd, static_cast<off_t>(bytes)) != 0) {
-            ::close(fd);
-            return fail("cannot size " + rp);
-        }
-        void* m = bytes ? ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : nullptr;
-        if (bytes && m == MAP_FAILED) {
-            ::close(fd);
-            return fail("cannot mmap " + rp);
-        }
-        std::vector<int64_t> cur(idx.begin(), idx.end() - 1);
-        for (CorpusPos c = 0; c < n; ++c) {
-            const int64_t at = cur[static_cast<size_t>(head_value(c))]++;
-            if (rw == 2) static_cast<int16_t*>(m)[at] = static_cast<int16_t>(c);
-            else if (rw == 4) static_cast<int32_t*>(m)[at] = static_cast<int32_t>(c);
-            else static_cast<int64_t*>(m)[at] = c;
-        }
-        if (bytes) {
-            ::msync(m, bytes, MS_SYNC);
-            ::munmap(m, bytes);
-        }
-        ::close(fd);
+    try {
+        postings_writer::write(base + ".rev.tmp", idx, rw, [&](auto&& emit) {
+            for (CorpusPos c = 0; c < n; ++c) emit(static_cast<size_t>(head_value(c)), c);
+        });
+    } catch (const std::exception& e) {
+        return fail(e.what());
     }
     // .rev.idx last: it dates the attribute (packed postings / up_to_date compare to it)
     for (const char* ext : {".lex", ".lex.idx", ".rev", ".rev.idx"}) {
