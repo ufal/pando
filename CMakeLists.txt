@@ -310,6 +310,11 @@ if(BUILD_TESTING)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/region_p0_test.py
                 --pando-index $<TARGET_FILE:pando-index> --server $<TARGET_FILE:pando-server>
                 --pando $<TARGET_FILE:pando>)
+        # restricted `count by` (P4.1b / P4.13 / P4.14 / P4.15): ground truth from a generated corpus,
+        # per-hit routes, fast paths off and forced partitions must all agree
+        add_test(NAME restricted_count
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/restricted_count_test.py
+                --pando-index $<TARGET_FILE:pando-index> --pando $<TARGET_FILE:pando>)
         # dependency subtrees as bindings (P0b): `:: np:dep_subtree(n)`, subtree in hits, gaps()
         add_test(NAME subtree
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/subtree_test.py
