@@ -204,7 +204,9 @@ TEITOK-style alignment uses a shared attribute (`tuid`, on sentences `s_tuid`, o
 `p_tuid`); for many-to-many alignment the ids are `|`-separated multivalues. A later query can refer to
 a named token of an earlier one: `eng:[lemma="property"] :: eng.text_lang="English"` then
 `nld:[upos="NOUN"] :: match.text_lang="Dutch" & eng.s_tuid = nld.s_tuid`. `[form="property"] with
-[form="bezit"]` is the faster built-in form for sentence-aligned corpora. See
+[form="bezit"]` is the faster built-in form for sentence-aligned corpora. `count` and `freq` count the
+aligned pairs, with fields from either side: `a:[form="said"] with b:[text_lang="Czech"] :: a.tuid =
+b.tuid; count by a.form, b.lemma` gives how often each English form went with each Czech lemma. See
 [Aligned-Corpora-and-Parallel-Queries.md](Aligned-Corpora-and-Parallel-Queries.md).
 
 ## Named queries and sessions

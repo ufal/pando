@@ -1039,6 +1039,34 @@ static double compute_measure(const std::string& name, const CollEntry& e) {
 
 // ── JSON emitters (write to ostream, always JSON) ───────────────────────
 
+// Aligned pairs (`a:[…] with b:[…] :: a.tuid = b.tuid`): one hit per pair, the target's
+// positions after the source's and its names shifted to match, so that `count / freq … by
+// a.form, b.lemma` counts the pairs (a name in both queries keeps the source's position).
+static MatchSet merge_parallel_pairs(const MatchSet& ms, const NameIndexMap& source_names,
+                                     const NameIndexMap& target_names, NameIndexMap& merged_names) {
+    MatchSet out;
+    const auto& pairs = ms.parallel_matches;
+    // every pair comes from the same two queries: the same number of positions on each side
+    const size_t offset = pairs.empty() ? 0 : pairs.front().first.positions.size();
+    merged_names = source_names;
+    for (const auto& [name, idx] : target_names) merged_names.emplace(name, offset + idx);
+    out.matches.reserve(pairs.size());
+    for (const auto& [s, t] : pairs) {
+        Match m = s;
+        const bool ends = !s.span_ends.empty() || !t.span_ends.empty();
+        if (ends && m.span_ends.empty())
+            for (size_t i = 0; i < s.positions.size(); ++i) m.span_ends.push_back(s.positions[i]);
+        for (size_t i = 0; i < t.positions.size(); ++i) {
+            m.positions.push_back(t.positions[i]);
+            if (ends) m.span_ends.push_back(t.span_ends.empty() ? t.positions[i] : t.span_ends[i]);
+        }
+        out.matches.push_back(std::move(m));
+    }
+    out.num_tokens = offset + (pairs.empty() ? 0 : pairs.front().second.positions.size());
+    out.total_count = out.matches.size();
+    return out;
+}
+
 static void emit_count_json(std::ostream& out, const Corpus& corpus, const MatchSet& ms,
                             const GroupCommand& cmd, const NameIndexMap& name_map, size_t group_limit,
                             size_t child_limit) {
@@ -2364,6 +2392,16 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
             };
             const NameIndexMap& nm_to_use = hs->nm;
             const NameIndexMap* nm_tgt_parallel = hs->parallel() ? &hs->tnm : nullptr;
+            // `count / freq … by` on aligned pairs: the pairs as single hits (merge_parallel_pairs)
+            std::optional<MatchSet> pairs;
+            NameIndexMap pairs_nm;
+            auto counted = [&]() -> const MatchSet& {
+                const MatchSet& m = counting();
+                if (!nm_tgt_parallel || m.parallel_matches.empty()) return m;
+                pairs = merge_parallel_pairs(m, nm_to_use, *nm_tgt_parallel, pairs_nm);
+                return *pairs;
+            };
+            auto counted_nm = [&]() -> const NameIndexMap& { return pairs ? pairs_nm : nm_to_use; };
             if (opts.max_count_hits && !use_immediate && stmt.command.type != CommandType::SIZE) {
                 check_count_limit(corpus, *hs, set_name, opts.max_count_hits, threads, opts.progress);
                 for (const std::string& fqn : stmt.command.freq_query_names)
@@ -2379,7 +2417,10 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
             switch (stmt.command.type) {
                 case CommandType::COUNT:
                 case CommandType::GROUP:
-                    emit_count_json(out, corpus, counting(), stmt.command, nm_to_use, opts.group_limit, opts.child_limit);
+                {
+                    const MatchSet& cm = counted();
+                    emit_count_json(out, corpus, cm, stmt.command, counted_nm(), opts.group_limit, opts.child_limit);
+                }
                     break;
                 case CommandType::STATS:
                     emit_stats_json(out, corpus, full(), stmt.command, nm_to_use);
@@ -2404,7 +2445,8 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                             emit_freq_compare_json(out, corpus, srcs, stmt.command, opts);
                     } else {
                         const std::string source_query_name = !qn.empty() ? qn : "Last";
-                        emit_freq_json(out, corpus, counting(), stmt.command, opts, nm_to_use, source_query_name);
+                        const MatchSet& cm = counted();
+                        emit_freq_json(out, corpus, cm, stmt.command, opts, counted_nm(), source_query_name);
                     }
                     break;
                 case CommandType::SIZE: {

@@ -174,6 +174,26 @@ def main():
             check(total == len(want), f"/query page.total == pairs ({total} vs {len(want)}): {q}")
             check(pages == got, f"/query pages == CLI pairs, in order: {q}")
             check(not r.get("hits"), f"/query parallel: hits stay empty: {q}")
+        # `count / freq … by` on the pairs: fields of both sides (a.…, b.…), counted per pair
+        for (q, want), fields in zip(cases[:3], (["a.lemma", "b.upos"], ["b.upos"], ["a.upos", "b.lemma"])):
+            ref = {}
+            for i, j in want:
+                key = "\t".join(toks[i if f.startswith("a.") else j][f.split(".", 1)[1]] for f in fields)
+                ref[key] = ref.get(key, 0) + 1
+            for cmd in ("count", "freq"):
+                prog = f"{q}; {cmd} by {', '.join(fields)}"
+                r = post(base, "/run", {"cql": prog, "group_limit": 100000, "child_limit": 100000})
+                res = r.get("result") or {}
+                rows = res.get("rows") or res.get("items") or []
+                got = {(x.get("key") if x.get("key") is not None else x.get("value")): x["count"] for x in rows}
+                if len(fields) >= 2 and cmd == "count":   # count by 2+ fields: the group tree
+                    got = {}
+                    for g in res.get("hierarchy", []):
+                        for ch in g.get("children", []):
+                            got[g["value"] + "\t" + ch["value"]] = ch["count"]
+                check(r.get("ok") and got == ref,
+                      f"{cmd} over aligned pairs == reference ({len(got)} vs {len(ref)} groups): {prog} "
+                      f"{str(r)[:200] if not r.get('ok') else ''}")
         # the second page of a parallel query comes from the cached pair set
         q = cases[0][0]
         st0 = json.loads(urllib.request.urlopen(base + "/health", timeout=5).read())
