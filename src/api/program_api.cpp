@@ -3,6 +3,7 @@
 // Lives in the pando_api library so both pando CLI and pando-server can use it.
 
 #include "api/query_json.h"
+#include "query/keyness_select.h"
 #include "api/coll_counts.h"
 #include "api/group_counts.h"
 #include "api/result_cache.h"
@@ -1955,7 +1956,16 @@ static void emit_keyness_json(std::ostream& out, const Corpus& corpus, const Mat
         return a.form < b.form;
     });
 
-    size_t show = std::min(entries.size(), opts.coll_max_items);
+    // both sides: the focus's keywords and the reference's (keyness_select.h)
+    {
+        const auto keep = keyness_rows_to_show(entries, opts.coll_max_items,
+                                               [](const KE& e) { return e.g2; });
+        std::vector<KE> shown;
+        shown.reserve(keep.size());
+        for (size_t i : keep) shown.push_back(std::move(entries[i]));
+        entries = std::move(shown);
+    }
+    size_t show = entries.size();
 
     out << "{\"ok\": true, \"operation\": \"keyness\", \"last_command\": \"keyness\", \"result\": {\n";
     out << "  \"attribute\": " << jstr(attr) << ",\n";

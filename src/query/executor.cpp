@@ -30,6 +30,10 @@ namespace pando {
 
 static bool compare_value_maybe_mv(CompOp op, std::string_view stored,
                                    const std::string& query_value, bool is_multivalue_attr);
+/// CQL-REGION-PATTERN: does a stored region value satisfy a region filter? Patterns
+/// (regex = true) as on token attributes; otherwise compare_value_maybe_mv.
+static bool region_filter_value_ok(CompOp op, const std::string& value, bool regex, bool regex_full,
+                                   std::string_view stored, bool is_multivalue_attr);
 
 namespace {
 
@@ -752,6 +756,7 @@ static bool regions_for_comparison(const Corpus& corpus, const StructuralAttr& s
                                    const GlobalRegionFilter& gf, std::vector<int64_t>& out) {
     switch (gf.op) {
         case CompOp::NEQ: case CompOp::LT: case CompOp::GT: case CompOp::LTE: case CompOp::GTE: break;
+        case CompOp::EQ: if (gf.regex) break; return false;   // CQL-REGION-PATTERN
         default: return false;
     }
     if (!sa.has_region_value_reverse(rkey)) return false;
@@ -765,7 +770,8 @@ static bool regions_for_comparison(const Corpus& corpus, const StructuralAttr& s
         size_t n = 0;
         if (!sa.regions_for_value(rkey, v, r, n)) return false;
         covered += n;
-        if (compare_value_maybe_mv(gf.op, v, gf.value, is_mv)) out.insert(out.end(), r, r + n);
+        if (region_filter_value_ok(gf.op, gf.value, gf.regex, gf.regex_full, v, is_mv))
+            out.insert(out.end(), r, r + n);
     }
     if (covered != sa.region_count()) return false;   // regions without a value
     std::sort(out.begin(), out.end());
@@ -816,8 +822,8 @@ static RegionPosMask build_region_eq_position_mask(
         }
         const int64_t* regions = nullptr;
         size_t nreg = 0;
-        std::vector<int64_t> compared;   // P4.13: non-EQ comparisons
-        if (gf.op == CompOp::EQ) {
+        std::vector<int64_t> compared;   // P4.13: non-EQ comparisons (and patterns)
+        if (gf.op == CompOp::EQ && !gf.regex) {
             if (!sa.regions_for_value(*rkey, gf.value, regions, nreg)) {
                 out = RegionPosMask{};
                 out.status = RegionMaskStatus::Unsupported;
@@ -3501,6 +3507,35 @@ static bool compare_value_maybe_mv(CompOp op,
     return compare_value(op, std::string(stored), query_value);
 }
 
+static bool region_filter_value_ok(CompOp op, const std::string& value, bool regex, bool regex_full,
+                                   std::string_view stored, bool is_multivalue_attr) {
+    if (!regex) return compare_value_maybe_mv(op, stored, value, is_multivalue_attr);
+    // compiled once per pattern (filters are evaluated per region / per hit)
+    static std::mutex mu;
+    static std::unordered_map<std::string, std::unique_ptr<Regex>> cache;
+    const Regex* re = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        auto& slot = cache[value];
+        if (!slot) slot = std::make_unique<Regex>(value);
+        re = slot.get();
+    }
+    auto one = [&](std::string_view v) { return re->match(v, regex_full); };
+    bool hit = false;
+    if (is_multivalue_attr || stored.find('|') != std::string_view::npos) {
+        size_t a = 0;                          // multivalue: any component
+        while (!hit) {
+            const size_t b = stored.find('|', a);
+            hit = one(stored.substr(a, b == std::string_view::npos ? std::string_view::npos : b - a));
+            if (b == std::string_view::npos) break;
+            a = b + 1;
+        }
+    } else {
+        hit = one(stored);
+    }
+    return op == CompOp::NEQ ? !hit : hit;
+}
+
 static bool region_attr_is_multivalue(const Corpus& corpus,
                                       const StructuralAttr* sa_ptr,
                                       const std::string& attr_name) {
@@ -3546,6 +3581,8 @@ std::vector<ResolvedRegionFilter> QueryExecutor::resolve_region_filters(
         rf.value = gf.value;
         rf.anchor_name = gf.anchor_name;
         rf.positions = gf.positions;
+        rf.regex = gf.regex;
+        rf.regex_full = gf.regex_full;
         if (rf.positions) {
             out.push_back(std::move(rf));
             continue;
@@ -3798,7 +3835,7 @@ bool QueryExecutor::try_fast_aggregate(
             const size_t nr = rf.sa->region_count();
             if (est_seeds >= nr / 4) {
                 fc.ok.assign(nr, 0);
-                if (rf.op == CompOp::EQ && rf.has_reverse && !fc.is_mv) {
+                if (rf.op == CompOp::EQ && !rf.regex && rf.has_reverse && !fc.is_mv) {
                     const int64_t* regs = nullptr;
                     size_t cnt = 0;
                     if (rf.sa->regions_for_value(rf.attr_name, rf.value, regs, cnt))
@@ -3807,7 +3844,8 @@ bool QueryExecutor::try_fast_aggregate(
                 }
                 for (size_t r = 0; r < nr; ++r)
                     if (!fc.ok[r])
-                        fc.ok[r] = compare_value_maybe_mv(rf.op, rf.sa->region_value(rf.attr_name, r), rf.value, fc.is_mv);
+                        fc.ok[r] = region_filter_value_ok(rf.op, rf.value, rf.regex, rf.regex_full,
+                                                          rf.sa->region_value(rf.attr_name, r), fc.is_mv);
             }
         }
         filter_cursors.push_back(std::move(fc));
@@ -4054,14 +4092,14 @@ bool QueryExecutor::try_fast_aggregate(
             }
             const auto& rf = *fc.rf;
             const bool is_mv = fc.is_mv;
-            if (rf.op == CompOp::EQ && rf.has_reverse && !is_mv) {
+            if (rf.op == CompOp::EQ && !rf.regex && rf.has_reverse && !is_mv) {
                 if (rf.sa->region_matches_attr_eq_rev(rf.attr_name,
                         static_cast<size_t>(rgn), rf.value))
                     continue;
             }
             std::string_view rval = rf.sa->region_value(rf.attr_name,
                                                          static_cast<size_t>(rgn));
-            if (!compare_value_maybe_mv(rf.op, rval, rf.value, is_mv)) return false;
+            if (!region_filter_value_ok(rf.op, rf.value, rf.regex, rf.regex_full, rval, is_mv)) return false;
         }
         return true;
     };
@@ -4485,7 +4523,7 @@ bool QueryExecutor::match_survives_post_filters_for_aggregate(
 static bool global_region_eq_unsatisfiable(const Corpus& corpus,
                                           const std::vector<GlobalRegionFilter>& filters) {
     for (const auto& gf : filters) {
-        if (gf.op != CompOp::EQ) continue;
+        if (gf.op != CompOp::EQ || gf.regex || gf.positions) continue;
         size_t us = gf.region_attr.find('_');
         if (us == std::string::npos || us + 1 >= gf.region_attr.size()) continue;
         std::string struct_name = gf.region_attr.substr(0, us);
@@ -9196,12 +9234,12 @@ void QueryExecutor::apply_region_filters(const TokenQuery& query, const NameInde
             }
             const std::string composite = struct_name + "_" + *rkey;
             const bool is_mv = corpus_.is_multivalue(composite);
-            if (gf.op == CompOp::EQ && sa.has_region_value_reverse(*rkey) && !is_mv) {
+            if (gf.op == CompOp::EQ && !gf.regex && sa.has_region_value_reverse(*rkey) && !is_mv) {
                 if (sa.region_matches_attr_eq_rev(*rkey, static_cast<size_t>(rgn), gf.value))
                     continue;
             }
             std::string_view rval = sa.region_value(*rkey, static_cast<size_t>(rgn));
-            if (!compare_value_maybe_mv(gf.op, rval, gf.value, is_mv)) { pass = false; break; }
+            if (!region_filter_value_ok(gf.op, gf.value, gf.regex, gf.regex_full, rval, is_mv)) { pass = false; break; }
         }
 
         if (pass) kept.push_back(m);
@@ -9758,12 +9796,12 @@ bool QueryExecutor::match_passes_inline_region_filters(const Match& m, const Tok
         }
         const std::string composite = struct_name + "_" + *rkey;
         const bool is_mv = corpus_.is_multivalue(composite);
-        if (gf.op == CompOp::EQ && sa.has_region_value_reverse(*rkey) && !is_mv) {
+        if (gf.op == CompOp::EQ && !gf.regex && sa.has_region_value_reverse(*rkey) && !is_mv) {
             if (sa.region_matches_attr_eq_rev(*rkey, static_cast<size_t>(rgn), gf.value))
                 continue;
         }
         std::string_view rval = sa.region_value(*rkey, static_cast<size_t>(rgn));
-        if (!compare_value_maybe_mv(gf.op, rval, gf.value, is_mv)) return false;
+        if (!region_filter_value_ok(gf.op, gf.value, gf.regex, gf.regex_full, rval, is_mv)) return false;
     }
     return true;
 }

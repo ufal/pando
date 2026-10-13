@@ -117,6 +117,19 @@ def main():
         ('[upos="NOUN" | upos="ADJ"] within text_country="LV"; count by match.u_gender',
          counts([t for t in toks if t["upos"] in ("NOUN", "ADJ") and t["country"] == "LV"], lambda t: t["gender"])),
         ('[upos="NOUN"] within text_country="XX"; count by match.u_gender', {}),
+        # CQL-REGION-PATTERN: a quoted value with metacharacters is a pattern (whole value), `/…/` a
+        # substring pattern, an escaped one a literal — as on tokens
+        ('[upos="NOUN"] :: match.text_country="N.*"; count by match.u_gender',
+         counts([t for t in toks if t["upos"] == "NOUN" and t["country"].startswith("N")], lambda t: t["gender"])),
+        ('[upos="NOUN"] within text_country=/^(NL|LV)$/; count by match.text_country',
+         counts([t for t in toks if t["upos"] == "NOUN" and t["country"] in ("NL", "LV")], lambda t: t["country"])),
+        ('[upos="NOUN"] :: match.u_party!="Co.*"; count by match.u_party',
+         counts([t for t in toks if t["upos"] == "NOUN" and not t["party"].startswith("Co")], lambda t: t["party"])),
+        ('[upos="NOUN"] :: match.text_country="N."; count by match.text_country',
+         counts([t for t in toks if t["upos"] == "NOUN" and t["country"] == "NL"], lambda t: t["country"])),
+        ('[upos="NOUN"] :: match.text_country="N\\."; count by match.text_country', {}),
+        ('[upos="NOUN"] :: match.u_party=/pos/; count by match.u_party',
+         counts([t for t in toks if t["upos"] == "NOUN" and "pos" in t["party"]], lambda t: t["party"])),
         ('[lemma="woman"] within text_country="NL"; count by match.u_gender, match.text_year',
          counts([t for t in toks if t["lemma"] == "woman" and t["country"] == "NL"],
                 lambda t: (t["gender"], t["year"]))),
@@ -151,7 +164,7 @@ def main():
 
     for f in fails:
         print("FAIL", f)
-    print(f"{len(cases)} queries x {4} variants, {len(fails)} failures")
+    print(f"{len(cases)} queries x {len(variants)} variants, {len(fails)} failures")
     return 1 if fails else 0
 
 

@@ -5,6 +5,7 @@
 #include "api/query_json.h"
 #include "api/coll_counts.h"
 #include "core/json_utils.h"
+#include "query/keyness_select.h"
 #include "query/ast.h"
 #include "query/parser.h"
 #include "query/dialect/cwb/cwb_translate.h"
@@ -2349,7 +2350,16 @@ static void emit_keyness(const Corpus& corpus, const MatchSet& ms,
         return a.form < b.form;
     });
 
-    size_t show = std::min(entries.size(), opts.coll_max_items);
+    // both sides: the focus's keywords and the reference's (keyness_select.h)
+    {
+        const auto keep = keyness_rows_to_show(entries, opts.coll_max_items,
+                                               [](const KeynessEntry& e) { return e.keyness; });
+        std::vector<KeynessEntry> shown;
+        shown.reserve(keep.size());
+        for (size_t i : keep) shown.push_back(std::move(entries[i]));
+        entries = std::move(shown);
+    }
+    size_t show = entries.size();
 
     if (opts.json) {
         std::cout << "{\"ok\": true, \"operation\": \"keyness\", \"last_command\": \"keyness\", \"result\": {\n";

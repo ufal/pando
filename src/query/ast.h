@@ -257,6 +257,11 @@ struct GlobalRegionFilter {
     std::string region_attr;   // e.g. "text_year" (region type + attr)
     CompOp      op = CompOp::EQ;
     std::string value;
+    /// CQL-REGION-PATTERN: `value` is a pattern (as for token attributes: a quoted value
+    /// with metacharacters, or `/…/`); op EQ = must match, NEQ = must not match.
+    /// `regex_full`: whole value (quoted form) vs substring (`/…/`, anchor with ^…$).
+    bool        regex = false;
+    bool        regex_full = false;
     /// P4.14: a restriction computed before execution (`within s having COND` → the
     /// sentences containing COND): sorted, disjoint, inclusive position intervals.
     /// When set, region_attr / op / value are unused: a match passes when its first

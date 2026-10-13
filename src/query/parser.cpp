@@ -1387,6 +1387,38 @@ bool Parser::try_parse_relation(QueryRelation& rel) {
     return true;
 }
 
+void Parser::read_region_filter_value(GlobalRegionFilter& gf) {
+    const Token v = lexer_.next();
+    switch (v.type) {
+        case TokType::REGEX:                      // /pattern/: substring match, as on tokens
+            gf.value = v.text;
+            gf.regex = true;
+            gf.regex_full = false;
+            break;
+        case TokType::STRING: {                   // quoted: a pattern when it looks like one
+            const std::string& pat = v.raw.empty() ? v.text : v.raw;
+            if (!opts_.strict_quoted_strings && !lone_literal_metachar(v.text)
+                && string_has_regex_metachar(pat)) {
+                gf.value = pat;
+                gf.regex = true;
+                gf.regex_full = true;
+            } else {
+                gf.value = v.text;
+            }
+            break;
+        }
+        case TokType::NUMBER:
+        case TokType::IDENT:
+            gf.value = v.text;
+            break;
+        default:
+            throw std::runtime_error("Expected a value (string, number or /pattern/) in a region filter, got '"
+                                     + v.text + "'");
+    }
+    if (gf.regex && gf.op != CompOp::EQ && gf.op != CompOp::NEQ)
+        throw std::runtime_error("A pattern in a region filter can only be used with = or !=");
+}
+
 void Parser::parse_within_clause(TokenQuery& tq) {
     // Expects "within" keyword already consumed. Parses:
     //   within s
@@ -1431,12 +1463,7 @@ void Parser::parse_within_clause(TokenQuery& tq) {
             case TokType::GTE:  gf.op = CompOp::GTE; break;
             default: break;
         }
-        if (lexer_.peek().type == TokType::STRING)
-            gf.value = lexer_.next().text;
-        else if (lexer_.peek().type == TokType::NUMBER)
-            gf.value = lexer_.next().text;
-        else
-            gf.value = lexer_.expect(TokType::IDENT).text;
+        read_region_filter_value(gf);
         tq.global_region_filters.push_back(std::move(gf));
     } else {
         // Regular within: store the structure name
@@ -1599,12 +1626,7 @@ void Parser::parse_global_filters(TokenQuery& tq) {
                 case TokType::GTE:  gf.op = CompOp::GTE; break;
                 default: throw std::runtime_error("Expected comparison in match filter");
             }
-            if (lexer_.peek().type == TokType::STRING)
-                gf.value = lexer_.next().text;
-            else if (lexer_.peek().type == TokType::NUMBER)
-                gf.value = lexer_.next().text;
-            else
-                gf.value = lexer_.expect(TokType::IDENT).text;
+            read_region_filter_value(gf);
             tq.global_region_filters.push_back(std::move(gf));
         } else {
             // Look ahead: "a < b" (position order), "a.attr op value" (anchored region),
@@ -1628,12 +1650,7 @@ void Parser::parse_global_filters(TokenQuery& tq) {
                     case TokType::GTE:  gf.op = CompOp::GTE; break;
                     default: throw std::runtime_error("Expected comparison in global region shorthand");
                 }
-                if (lexer_.peek().type == TokType::STRING)
-                    gf.value = lexer_.next().text;
-                else if (lexer_.peek().type == TokType::NUMBER)
-                    gf.value = lexer_.next().text;
-                else
-                    gf.value = lexer_.expect(TokType::IDENT).text;
+                read_region_filter_value(gf);
                 tq.global_region_filters.push_back(std::move(gf));
             } else if (next.type == TokType::EQ) {
                 lexer_.consume();
@@ -1700,7 +1717,7 @@ void Parser::parse_global_filters(TokenQuery& tq) {
                     gf.anchor_name = t.text;
                     gf.region_attr = attr1;
                     gf.op = op;
-                    gf.value = lexer_.next().text;
+                    read_region_filter_value(gf);
                     tq.global_region_filters.push_back(std::move(gf));
                 } else {
                     // Alignment: :: a.upos = b.upos

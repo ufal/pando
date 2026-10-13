@@ -725,6 +725,8 @@ struct ResolvedRegionFilter {
     std::string value;
     std::string anchor_name;
     bool has_reverse = false;
+    bool regex = false;        // CQL-REGION-PATTERN (GlobalRegionFilter::regex)
+    bool regex_full = false;
     /// P4.14: precomputed restriction (GlobalRegionFilter::positions)
     std::shared_ptr<const std::vector<std::pair<int64_t, int64_t>>> positions;
 };

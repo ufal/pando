@@ -60,6 +60,10 @@ private:
 
     // #12: Parse :: global_region_filter and/or global_alignment_filter [ & ... ]*
     void parse_global_filters(TokenQuery& tq);
+    /// The value of a region filter (`within x op V`, `:: match.x op V`, `:: x op V`): a
+    /// string, number, word or `/pattern/`; a quoted value with metacharacters is a pattern,
+    /// exactly as for token attributes (CQL-REGION-PATTERN).
+    void read_region_filter_value(GlobalRegionFilter& gf);
 
     Lexer lexer_;
     ParserOptions opts_;
