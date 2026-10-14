@@ -1936,6 +1936,12 @@ void QueryExecutor::compile_conditions(const ConditionPtr& cond) const {
         if (ac.is_nvals || ac.op == CompOp::IN) return;
         {
             const std::string name = normalize_attr(ac.attr);
+            // A hyphenated name can only be an overlay attribute (`overlay-mine-mwe-type`, a
+            // custom layer): one that is not loaded is an error, not a silent 0 hits
+            // (UNKNOWN-ATTR-ERROR; other names keep their fallbacks: region attrs, feats, …)
+            if (name.find('-') != std::string::npos && name.find_first_of("/#.") == std::string::npos
+                && !corpus_.has_attr(name))
+                throw std::runtime_error("Unknown attribute '" + ac.attr + "'");
             std::string feat_name;
             const bool plain = !feats_is_subkey(name, feat_name) && corpus_.has_attr(name)
                                && !corpus_.is_multivalue(name);
