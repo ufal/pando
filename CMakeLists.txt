@@ -345,6 +345,14 @@ if(BUILD_TESTING)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/parallel_join_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
                 --server $<TARGET_FILE:pando-server>)
+        # `t.cpos` (region start) in tabulate and count fields, with tcnt(t) its extent
+        add_test(NAME region_cpos
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/region_cpos_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
+        # user overlays in <index>/overlays/ merged by pando-server; stale ones left out
+        add_test(NAME overlay_server
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/overlay_server_test.py
+                --pando-index $<TARGET_FILE:pando-index> --server $<TARGET_FILE:pando-server>)
         # alignment filters on an earlier statement's label (`eo.s_tuid = ang.s_tuid`,
         # `eo.upos = ang.upos`) == brute force: region sets, id sets, components, missing values
         add_test(NAME cross_statement_align

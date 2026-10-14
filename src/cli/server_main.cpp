@@ -63,6 +63,8 @@ int main(int argc, char* argv[]) {
                   << "                            \"max_count_hits\": …, \"deny\": [\"transitive\"]}, …},\n"
                   << "                            \"default_tier\": \"visitor\", \"trust_tier\": true} (wiki: CLI reference)\n"
                   << "    --trust-tier            honour the request's \"tier\" (only behind a front-end that sets it)\n"
+                  << "  Overlays: <corpus_dir>/overlays/<layer>/ are merged (attrs overlay-<layer>-…); in --limits,\n"
+                  << "    \"overlays\": \"none\" turns that off, [\"dir\", …] names them instead\n"
                   << "    --warm hot|all|none     read the index files most queries touch (hot) or all\n"
                   << "                            into the page cache in the background (POST /warm later)\n";
         return 1;
@@ -167,16 +169,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    Corpus corpus;
-    try {
-        // Default: same as CLI (lazy mmap). Full preload is optional and can take
-        // tens of seconds / GBs RSS on mid-size UD; queries are already fast without it.
-        corpus.open(corpus_dir, preload);
-    } catch (const std::exception& e) {
-        std::cerr << "Failed to open corpus at " << corpus_dir << ": " << e.what() << "\n";
-        return 1;
-    }
-
     ServerConfig cfg;
     cfg.jobs = job_cfg;
     cfg.threads = nthreads;
@@ -199,6 +191,16 @@ int main(int argc, char* argv[]) {
     }
     if (trust_tier) cfg.trust_tier = true;
     if (warm_given) cfg.warm = warm;
+    Corpus corpus;
+    try {
+        // Default: same as CLI (lazy mmap). Full preload is optional and can take
+        // tens of seconds / GBs RSS on mid-size UD; queries are already fast without it.
+        corpus.open(corpus_dir, preload, server_overlay_dirs(corpus_dir, cfg, &cfg.overlays_skipped));
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to open corpus at " << corpus_dir << ": " << e.what() << "\n";
+        return 1;
+    }
+    for (const auto& x : cfg.overlays_skipped) std::cerr << "overlay left out: " << x << "\n";
     for (const auto& [name, lim] : cfg.tiers)
         for (const auto& f : lim.deny)
             if (std::find(limit_features().begin(), limit_features().end(), f) == limit_features().end())

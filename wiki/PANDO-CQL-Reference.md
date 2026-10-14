@@ -196,7 +196,11 @@ cannot be used with `within` / `containing`. `Over = [lemma="over"]; <err type="
 keeps the groups that contain a token of `Over` (resolved in the CLI).
 
 **Overlay corpora** add annotation layers in a separate folder on top of a corpus; their groups are
-queried as `<overlay-NAME-struct …>`, e.g. `<overlay-mine-mwe type="split-phrasal">`.
+queried as `<overlay-NAME-struct …>`, e.g. `<overlay-mine-mwe type="split-phrasal">`, and their
+attributes as token attributes, `[overlay-mine-mwe-type="phrasal"]`. pando-server (and FQS) merge every
+overlay in `<index>/overlays/NAME/` when they open the corpus; an overlay older than the index (the
+corpus was reindexed) is left out until it is rebuilt. TEITOK custom layers (labels users add to
+concordance lines) are kept there as `overlay-USER-cl-ATTRIBUTE`.
 
 ## Aligned corpora
 
@@ -248,7 +252,7 @@ For a named query `M` (default: the last one):
 | `size [M]` | number of hits |
 | `count [M] by att+` / `group` | frequency per value (combinations for several attributes); with a region attribute also the relative frequency |
 | `freq [M] by att` | as count, in instances per million |
-| `tabulate [M] [from n] att+` | a table; fields include `a.attr`, `a.cpos` (corpus position), date functions, `tcnt(x)`, `gaps(x)`, `forms(x)`, `spellout(x, attr)` |
+| `tabulate [M] [from n] att+` | a table; fields include `a.attr`, `a.cpos` (corpus position; for a region binding `t.cpos` is where it starts, with `tcnt(t)` its length), date functions, `tcnt(x)`, `gaps(x)`, `forms(x)`, `spellout(x, attr)` |
 | `sort [M] by att [%c\|%d\|%cd] [on from..to]` | sort the hits |
 | `stats avg(expr), median(expr) [by att+]` | numeric aggregates per group |
 | `raw [M]` | one line per hit with corpus positions and forms |

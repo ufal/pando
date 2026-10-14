@@ -187,11 +187,30 @@ ServerConfig parse_server_options(const std::string& json_in, ServerConfig cfg) 
     if (!emb.empty()) cfg.extra_server_fields = "\"embedded_in\": " + jstr(emb);
     if (has("default_tier")) cfg.default_tier = json_extract_str(opts, "default_tier");
     if (has("trust_tier")) cfg.trust_tier = json_extract_bool(opts, "trust_tier", false);
+    if (has("overlays")) {
+        const std::string raw = json_extract_raw(opts, "overlays");
+        if (!raw.empty() && raw[0] == '[') {
+            cfg.auto_overlays = false;
+            cfg.overlay_dirs = json_extract_str_array(opts, "overlays");
+        } else {
+            const std::string v = json_extract_str(opts, "overlays");
+            cfg.auto_overlays = !(v == "none" || raw == "false");
+        }
+    }
     if (!tiers_raw.empty()) {
         cfg.tiers.clear();
         for (const auto& [name, obj] : json_object_members(tiers_raw)) cfg.tiers[name] = parse_query_limits(obj);
     }
     return cfg;
+}
+
+std::vector<std::string> server_overlay_dirs(const std::string& corpus_dir, const ServerConfig& cfg,
+                                             std::vector<std::string>* skipped) {
+    std::vector<std::string> out = cfg.overlay_dirs;
+    if (cfg.auto_overlays)
+        for (auto& d : discover_overlays(corpus_dir, skipped))
+            if (std::find(out.begin(), out.end(), d) == out.end()) out.push_back(std::move(d));
+    return out;
 }
 
 std::map<std::string, std::string> parse_query_string(std::string_view qs) {
@@ -337,6 +356,17 @@ std::string ServerApi::server_fields() const {
         + ", \"memory_budget\": " + std::to_string(cfg_.sessions.memory_budget)
         + ", \"max_hits\": " + std::to_string(cfg_.sessions.max_hits) + "}";
     s += ", \"warm\": " + warmer_.status_json();
+    {
+        std::string ov = "[";
+        for (const auto& [layer, dir] : corpus_.overlays())
+            ov += std::string(ov.size() > 1 ? ", " : "") + "{\"layer\": " + jstr(layer) + ", \"dir\": " + jstr(dir) + "}";
+        s += ", \"overlays\": " + ov + "]";
+        if (!cfg_.overlays_skipped.empty()) {
+            std::string sk = "[";
+            for (const auto& x : cfg_.overlays_skipped) sk += std::string(sk.size() > 1 ? ", " : "") + jstr(x);
+            s += ", \"overlays_skipped\": " + sk + "]";
+        }
+    }
     {
         const ResultCache::Stats cs = cache_.stats();
         s += ", \"cache\": {\"entries\": " + std::to_string(cs.entries) + ", \"bytes\": " + std::to_string(cs.bytes)

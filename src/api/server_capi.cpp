@@ -77,7 +77,7 @@ PANDO_API pando_server_t* pando_server_open(const char* corpus_dir, const char* 
         auto s = std::make_unique<pando_server>();
         s->dir = corpus_dir;
         s->corpus = std::make_unique<Corpus>();
-        s->corpus->open(s->dir, cfg.preload);
+        s->corpus->open(s->dir, cfg.preload, server_overlay_dirs(s->dir, cfg, &cfg.overlays_skipped));
         s->api = std::make_unique<ServerApi>(*s->corpus, std::move(cfg));
         return s.release();
     } catch (const std::exception& e) {

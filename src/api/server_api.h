@@ -78,7 +78,19 @@ struct ServerConfig {
     /// into the page cache in the background when the server starts; POST /warm
     /// starts it later (e.g. when a front-end selects the corpus).
     WarmLevel warm = WarmLevel::None;
+    /// Overlay indexes to open the corpus with: those in `<index>/overlays/` (discover_overlays,
+    /// corpus.h) unless auto_overlays is off, plus overlay_dirs. Options: "overlays": "auto"
+    /// (default) / "none" / ["dir", …] (only these).
+    bool auto_overlays = true;
+    std::vector<std::string> overlay_dirs;
+    /// Overlays left out at open ("<dir>: <reason>"), reported in /info "server".
+    std::vector<std::string> overlays_skipped;
 };
+
+/// The overlay directories to open `corpus_dir` with under `cfg`; overlays found but left out
+/// (stale after a reindex) are added to `skipped`.
+std::vector<std::string> server_overlay_dirs(const std::string& corpus_dir, const ServerConfig& cfg,
+                                             std::vector<std::string>* skipped = nullptr);
 
 struct ServerResponse {
     int status = 200;
@@ -90,7 +102,7 @@ struct ServerResponse {
 /// preload, total_workers, result_cache, result_ttl, abandon_after, query_timeout_ms, cache_mb,
 /// threads, query_threads, session_ttl, max_sessions, session_memory_mb,
 /// session_max_hits, embedded_in, debug_total_delay_ms, warm ("hot" / "all"), and
-/// "tiers": {"<name>": {limits.h members}, …}, "default_tier", "trust_tier".
+/// "tiers": {"<name>": {limits.h members}, …}, "default_tier", "trust_tier", "overlays".
 /// Members that are absent keep the values of `base`.
 ServerConfig parse_server_options(const std::string& json, ServerConfig base = {});
 

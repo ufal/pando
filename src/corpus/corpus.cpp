@@ -149,6 +149,7 @@ bool overlay_attr_is_kv_pipe(const CorpusInfo& oi, const std::string& name) {
 void Corpus::open(const std::string& dir_given, bool preload,
                   const std::vector<std::string>& overlay_dirs) {
     group_index_path_override_.clear();
+    overlays_.clear();
     id_sets_ = std::make_shared<IdSetCache>();   // ids are per index: a fresh cache per open
     opened_as_ = dir_given;
     {
@@ -236,6 +237,7 @@ void Corpus::open(const std::string& dir_given, bool preload,
                                      std::to_string(info_.size));
         }
         const std::string layer = read_overlay_layer_id(odir);
+        overlays_.emplace_back(layer, odir);
         for (const auto& name : oi.positional_attrs) {
             const std::string merged = overlay_merged_attr(layer, name);
             if (pos_seen.count(merged))
@@ -262,6 +264,38 @@ void Corpus::open(const std::string& dir_given, bool preload,
             group_index_path_override_[ms] = odir + "/groups/" + st + ".jsonl";
         }
     }
+}
+
+std::vector<std::string> discover_overlays(const std::string& index_dir,
+                                           std::vector<std::string>* skipped) {
+    namespace fs = std::filesystem;
+    std::vector<std::string> out;
+    std::error_code ec;
+    const fs::path root = fs::path(index_dir) / "overlays";
+    if (!fs::is_directory(root, ec)) return out;
+    const fs::path main_info = fs::path(index_dir) / "corpus.info";
+    const auto main_time = fs::last_write_time(main_info, ec);
+    if (ec) return out;
+    CorpusPos main_size = 0;
+    try { main_size = read_info(main_info.string()).size; } catch (...) { return out; }
+    for (const auto& e : fs::directory_iterator(root, ec)) {
+        const fs::path d = e.path();
+        const std::string name = d.filename().string();
+        if (name.empty() || name[0] == '.' || !fs::is_regular_file(d / "overlay.info", ec)
+            || !fs::is_regular_file(d / "corpus.info", ec))
+            continue;   // not an overlay (or one still being written: it appears by rename when done)
+        std::string why;
+        try {
+            if (read_info((d / "corpus.info").string()).size != main_size) why = "size differs from the main index";
+            else if (fs::last_write_time(d / "corpus.info", ec) < main_time) why = "older than the main index";
+        } catch (const std::exception& x) {
+            why = x.what();
+        }
+        if (why.empty()) out.push_back(d.string());
+        else if (skipped) skipped->push_back(d.string() + ": " + why);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
 }
 
 const PositionalAttr& Corpus::attr(const std::string& name) const {

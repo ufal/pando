@@ -135,6 +135,8 @@ public:
     const std::string& dir() const { return dir_; }
     /// The path open() was given (before resolving symlinks).
     const std::string& opened_as() const { return opened_as_; }
+    /// Overlays merged at open, in order: (layer id, overlay directory).
+    const std::vector<std::pair<std::string, std::string>>& overlays() const { return overlays_; }
     /// corpus.info index_id, or for older indexes `info:<mtime>:<size>` of corpus.info.
     std::string index_identity() const;
     /// Name for /info and `show info`: the directory's name without `_idx`; for
@@ -167,6 +169,15 @@ private:
     std::shared_ptr<IdSetCache> id_sets_;
     /// Merged overlay token-group name → path to `groups/<orig>.jsonl` in overlay dir.
     std::unordered_map<std::string, std::string> group_index_path_override_;
+    std::vector<std::pair<std::string, std::string>> overlays_;
 };
+
+/// Overlay indexes kept next to a main index, in `<index_dir>/overlays/<layer>/` (each built by
+/// `pando-index --overlay-index` and holding overlay.info and corpus.info), sorted by name. An
+/// overlay whose size differs from the main index, or that is older than the main index's
+/// corpus.info (the corpus was reindexed, so its positions no longer apply), is left out and
+/// reported in `skipped` as "<dir>: <reason>".
+std::vector<std::string> discover_overlays(const std::string& index_dir,
+                                           std::vector<std::string>* skipped = nullptr);
 
 } // namespace pando

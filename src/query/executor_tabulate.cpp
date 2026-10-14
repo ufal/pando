@@ -198,6 +198,10 @@ std::string read_tabulate_field(const Corpus& corpus, const Match& m,
                 auto rkey = resolve_region_attr_key(sa, rr.struct_name, rattr);
                 if (rkey)
                     return render_date_part(std::string(sa.region_value(*rkey, rr.region_idx)));
+                // `t.cpos`: where the region starts (as `a.cpos` for a token), unless the
+                // region has an attribute of that name; with `tcnt(t)` its extent, e.g. to
+                // place hits within their text (dispersion plots)
+                if (rattr == "cpos") return std::to_string(sa.get(rr.region_idx).start);
                 if (auto super_val = lookup_super_region_attr_value(
                         corpus, sa, rr.struct_name, rr.region_idx, rattr)) {
                     return render_date_part(*super_val);
