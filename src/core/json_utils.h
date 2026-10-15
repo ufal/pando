@@ -286,8 +286,14 @@ inline bool match_is_full_sentence_span(const Corpus& corpus, const Match& m) {
     return sr.start == first && sr.end == last;
 }
 
+/// The longest region a sentence context widens to: a corpus without sentences has one
+/// implicit ``s`` over everything (pando-index adds it), and a "sentence" of a million
+/// tokens is no context; past this the hit keeps its `ctx_width` window.
+constexpr CorpusPos kMaxSentenceContext = 1000;
+
 /// The positions a hit's context covers: `ctx_width` tokens around the match,
-/// or (`sentence`) the enclosing ``s`` region(s).
+/// or (`sentence`) the enclosing ``s`` region(s) when they are not longer than
+/// kMaxSentenceContext.
 inline void context_bounds(const Corpus& corpus, const Match& m, int ctx_width, bool sentence,
                            CorpusPos& left_start, CorpusPos& right_end) {
     const CorpusPos first = m.first_pos();
@@ -298,16 +304,21 @@ inline void context_bounds(const Corpus& corpus, const Match& m, int ctx_width, 
         const auto& s = corpus.structure("s");
         int64_t ri_first = s.find_region(first);
         int64_t ri_last = s.find_region(last);
+        CorpusPos ls = left_start, re = right_end;
         if (ri_first >= 0) {
             Region sr = s.get(static_cast<size_t>(ri_first));
-            left_start = sr.start;
-            right_end = sr.end;
+            ls = sr.start;
+            re = sr.end;
         }
         if (ri_last >= 0 && ri_last != ri_first) {
             Region sr2 = s.get(static_cast<size_t>(ri_last));
-            right_end = sr2.end;
+            re = sr2.end;
             if (ri_first < 0)
-                left_start = sr2.start;
+                ls = sr2.start;
+        }
+        if (re - ls < kMaxSentenceContext) {
+            left_start = ls;
+            right_end = re;
         }
     }
 }
@@ -320,27 +331,10 @@ inline KwicContext build_context(const Corpus& corpus, const Match& m, int ctx_w
     CorpusPos first = m.first_pos();
     CorpusPos last  = m.last_pos();
 
-    CorpusPos left_start = std::max(CorpusPos(0), first - ctx_width);
-    CorpusPos right_end = std::min(corpus.size() - 1, last + ctx_width);
-
-    // Sentence view: expand left/right to the enclosing ``s`` region(s).
+    // Sentence view: the enclosing ``s`` region(s), if not overlong (context_bounds).
     // Match span stays [first, last] so KWIC highlighting remains on the hit.
-    if (sentence && corpus.has_structure("s")) {
-        const auto& s = corpus.structure("s");
-        int64_t ri_first = s.find_region(first);
-        int64_t ri_last = s.find_region(last);
-        if (ri_first >= 0) {
-            Region sr = s.get(static_cast<size_t>(ri_first));
-            left_start = sr.start;
-            right_end = sr.end;
-        }
-        if (ri_last >= 0 && ri_last != ri_first) {
-            Region sr2 = s.get(static_cast<size_t>(ri_last));
-            right_end = sr2.end;
-            if (ri_first < 0)
-                left_start = sr2.start;
-        }
-    }
+    CorpusPos left_start = 0, right_end = 0;
+    context_bounds(corpus, m, ctx_width, sentence, left_start, right_end);
 
     for (CorpusPos p = left_start; p < first; ++p) {
         if (!ctx.left.empty()) ctx.left += ' ';

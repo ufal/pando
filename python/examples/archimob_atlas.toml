@@ -1,0 +1,30 @@
+# pando_geo atlas for ArchiMob (Swiss German interviews; a local TEITOK conversion):
+#   python -m pando_geo examples/archimob_atlas.toml --out maps
+
+[corpus]
+index = "~/flexitools/teitok/archimob/pando"
+place = "text_place"
+geo = "text_geo"
+min_n = 20
+
+[[variable]]
+name = "nicht"
+description = "Swiss German 'nicht': nöd / nüd / nid / ned / nit"
+query = '[nform="nicht" & form!="n[uüǜ]+m.*|ni+m.*"]'      # without 'nümme' (nicht mehr)
+field = "form"
+[variable.variants]
+"nöd" = "nö+d"
+"nüd" = "n[üǜ]+d"
+nid = "n[iì]+d"
+ned = "ne+d"
+nit = "n[iì]+t"
+
+[[variable]]
+name = "gesagt"
+description = "'gesagt': the diphthong ai / äi / ei"
+query = '[nform="gesagt"]'
+field = "form"
+[variable.variants]
+gsait = "g+sai[td]"
+"gsäit" = "g+säi[td]"
+gseit = "g+sei[td]"
