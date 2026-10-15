@@ -235,12 +235,23 @@ Used after `::`, mostly with named tokens:
 | `f` | `f(a.form) >= 100` | corpus frequency of the value |
 | `year`, `century`, `decade` | `year(text_date) >= 2000` | from a date-like value (4-digit year prefix; century of 2001 = 21; decade = `(year/10)*10`) |
 | `month`, `week`, `day` | `month(a.text_date) = 5` | from `YYYY-MM[-DD]` values (ISO week) |
+| `lat`, `lon` | `lat(a.text_geo) > 50.5` | latitude / longitude of a location value (decimal degrees) |
+| `geodist` | `geodist(a.text_geo, 50.08, 14.42) < 30` | distance in km to a point, or between two locations: `geodist(a.text_geo, b.text_geo)` |
 | `nchildren`, `ndescendants`, `depth` | `nchildren(a) > 3` | dependency tree of token a (not regions) |
 | `tcnt`, `gaps`, `contains`, `rchild`, `rcontains` | `tcnt(np) > 5` | regions and subtrees, see above |
 | `nvals` | `nvals(a.wsd) > 1` | number of values of a multivalue attribute |
 
 Date functions accept `name.attr` or a region attribute directly (`text_date`); they also work as
 `tabulate` fields.
+
+**Locations.** `lat`, `lon` and `geodist` read a location the way the date functions read a date:
+from an attribute (`text_geo`, `a.text_geo`) holding `50.087,14.421` or `50.087 14.421` (latitude
+first), a geo URI `geo:50.087,14.421`, or WKT `POINT(14.421 50.087)` (longitude first, as WKT has it).
+A value that is not a location (or out of range) gives no value, so the hit does not pass a filter.
+Numbers may have decimals (`lat(text_geo) > 49.5`). As `tabulate` / `count` fields they give the
+value (km to the metre for `geodist`), and **`geocell(x, step)`** gives the grid cell of `step`
+degrees a location falls in, as its centre: `count by geocell(text_geo, 0.5)` counts hits per
+half-degree cell (`50.25,14.25`), for maps of corpora with many places.
 
 ## Commands
 

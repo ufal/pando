@@ -1,0 +1,16 @@
+Package: pandor
+Type: Package
+Title: Query 'pando' Corpus Indexes from R
+Version: 0.1.0
+Authors@R: person("Maarten", "Janssen", email = "janssen@ufal.mff.cuni.cz", role = c("aut", "cre"))
+Description: Runs pando CQL queries through the 'pando' command-line program and returns
+    counts and hit tables as data frames, ready for analysis and plotting (e.g. with ggplot2).
+    The R counterpart of the Python package 'pando_cql': no compiled code, only the 'pando'
+    binary and a pando corpus index are needed.
+License: file LICENSE
+Encoding: UTF-8
+Imports: jsonlite
+Suggests: ggplot2, testthat (>= 3.0.0)
+Config/testthat/edition: 3
+SystemRequirements: pando (the 'pando' command-line program, on PATH or in PANDO_BIN)
+Config/roxygen2/version: 8.1.1

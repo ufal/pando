@@ -138,6 +138,7 @@ add_library(pando_core STATIC
     src/core/regex_engine.cpp
     src/core/worker_pool.cpp
     src/core/count_hierarchy_json.cpp
+    src/core/geo.cpp
     src/index/lexicon.cpp
     src/index/fold_map.cpp
     src/index/fold_index.cpp
@@ -161,6 +162,7 @@ add_library(pando_core STATIC
     src/query/executor_sort.cpp
     src/query/sort_field.cpp
     src/query/executor_tabulate.cpp
+    src/query/geo_fields.cpp
     src/api/index_api.cpp
 )
 target_include_directories(pando_core PUBLIC src)
@@ -345,6 +347,10 @@ if(BUILD_TESTING)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/parallel_join_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
                 --server $<TARGET_FILE:pando-server>)
+        # geolocations: lat(), lon(), geodist() in filters and fields, geocell() as a field (CLI and server)
+        add_test(NAME geo_functions
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/geo_functions_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index> --server $<TARGET_FILE:pando-server>)
         # `t.cpos` (region start) in tabulate and count fields, with tcnt(t) its extent
         add_test(NAME region_cpos
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/region_cpos_test.py

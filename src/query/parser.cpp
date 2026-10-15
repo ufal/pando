@@ -17,6 +17,41 @@ void reject_ud_feats_dot_syntax(const std::string& attr, size_t pos) {
             std::to_string(pos));
 }
 
+
+/// Field functions on geolocations (core/geo.h) in tabulate / count fields: name(args), the arguments
+/// attribute specs (x, a.x) or numbers, written without spaces: "geocell(text_geo,0.5)". The name
+/// is consumed, LPAREN is next.
+bool is_geo_field_function(const std::string& low) {
+    return low == "lat" || low == "lon" || low == "geodist" || low == "geocell";
+}
+
+std::string read_geo_field_call(Lexer& lexer, const std::string& low) {
+    lexer.expect(TokType::LPAREN);
+    std::string out = low + "(";
+    bool first = true;
+    while (lexer.peek().type != TokType::RPAREN) {
+        Token t = lexer.next();
+        std::string arg;
+        if (t.type == TokType::NUMBER) {
+            arg = t.text;
+        } else if (t.type == TokType::IDENT) {
+            arg = t.text;
+            if (lexer.peek().type == TokType::DOT) {
+                lexer.consume();
+                arg += "." + lexer.expect(TokType::IDENT).text;
+            }
+        } else {
+            throw std::runtime_error(low + "(...): expected an attribute or a number");
+        }
+        out += (first ? "" : ",") + arg;
+        first = false;
+        if (lexer.peek().type == TokType::COMMA) lexer.consume();
+        else if (lexer.peek().type != TokType::RPAREN) throw std::runtime_error(low + "(...): expected ',' or ')'");
+    }
+    lexer.expect(TokType::RPAREN);
+    return out + ")";
+}
+
 } // namespace
 
 Parser::Parser(const std::string& input, ParserOptions opts)
@@ -372,6 +407,10 @@ GroupCommand Parser::parse_command() {
                 std::string first = lexer_.next().text;
                 std::string low = first;
                 std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+                if (is_geo_field_function(low) && lexer_.peek().type == TokType::LPAREN) {
+                    cmd.fields.push_back(read_geo_field_call(lexer_, low));
+                    continue;
+                }
                 if ((low == "tcnt" || low == "gaps" || low == "forms" || low == "spellout"
                      || low == "year" || low == "century" || low == "decade"
                      || low == "month" || low == "week" || low == "day")
@@ -415,6 +454,11 @@ GroupCommand Parser::parse_command() {
             {
                 std::string low = first;
                 std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+                if (is_geo_field_function(low) && lexer_.peek().type == TokType::LPAREN) {
+                    cmd.fields.push_back(read_geo_field_call(lexer_, low));
+                    parse_field_tail();
+                    return cmd;
+                }
                 if ((low == "tcnt" || low == "gaps" || low == "forms" || low == "spellout"
                      || low == "year" || low == "century" || low == "decade"
                      || low == "month" || low == "week" || low == "day")
@@ -463,6 +507,12 @@ GroupCommand Parser::parse_command() {
                 {
                     std::string low2 = second;
                     std::transform(low2.begin(), low2.end(), low2.begin(), ::tolower);
+                    if (is_geo_field_function(low2) && lexer_.peek().type == TokType::LPAREN) {
+                        cmd.query_name = first;
+                        cmd.fields.push_back(read_geo_field_call(lexer_, low2));
+                        parse_field_tail();
+                        return cmd;
+                    }
                     if ((low2 == "tcnt" || low2 == "gaps" || low2 == "forms" || low2 == "spellout"
                          || low2 == "year" || low2 == "century" || low2 == "decade"
                          || low2 == "month" || low2 == "week" || low2 == "day")
@@ -636,6 +686,8 @@ GroupCommand Parser::parse_command() {
         std::string field = ft.text;
         std::string low = field;
         std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+        if (is_geo_field_function(low) && lexer_.peek().type == TokType::LPAREN)
+            return read_geo_field_call(lexer_, low);
         if ((low == "tcnt" || low == "gaps" || low == "forms" || low == "spellout"
              || low == "year" || low == "century" || low == "decade"
              || low == "month" || low == "week" || low == "day"
@@ -1561,9 +1613,19 @@ void Parser::parse_global_filters(TokenQuery& tq) {
                 else if (name == "rcontains")      fc.func = GlobalFunctionType::RCONTAINS;
                 else if (name == "tcnt")          fc.func = GlobalFunctionType::TCNT;
                 else if (name == "gaps")          fc.func = GlobalFunctionType::GAPS;
+                else if (name == "lat")           fc.func = GlobalFunctionType::LAT;
+                else if (name == "lon")           fc.func = GlobalFunctionType::LON;
+                else if (name == "geodist")       fc.func = GlobalFunctionType::GEODIST;
+                else if (name == "geocell")
+                    throw std::runtime_error("geocell(...) gives a cell, not a number: use it in count by / tabulate");
                 else throw std::runtime_error("Unknown function in global filter: " + name);
                 lexer_.consume(); // consume LPAREN
                 while (lexer_.peek().type != TokType::RPAREN) {
+                    if (lexer_.peek().type == TokType::NUMBER && is_geo_function(fc.func)) {
+                        fc.args.push_back(lexer_.next().text);   // geodist(x, 50.08, 14.42)
+                        if (lexer_.peek().type == TokType::COMMA) lexer_.consume();
+                        continue;
+                    }
                     std::string arg = lexer_.expect(TokType::IDENT).text;
                     if (lexer_.peek().type == TokType::DOT) {
                         lexer_.consume();
@@ -1593,7 +1655,10 @@ void Parser::parse_global_filters(TokenQuery& tq) {
 
             // RHS: either a number or another function call
             if (lexer_.peek().type == TokType::NUMBER) {
-                ff.int_value = std::stoll(lexer_.next().text);
+                const std::string num = lexer_.next().text;
+                ff.dbl_value = std::stod(num);
+                ff.rhs_is_decimal = num.find('.') != std::string::npos;
+                ff.int_value = ff.rhs_is_decimal ? static_cast<int64_t>(ff.dbl_value) : std::stoll(num);
             } else if (lexer_.peek().type == TokType::IDENT) {
                 std::string rhs_name = lexer_.next().text;
                 if (lexer_.peek().type != TokType::LPAREN)

@@ -183,6 +183,13 @@ Token Lexer::next() {
         if (c == '-') text += input_[pos_++];
         while (pos_ < input_.size() && std::isdigit(input_[pos_]))
             text += input_[pos_++];
+        // a decimal part (50.087, for coordinates and distances); a dot not followed by a digit
+        // stays a DOT
+        if (pos_ + 1 < input_.size() && input_[pos_] == '.' && std::isdigit(static_cast<unsigned char>(input_[pos_ + 1]))) {
+            text += input_[pos_++];
+            while (pos_ < input_.size() && std::isdigit(input_[pos_]))
+                text += input_[pos_++];
+        }
         return {TokType::NUMBER, text, start};
     }
 

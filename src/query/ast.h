@@ -298,19 +298,31 @@ enum class GlobalFunctionType {
     /// Layer B (nested + `.par`): child row's parent id == parent's region index.
     RCHILD,
     /// Layer B: parent dominates child on `.par` tree (transitive; reflexive).
-    RCONTAINS
+    RCONTAINS,
+    /// Geolocations (core/geo.h): lat(x), lon(x) of a location value; geodist(x, lat, lon) or
+    /// geodist(x, y) in km. Compared as decimals.
+    LAT,
+    LON,
+    GEODIST
 };
+
+/// Functions whose value is a decimal number (compared with GlobalFunctionFilter::dbl_value).
+inline bool is_geo_function(GlobalFunctionType f) {
+    return f == GlobalFunctionType::LAT || f == GlobalFunctionType::LON || f == GlobalFunctionType::GEODIST;
+}
 
 // A single function call: func(args...)
 struct GlobalFuncCall {
     GlobalFunctionType func;
-    std::vector<std::string> args;  // token names or name.attr specs
+    std::vector<std::string> args;  // token names or name.attr specs (numbers for geodist)
 };
 
 struct GlobalFunctionFilter {
     GlobalFuncCall lhs;                     // left-hand side: always a function call
     CompOp op = CompOp::EQ;
     int64_t int_value = 0;                  // numeric RHS (used when !rhs_func)
+    double dbl_value = 0;                   // the same number as written (50.5): for decimal comparisons
+    bool rhs_is_decimal = false;            // the RHS number has a decimal part
     bool has_rhs_func = false;              // true when RHS is a function call
     GlobalFuncCall rhs;                     // right-hand side function (when has_rhs_func)
 };

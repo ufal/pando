@@ -1,4 +1,5 @@
 #include "query/executor.h"
+#include "query/geo_fields.h"
 #include <cctype>
 #include <stdexcept>
 #include <string>
@@ -9,6 +10,8 @@ namespace pando {
 std::string read_tabulate_field(const Corpus& corpus, const Match& m,
                                 const NameIndexMap& name_map,
                                 const std::string& field) {
+    // lat(), lon(), geodist(), geocell() of a location attribute (query/geo_fields.cpp)
+    if (auto geo = evaluate_geo_tabulate_field(corpus, m, name_map, field)) return *geo;
     enum class DatePartKind { None, Year, Century, Decade, Month, Week, Day };
     DatePartKind date_part = DatePartKind::None;
     std::string requested = field;

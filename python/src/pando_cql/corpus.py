@@ -15,6 +15,9 @@ from pando_cql.table import Table
 
 # `tabulate Last 0 N`: every hit
 _ALL_ROWS = 2**62
+# pando's count answers show at most `group_limit` values of the first field and `child_limit` under
+# each (20) — display limits for people; data for analysis needs every row
+_ALL_GROUPS = ("set group_limit 0", "set child_limit 0")
 
 
 class Corpus:
@@ -27,6 +30,10 @@ class Corpus:
 
     ``Corpus.open`` validates that the corpus looks like a pando index and that
     a usable ``pando`` binary can be found (argument, ``PANDO_BIN``, or PATH).
+
+    Counts are complete: every combination of values is a row (``all_groups=True``).
+    pando's own answers stop at 20 values under each group, which suits a screen, not
+    an analysis; ``all_groups=False`` keeps those limits.
 
     Example::
 
@@ -47,10 +54,13 @@ class Corpus:
         extra_args: Optional[list[str]] = None,
         session: bool = True,
         check_pando: bool = True,
+        all_groups: bool = True,
     ) -> None:
         self.corpus_dir = validate_corpus_dir(corpus_dir)
         self.pando_bin = find_pando_binary(pando_bin, check_runs=check_pando)
         self.extra_args = list(extra_args or [])
+        self.all_groups = all_groups
+        self._groups_set = False   # the session's limits are switched off before its first query
         self._session: Optional[CliSession] = None
         if session:
             # Binary already validated above; skip a second --version probe.
@@ -70,6 +80,7 @@ class Corpus:
         extra_args: Optional[list[str]] = None,
         session: bool = True,
         check_pando: bool = True,
+        all_groups: bool = True,
     ) -> "Corpus":
         return cls(
             corpus_dir,
@@ -77,12 +88,26 @@ class Corpus:
             extra_args=extra_args,
             session=session,
             check_pando=check_pando,
+            all_groups=all_groups,
         )
 
+    def _session_all_groups(self) -> None:
+        """Switch off the session's count limits once (settings persist in a session)."""
+        if self._session is None or not self.all_groups or self._groups_set:
+            return
+        for setting in _ALL_GROUPS:
+            answer = self._session.run_raw(setting)
+            if answer.get("ok") is False:
+                raise PandoCqlError(f"pando: {setting}: {answer.get('error')}")
+        self._groups_set = True
+
     def run(self, cql: str) -> Any:
-        """Run a CQL program. Count/group → ``list[dict]``; else JSON ``result``."""
+        """Run a CQL program. Count/group → ``list[dict]`` (every group); else JSON ``result``."""
         if self._session is not None:
+            self._session_all_groups()
             return self._session.run(cql)
+        if self.all_groups:
+            cql = "; ".join(_ALL_GROUPS) + "; " + cql
         return run_oneshot(
             self.corpus_dir,
             cql,

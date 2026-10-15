@@ -4,6 +4,9 @@ Python client for [pando](https://github.com/teitok/pando): run CQL via the `pan
 
 - **No C++ changes** required — uses existing `pando --api --json`.
 - Multi-field count **hierarchy stays in the CLI**; this package flattens leaf rows in Python only.
+- **Counts are complete**: every combination of values is a row. pando's own answers stop at 20
+  values under each group (a display limit); the package switches that off (`all_groups=False`
+  keeps it). Before 0.2.1 multi-field counts were silently cut at those limits.
 - CQL `as` aliases are **not** required (use `DataFrame.rename`).
 
 ## Install
@@ -79,3 +82,27 @@ bootstrap intervals and without pandas: `examples/word_order_universals.py`.
 ## Design tracker
 
 See [`../dev/pando_cql_python.md`](../dev/pando_cql_python.md).
+
+## Map layers for dialect data (`pando_geo`)
+
+`pando_geo` turns variation in a geotagged corpus into GIS layers. An atlas file (TOML) names the
+corpus, the attribute with each text's place and its coordinates (`text_place`, `text_geo`: "lat lon",
+"lat,lon", a `geo:` URI or WKT `POINT(lon lat)`, as pando's `geodist()` reads them), and the
+variables: a query whose hits vary, the field that holds the variant, and patterns that group its
+values into variants. Per variable it writes, in EPSG:4326:
+
+- `NAME_points.geojson`: one point per place, with `n`, `count_*` and `share_*` per variant and the
+  `dominant` variant (places below `min_n` hits are left out);
+- `NAME_voronoi.geojson`: the Voronoi (Thiessen) cell of each place, with the same properties: areas
+  from where the data is, not from administrative borders (clipped to a box around the places);
+- `NAME.svg`: a preview (cells coloured by the dominant variant, paler where it is less dominant);
+- `NAME.html`: the same as a web map on OpenStreetMap (Leaflet; click a place for its counts). It loads
+  Leaflet and the map tiles from the internet.
+
+```bash
+pip install -e './python[geo]'
+pando-geo examples/archimob_atlas.toml --out maps        # or: python -m pando_geo …
+```
+
+Open the GeoJSON in QGIS (or any GIS); the example maps Swiss German *nicht* (nöd / nüd / nid / ned /
+nit) and the diphthong of *gesagt* in the ArchiMob interviews.

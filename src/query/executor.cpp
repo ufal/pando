@@ -1,4 +1,5 @@
 #include "query/executor.h"
+#include "core/geo.h"
 #include "core/regex_engine.h"
 #include "query/bitmap_expr.h"
 #include "query/flat_agg_counter.h"
@@ -1128,6 +1129,15 @@ static void append_func_call_token_args(const GlobalFuncCall& fc, std::vector<st
         case GlobalFunctionType::GAPS:
             if (!fc.args.empty()) out->push_back(fc.args[0]);
             break;
+        case GlobalFunctionType::LAT:
+        case GlobalFunctionType::LON:
+        case GlobalFunctionType::GEODIST:
+            // the location arguments (a.text_geo): their token labels; numbers are coordinates
+            for (const auto& a : fc.args) {
+                auto dot = a.find('.');
+                if (dot != std::string::npos && dot > 0 && !geo_parse_number(a)) out->push_back(a.substr(0, dot));
+            }
+            break;
     }
 }
 
@@ -1148,6 +1158,29 @@ static void validate_global_func_filter_token_labels(const GlobalFunctionFilter&
                                                      const std::unordered_set<std::string>& token_labels,
                                                      const std::unordered_set<std::string>& region_labels) {
     auto check_call = [&](const GlobalFuncCall& fc) {
+        if (is_geo_function(fc.func)) {
+            const bool dist = fc.func == GlobalFunctionType::GEODIST;
+            const char* fn = dist ? "geodist" : (fc.func == GlobalFunctionType::LAT ? "lat" : "lon");
+            if (!dist && fc.args.size() != 1)
+                throw std::runtime_error(std::string(fn) + "(...) takes one location, e.g. " + fn + "(a.text_geo)");
+            if (dist && fc.args.size() != 2 && fc.args.size() != 3)
+                throw std::runtime_error("geodist(...) takes two locations, geodist(a.text_geo, b.text_geo), or a location and "
+                                         "a latitude and longitude, geodist(a.text_geo, 50.08, 14.42)");
+            if (dist && fc.args.size() == 3 && (!geo_parse_number(fc.args[1]) || !geo_parse_number(fc.args[2])))
+                throw std::runtime_error("geodist(x, lat, lon): latitude and longitude must be numbers");
+            const size_t locations = dist && fc.args.size() == 3 ? 1 : fc.args.size();
+            for (size_t i = 0; i < locations; ++i) {
+                if (geo_parse_number(fc.args[i]))
+                    throw std::runtime_error(std::string(fn) + "(...): a location (an attribute such as text_geo) is needed, not a number");
+                auto dot = fc.args[i].find('.');
+                if (dot != std::string::npos && dot > 0) {
+                    const std::string prefix = fc.args[i].substr(0, dot);
+                    if (!token_labels.count(prefix) && !region_labels.count(prefix))
+                        throw std::runtime_error("Global filter (:: ...): unknown name '" + prefix + "' in " + fn + "(...)");
+                }
+            }
+            return;
+        }
         if (fc.func == GlobalFunctionType::YEAR || fc.func == GlobalFunctionType::CENTURY
             || fc.func == GlobalFunctionType::DECADE || fc.func == GlobalFunctionType::MONTH
             || fc.func == GlobalFunctionType::WEEK || fc.func == GlobalFunctionType::DAY) {
@@ -9299,58 +9332,59 @@ void QueryExecutor::apply_global_filters(const TokenQuery& query, const NameInde
         if (pass) {
             // Evaluate a single GlobalFuncCall against a match.
             // Returns {true, value} on success, {false, 0} on failure (match rejected).
-            auto eval_func = [&](const GlobalFuncCall& fc) -> std::pair<bool, int64_t> {
-                auto resolve_date_spec = [&](const std::string& spec) -> std::optional<std::string> {
-                    auto dot = spec.find('.');
-                    if (dot != std::string::npos) {
-                        if (dot == 0 || dot + 1 >= spec.size()) return std::nullopt;
-                        std::string prefix = spec.substr(0, dot);
-                        std::string suffix = spec.substr(dot + 1);
+            // an attribute's value for this hit (a.text_date, text_geo, a region binding's attribute)
+            auto resolve_date_spec = [&](const std::string& spec) -> std::optional<std::string> {
+                auto dot = spec.find('.');
+                if (dot != std::string::npos) {
+                    if (dot == 0 || dot + 1 >= spec.size()) return std::nullopt;
+                    std::string prefix = spec.substr(0, dot);
+                    std::string suffix = spec.substr(dot + 1);
 
-                        CorpusPos p = resolve_name(m, name_map, prefix);
-                        std::string attr_name = normalize_attr(suffix);
-                        if (p != NO_HEAD && corpus_.has_attr(attr_name)) {
-                            return std::string(corpus_.attr(attr_name).value_at(p));
-                        }
-                        // a region attribute of a named token (a.text_year): the region holding it
-                        RegionAttrParts tparts;
-                        if (p != NO_HEAD && split_region_attr_name(suffix, tparts)
-                            && corpus_.has_structure(tparts.struct_name)) {
-                            const auto& sa = corpus_.structure(tparts.struct_name);
-                            auto rkey = resolve_region_attr_key(sa, tparts.struct_name, tparts.attr_name);
-                            if (!rkey) return std::nullopt;
-                            int64_t rgn = sa.find_region(p);
-                            if (rgn < 0) return std::nullopt;
-                            return std::string(sa.region_value(*rkey, static_cast<size_t>(rgn)));
-                        }
-
-                        auto nr = m.named_regions.find(prefix);
-                        if (nr != m.named_regions.end() && corpus_.has_structure(nr->second.struct_name)) {
-                            const auto& sa = corpus_.structure(nr->second.struct_name);
-                            auto rkey = resolve_region_attr_key(sa, nr->second.struct_name, suffix);
-                            if (!rkey) return std::nullopt;
-                            if (nr->second.region_idx >= sa.region_count()) return std::nullopt;
-                            return std::string(sa.region_value(*rkey, nr->second.region_idx));
-                        }
-                        return std::nullopt;
+                    CorpusPos p = resolve_name(m, name_map, prefix);
+                    std::string attr_name = normalize_attr(suffix);
+                    if (p != NO_HEAD && corpus_.has_attr(attr_name)) {
+                        return std::string(corpus_.attr(attr_name).value_at(p));
                     }
-
-                    std::string attr_name = normalize_attr(spec);
-                    if (corpus_.has_attr(attr_name)) {
-                        return std::string(corpus_.attr(attr_name).value_at(m.first_pos()));
-                    }
-
-                    RegionAttrParts parts;
-                    if (split_region_attr_name(spec, parts) && corpus_.has_structure(parts.struct_name)) {
-                        const auto& sa = corpus_.structure(parts.struct_name);
-                        auto rkey = resolve_region_attr_key(sa, parts.struct_name, parts.attr_name);
+                    // a region attribute of a named token (a.text_year): the region holding it
+                    RegionAttrParts tparts;
+                    if (p != NO_HEAD && split_region_attr_name(suffix, tparts)
+                        && corpus_.has_structure(tparts.struct_name)) {
+                        const auto& sa = corpus_.structure(tparts.struct_name);
+                        auto rkey = resolve_region_attr_key(sa, tparts.struct_name, tparts.attr_name);
                         if (!rkey) return std::nullopt;
-                        int64_t rgn = sa.find_region(m.first_pos());
+                        int64_t rgn = sa.find_region(p);
                         if (rgn < 0) return std::nullopt;
                         return std::string(sa.region_value(*rkey, static_cast<size_t>(rgn)));
                     }
+
+                    auto nr = m.named_regions.find(prefix);
+                    if (nr != m.named_regions.end() && corpus_.has_structure(nr->second.struct_name)) {
+                        const auto& sa = corpus_.structure(nr->second.struct_name);
+                        auto rkey = resolve_region_attr_key(sa, nr->second.struct_name, suffix);
+                        if (!rkey) return std::nullopt;
+                        if (nr->second.region_idx >= sa.region_count()) return std::nullopt;
+                        return std::string(sa.region_value(*rkey, nr->second.region_idx));
+                    }
                     return std::nullopt;
-                };
+                }
+
+                std::string attr_name = normalize_attr(spec);
+                if (corpus_.has_attr(attr_name)) {
+                    return std::string(corpus_.attr(attr_name).value_at(m.first_pos()));
+                }
+
+                RegionAttrParts parts;
+                if (split_region_attr_name(spec, parts) && corpus_.has_structure(parts.struct_name)) {
+                    const auto& sa = corpus_.structure(parts.struct_name);
+                    auto rkey = resolve_region_attr_key(sa, parts.struct_name, parts.attr_name);
+                    if (!rkey) return std::nullopt;
+                    int64_t rgn = sa.find_region(m.first_pos());
+                    if (rgn < 0) return std::nullopt;
+                    return std::string(sa.region_value(*rkey, static_cast<size_t>(rgn)));
+                }
+                return std::nullopt;
+            };
+            auto eval_func = [&](const GlobalFuncCall& fc) -> std::pair<bool, int64_t> {
 
                 switch (fc.func) {
                 case GlobalFunctionType::DISTANCE:
@@ -9542,11 +9576,62 @@ void QueryExecutor::apply_global_filters(const TokenQuery& query, const NameInde
                     if (m.named_regions.count(fc.args[0])) return {true, 0};   // a region is contiguous
                     return {false, 0};
                 }
+                case GlobalFunctionType::LAT:
+                case GlobalFunctionType::LON:
+                case GlobalFunctionType::GEODIST:
+                    return {false, 0};   // decimals: eval_geo
                 }
                 return {false, 0};
             };
 
+            // a location (core/geo.h) from an attribute spec, as date functions read dates
+            auto eval_location = [&](const std::string& spec) -> std::optional<GeoPoint> {
+                auto val = resolve_date_spec(spec);
+                return val ? parse_geo(*val) : std::nullopt;
+            };
+            // lat / lon / geodist: decimal values (nullopt: the hit has no location)
+            auto eval_geo = [&](const GlobalFuncCall& fc) -> std::optional<double> {
+                if (fc.args.empty()) return std::nullopt;
+                auto a = eval_location(fc.args[0]);
+                if (!a) return std::nullopt;
+                if (fc.func == GlobalFunctionType::LAT) return a->lat;
+                if (fc.func == GlobalFunctionType::LON) return a->lon;
+                if (fc.args.size() == 3) {
+                    auto lat = geo_parse_number(fc.args[1]), lon = geo_parse_number(fc.args[2]);
+                    if (!lat || !lon) return std::nullopt;
+                    return geo_distance_km(*a, GeoPoint{*lat, *lon});
+                }
+                auto b = fc.args.size() == 2 ? eval_location(fc.args[1]) : std::nullopt;
+                if (!b) return std::nullopt;
+                return geo_distance_km(*a, *b);
+            };
+            auto eval_decimal = [&](const GlobalFuncCall& fc) -> std::optional<double> {
+                if (is_geo_function(fc.func)) return eval_geo(fc);
+                auto [ok, v] = eval_func(fc);
+                return ok ? std::optional<double>(static_cast<double>(v)) : std::nullopt;
+            };
+
             for (const auto& ff : query.global_function_filters) {
+                // decimals: a geo function on either side, or a number like 49.5
+                if (is_geo_function(ff.lhs.func) || (ff.has_rhs_func && is_geo_function(ff.rhs.func)) || ff.rhs_is_decimal) {
+                    auto l = eval_decimal(ff.lhs);
+                    std::optional<double> r = ff.has_rhs_func ? eval_decimal(ff.rhs)
+                        : std::optional<double>(ff.rhs_is_decimal ? ff.dbl_value : static_cast<double>(ff.int_value));
+                    if (!l || !r) { pass = false; break; }
+                    bool ok = false;
+                    switch (ff.op) {
+                        case CompOp::EQ:  ok = (*l == *r); break;
+                        case CompOp::NEQ: ok = (*l != *r); break;
+                        case CompOp::LT:  ok = (*l <  *r); break;
+                        case CompOp::GT:  ok = (*l >  *r); break;
+                        case CompOp::LTE: ok = (*l <= *r); break;
+                        case CompOp::GTE: ok = (*l >= *r); break;
+                        case CompOp::REGEX:
+                        case CompOp::IN:  ok = false; break;
+                    }
+                    if (!ok) { pass = false; break; }
+                    continue;
+                }
                 auto [lhs_ok, lhs_val] = eval_func(ff.lhs);
                 if (!lhs_ok) { pass = false; break; }
 

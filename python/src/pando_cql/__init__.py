@@ -15,4 +15,4 @@ __all__ = [
     "validate_corpus_dir",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
