@@ -229,6 +229,7 @@ Used after `::`, mostly with named tokens:
 | function | example | meaning |
 | --- | --- | --- |
 | `a < b`, `a > b` | `:: a > b` | token a comes after token b in the corpus |
+| `a != b` | `:: a != b` | a and b are different tokens (two names in a chain may otherwise match the same token) |
 | `distance` | `distance(a,b) < 5` | a is less than 5 tokens before b |
 | `distabs` | `distabs(a,b) < 5` | a and b are less than 5 tokens apart |
 | `strlen` | `strlen(a.lemma) = 3` | length of the value (characters) |

@@ -13,6 +13,19 @@ For continuity with other tools, Pando can accept **dialect front-ends** (`--cql
 
 Run **`pando --help`** for the dialects compiled into your binary (`cwb` appears only when that dialect is enabled).
 
+The same dialects through the server and the library (pando-server, libflexicorp_pando, the C API):
+the request field **`"dialect"`** on `/query` and `/run` (`native` / `pando-cql`, `cwb` / `cwb-cql`,
+`pmltq`, `tiger`; an unknown name is a 400). One entry point for the CLI and the server,
+`parse_in_dialect` (`src/query/dialect/dialect.h`); the dialect is part of the result cache's and the
+count jobs' keys, and the tier's denied features are checked on the translated query. FQS passes its
+`language` flag on as this field.
+
+A program can start with a query in a dialect and go on with pando's own steps: when the dialect
+cannot read the whole text, the part up to the first `;` (outside quotes and brackets) is read in the
+dialect and the rest as pando CQL (`a-node [ lemma = "be" ]; freq by upos` with `pmltq`). This is how
+PML-TQ queries are followed up: pando's `freq` / `count by` / `coll` steps instead of PML-TQ's `>>`
+output filters.
+
 ---
 
 ## Availability in builds
@@ -62,18 +75,25 @@ To disable a dialect: configure with **`-DPANDO_CWB_DIALECT=OFF`** or **`-DPANDO
 
 **Two-stage translation:**
 
-1. **Native lexer/parser** — accepts a **single** query shape: one **selector** (`a-node`, `a-root`, `tok`, or a bare **`[ … ]`** token selector), optional **`$name :=`**, a condition in **`[ … ]`**, and an optional **`>>`** output block. If the input does not fit this grammar, parsing fails and the implementation may try (2).
-2. **Gold AST bridge** (optional) — if environment variable **`PMLTQ_GOLD_JS_DIR`** is set, the query string is passed to an external **Node.js** pipeline (PEG parse → JSON AST). That AST is then lowered to a native program. **`PMLTQ_GOLD_SCRIPT`** can override the parser script path. This path is for **broader** PML-TQ surface coverage when the tooling is installed.
+1. **Native lexer/parser** — follows the query part of perl-pmltq's grammar (`tree_query_grammar.txt`) and builds pando's query AST directly (no CQL text in between). If the input does not fit, parsing fails and the implementation may try (2).
+2. **Gold AST bridge** (optional) — if environment variable **`PMLTQ_GOLD_JS_DIR`** is set, the query string is passed to an external **Node.js** pipeline (PEG parse → JSON AST). That AST is then lowered to a native program. **`PMLTQ_GOLD_SCRIPT`** can override the parser script path.
 
 If neither path succeeds, translation fails (the error text mentions whether the gold bridge was unavailable).
 
-**Native selector keywords:** **`a-node`**, **`a-root`**, **`tok`** — not arbitrary PML node type names.
+**What the native parser reads:**
 
-**Note (`t-node` and fuller PML-TQ):** In many PML-TQ corpora, **`t-node`** names the **terminal / token** layer (distinct from **`a-node`** analytics). The **native** parser here does **not** yet treat **`t-node`** as a selector keyword (use **`tok`** or the gold bridge path where applicable). Whether **`t-node`** should become a first-class synonym for **`tok`**, or whether a richer mapping from PML layers is needed, depends on **what PML-TQ users expect** in this corpus model and on **how far** broader PML-TQ support is taken (native grammar growth vs gold bridge vs staying token+region–focused). That is a **product/roadmap** decision, not fixed in the engine alone.
+- **One top-level selector**: a node type (`a-node`, `t-node`, `node`, `*`, … — all read as a token; or none: `[ … ]`), an optional **`$name :=`**, and the conditions in `[ … ]`.
+- **Conditions** joined by **`,`** or **`and`**: tests with **`=` / `!=`** (the value as it is), **`~` / `!~`** (a regular expression anywhere in the value), **`~*` / `!~*`** (ignoring case), **`<` `>` `<=` `>=`**, **`in { … }` / `!in { … }`**; **`or`**, **`!`** and parentheses.
+- **Nested nodes** with **`child`** (the default), **`parent`**, **`descendant`**, **`ancestor`**, **`sibling`**. As in PML-TQ, a nested node in the condition list is a **node of the match**: `a-node [ upos = "VERB", child a-node [ deprel = "obj" ] ]` gives one result per verb–object pair, and becomes the chain `n1:[upos="VERB"] > n2:[deprel="obj"]`. Names given with `$o :=` are the tokens' names, so later steps can use them (`; freq by o.lemma`).
+- **Subqueries** — a nested node with **occurrences** (`0x`, `1+x`, `2x`, `2-x`, `1..3x`, alternatives `0|2+x`), or after `and` / under `or` / `!` (as 1+x) — are **conditions** on the outer node: `child [...]`, `not child [...]`, `count(child [...]) >= 2`. One result per outer node.
+- **References** between nodes of the match: `lemma = $v.lemma` (the same value on both), `$a != $b`.
+- Different nodes are different tokens (PML-TQ; `+` before a nested node lets it overlap).
+
+**What it does not read:** the nodes of the match must form a **chain** — each related to at most two others (a verb with a subject and an object is a chain; with a subject, an object and an adverbial it is not: give the extra nodes occurrences, `1+x child a-node [ … ]`). Optional nodes (`?child`), relations other than the five above (`order-precedes`, `depth-first-…`, `same-tree-as`, PML references), lengths (`descendant{1,3}`), functions in tests (`sons()`, `lower()`), several top-level selectors, and `member`. Of the **`>>`** output filters only `>> distinct $a.attr, …` and `count(over $a.attr)`; a query is followed up with pando's own steps instead: `a-node $v := [ … ]; freq by v.lemma` (see above).
 
 **`--pmltq-export-sql`:** Emits **ClickPMLTQ-style SQL** only (no corpus load). Requires **`--cql pmltq`**, a query on the command line, and the **JavaScript** helpers described in **`pando --help`** (typically a **`pmltq2sql-optimized.js`** next to the PEG bundle, plus **`PMLTQ_GOLD_JS_DIR`**).
 
-**Gaps / difficulty:** What the dialect still does not lower (especially **`>>` output filters**, nested selectors, multi-selector queries) is inventoried with effort estimates in **[`dev/PMLTQ-ROADMAP.md`](../dev/PMLTQ-ROADMAP.md)**.
+**Gaps / difficulty:** What the dialect still does not lower (especially **`>>` output filters**, nodes that do not form a chain, multi-selector queries) is inventoried with effort estimates in **[`dev/PMLTQ-ROADMAP.md`](../dev/PMLTQ-ROADMAP.md)**.
 
 ---
 

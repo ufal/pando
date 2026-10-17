@@ -1,3 +1,4 @@
+#include "query/dialect/dialect.h"
 #include "api/query_json.h"
 #include "index/index_publish.h"
 #include "core/json_utils.h"
@@ -173,11 +174,10 @@ std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
     return run_single_query(corpus, query_text, opts, nullptr);
 }
 
-bool query_is_parallel(const std::string& query_text, bool strict_quoted_strings) {
+bool query_is_parallel(const std::string& query_text, bool strict_quoted_strings, const std::string& dialect) {
     if (query_text.find("with") == std::string::npos) return false;
     try {
-        Parser parser(query_text, ParserOptions{strict_quoted_strings});
-        Program prog = parser.parse();
+        Program prog = parse_in_dialect(query_text, dialect, ParserOptions{strict_quoted_strings});
         return !prog.empty() && prog[0].has_query && prog[0].is_parallel;
     } catch (const std::exception&) {
         return false;
@@ -188,8 +188,7 @@ std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
                                             const std::string& query_text,
                                             const QueryOptions& opts,
                                             ExecProgress* progress) {
-    Parser parser(query_text, ParserOptions{opts.strict_quoted_strings});
-    Program prog = parser.parse();
+    Program prog = parse_in_dialect(query_text, opts.dialect, ParserOptions{opts.strict_quoted_strings}, &corpus);
     if (prog.empty() || !prog[0].has_query)
         return {MatchSet{}, 0.0};
 

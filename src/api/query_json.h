@@ -34,6 +34,9 @@ struct QueryOptions {
     std::vector<std::string> attrs;  // empty = all token attributes in JSON; else only these
     /// When true: only `/pattern/` is regex; quoted strings are literal (matches `--strict-quoted-strings` on CLI).
     bool strict_quoted_strings = false;
+    /// The query's language (query/dialect/dialect.h): "" / "native" = pando CQL, "cwb", "pmltq", "tiger"
+    /// (the CLI's --cql; the server's "dialect"). Part of the result cache's and the count jobs' keys.
+    std::string dialect;
     /// Alignment filters (`:: a.attr = b.attr`): include empty/"_" values (legacy behavior).
     bool allow_empty_alignment = false;
     /// P4.1: count the total over this many position ranges in parallel (1 = one thread).
@@ -54,7 +57,7 @@ struct QueryOptions {
 // Run a single query (one statement, no trailing command). Returns (MatchSet, elapsed_ms).
 /// True when the first statement is an aligned `… with …` query (run_single_query
 /// then returns every pair, whatever the page).
-bool query_is_parallel(const std::string& query_text, bool strict_quoted_strings = false);
+bool query_is_parallel(const std::string& query_text, bool strict_quoted_strings = false, const std::string& dialect = "");
 
 std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
                                             const std::string& query_text,
@@ -227,6 +230,8 @@ struct ProgramOptions {
     int context    = 5;
     bool total     = false;
     bool strict_quoted_strings = false;
+    /// The program's language (as QueryOptions::dialect).
+    std::string dialect;
     bool allow_empty_alignment = false;
     size_t group_limit = 1000;
     /// P6.6: `count by A, B`: values of B (and further fields) under each A (0 = all).

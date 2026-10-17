@@ -352,7 +352,7 @@ struct TokenQuery {
     // Global position ordering constraints: :: a < b
     struct PositionOrder {
         std::string name1, name2;
-        CompOp op;  // LT or GT
+        CompOp op;  // LT or GT; NEQ: two different tokens
     };
     std::vector<PositionOrder> position_orders;
 };

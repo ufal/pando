@@ -97,6 +97,7 @@ if(PANDO_PMLTQ_DIALECT)
         src/query/dialect/pmltq/pmltq_parser.cpp
         src/query/dialect/pmltq/pmltq_test_lower.cpp
         src/query/dialect/pmltq/pmltq_native_lower.cpp
+        src/query/dialect/pmltq/pmltq_cond_lower.cpp
         src/query/dialect/pmltq/pmltq_gold_json.cpp
         src/query/dialect/pmltq/pmltq_gold_bridge.cpp
         src/query/dialect/pmltq/pmltq_gold_lower.cpp
@@ -157,6 +158,7 @@ add_library(pando_core STATIC
     src/query/lexer.cpp
     src/query/parser.cpp
     src/query/dialect/tiger/tiger_translate.cpp
+    src/query/dialect/dialect.cpp
     src/query/executor.cpp
     src/query/executor_aggregate.cpp
     src/query/executor_sort.cpp
@@ -253,6 +255,9 @@ if(BUILD_TESTING)
     add_executable(tiger_dialect_test src/query/dialect/tiger/tiger_dialect_test.cpp)
     target_link_libraries(tiger_dialect_test PRIVATE pando_core)
     add_test(NAME tiger_dialect COMMAND tiger_dialect_test)
+    add_executable(dialect_test src/query/dialect/dialect_test.cpp)
+    target_link_libraries(dialect_test PRIVATE pando_core)
+    add_test(NAME dialect COMMAND dialect_test)
     add_executable(parser_quoted_test src/query/parser_quoted_test.cpp)
     target_link_libraries(parser_quoted_test PRIVATE pando_core)
     add_test(NAME parser_quoted COMMAND parser_quoted_test)

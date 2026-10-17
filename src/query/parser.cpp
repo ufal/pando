@@ -1724,9 +1724,10 @@ void Parser::parse_global_filters(TokenQuery& tq) {
                                              "(`=` compares, `name:` binds)");
                 throw std::runtime_error("Expected `" + t.text + ".attr`, a function or a "
                                          "struct_attr before `=` in global filter");
-            } else if (next.type == TokType::LT || next.type == TokType::GT) {
-                // Positional ordering: :: a < b or :: a > b (no '_' in first name — not struct_attr)
-                CompOp op = (next.type == TokType::LT) ? CompOp::LT : CompOp::GT;
+            } else if (next.type == TokType::LT || next.type == TokType::GT || next.type == TokType::NEQ) {
+                // Positional ordering: :: a < b or :: a > b, and :: a != b (two different tokens)
+                // (no '_' in first name — not struct_attr)
+                CompOp op = next.type == TokType::LT ? CompOp::LT : next.type == TokType::GT ? CompOp::GT : CompOp::NEQ;
                 lexer_.consume();
                 Token name2 = lexer_.expect(TokType::IDENT);
                 tq.position_orders.push_back({t.text, name2.text, op});

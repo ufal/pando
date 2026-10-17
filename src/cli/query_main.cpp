@@ -11,6 +11,7 @@
 #include "query/dialect/cwb/cwb_translate.h"
 #include "query/dialect/pmltq/pmltq_translate.h"
 #include "query/dialect/tiger/tiger_translate.h"
+#include "query/dialect/dialect.h"
 #include <cctype>
 #include "query/executor.h"
 #include <iostream>
@@ -2411,42 +2412,15 @@ static bool query_has_labeled_token(const TokenQuery& q, const std::string& labe
 
 static void run_query(const Corpus& corpus, const std::string& input,
                       Options& opts, Session& session, QueryTiming* out_timing = nullptr) {
-    Program prog;
-    std::string d = opts.cql_dialect;
-    for (char& c : d)
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    if (d.empty())
-        d = "native";
+    // the dialect (--cql): the same entry point as the server's "dialect" (query/dialect/dialect.h)
     ParserOptions parse_opts{opts.strict_quoted_strings};
-    if (d == "native") {
-        Parser parser(input, parse_opts);
-        prog = parser.parse();
-    } else if (d == "cwb") {
-        std::string cwb_trace;
-        prog = translate_cwb_program(input, opts.debug_level,
-                                       opts.debug_level > 0 ? &cwb_trace : nullptr);
-        if (opts.debug_level > 0 && !cwb_trace.empty())
-            std::cerr << cwb_trace;
-    } else if (d == "pmltq") {
-        std::string pmltq_trace;
-        prog = translate_pmltq_program(input, opts.debug_level,
-                                       opts.debug_level > 0 ? &pmltq_trace : nullptr);
-        if (opts.debug_level > 0 && !pmltq_trace.empty())
-            std::cerr << pmltq_trace;
-    } else if (d == "tiger") {
-        std::string tiger_trace;
-        // category attribute of the node layer: `cat` (TEITOK) when the corpus has it, else `type`
-        std::string cat_attr = "type";
-        if (corpus.has_structure("node") && corpus.structure("node").has_region_attr("cat")
-            && !corpus.structure("node").has_region_attr("type"))
-            cat_attr = "cat";
-        prog = translate_tiger_program(input, opts.debug_level,
-                                       opts.debug_level > 0 ? &tiger_trace : nullptr, parse_opts, cat_attr);
-        if (opts.debug_level > 0 && !tiger_trace.empty())
-            std::cerr << tiger_trace;
-    } else {
+    if (normalize_dialect(opts.cql_dialect).empty())
         throw std::runtime_error("Unknown --cql dialect: " + opts.cql_dialect);
-    }
+    std::string dialect_trace;
+    Program prog = parse_in_dialect(input, opts.cql_dialect, parse_opts, &corpus, opts.debug_level,
+                                    opts.debug_level > 0 ? &dialect_trace : nullptr);
+    if (opts.debug_level > 0 && !dialect_trace.empty())
+        std::cerr << dialect_trace;
 
     // Apply --max-gap: clamp unbounded repetition to user-configured cap
     if (opts.max_gap != REPEAT_UNBOUNDED) {

@@ -2,6 +2,7 @@
 // Runs a complete CQL program (queries + commands) and returns JSON output.
 // Lives in the pando_api library so both pando CLI and pando-server can use it.
 
+#include "query/dialect/dialect.h"
 #include "api/query_json.h"
 #include "query/keyness_select.h"
 #include "api/coll_counts.h"
@@ -575,9 +576,7 @@ MatchSet query_page_of(const Corpus& corpus, QueryExecutor& ex, const HitSet& hs
 
 void ProgramSession::store_query(const Corpus& corpus, const std::string& name, const std::string& query_text,
                                  const QueryOptions& opts, const MatchSet& result) {
-    (void)corpus;
-    Parser parser(query_text, ParserOptions{opts.strict_quoted_strings});
-    auto prog = std::make_shared<Program>(parser.parse());
+    auto prog = std::make_shared<Program>(parse_in_dialect(query_text, opts.dialect, ParserOptions{opts.strict_quoted_strings}, &corpus));
     size_t si = 0;
     while (si < prog->size() && !(*prog)[si].has_query) ++si;
     if (si == prog->size()) throw std::runtime_error("not a query: " + query_text);
@@ -2096,8 +2095,7 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                              const std::string& cql, ProgramOptions opts) {
     auto& S = *ps.impl_;
 
-    Parser parser(cql, ParserOptions{opts.strict_quoted_strings});
-    auto prog = std::make_shared<Program>(parser.parse());
+    auto prog = std::make_shared<Program>(parse_in_dialect(cql, opts.dialect, ParserOptions{opts.strict_quoted_strings}, &corpus));
     const unsigned threads = std::max(1u, opts.threads);
 
     QueryExecutor executor(corpus);

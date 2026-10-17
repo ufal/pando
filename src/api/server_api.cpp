@@ -1,3 +1,4 @@
+#include "query/dialect/dialect.h"
 #include "api/server_api.h"
 
 #include "core/build_info.h"
@@ -409,12 +410,12 @@ ServerApi::RequestLimits ServerApi::request_limits(const std::string& body) cons
 }
 
 std::optional<ServerResponse> ServerApi::check_denied(const std::string& text, bool strict,
-                                                      const RequestLimits& rl) const {
+                                                      const RequestLimits& rl, const std::string& dialect) const {
     if (rl.lim.deny.empty()) return std::nullopt;
     Program prog;
     try {
-        Parser parser(text, ParserOptions{strict});
-        prog = parser.parse();
+        // in the query's own language: a translated query is checked as what it runs as
+        prog = parse_in_dialect(text, dialect, ParserOptions{strict}, &corpus_);
     } catch (const std::exception&) {
         return std::nullopt;
     }
@@ -617,13 +618,17 @@ ServerResponse ServerApi::run(const std::string& body) {
     opts.group_limit = json_extract_num(body, "group_limit", 1000);
     opts.child_limit = json_extract_num(body, "child_limit", 20);
     opts.strict_quoted_strings = json_extract_bool(body, "strict_quoted_strings", false);
+    // the program's language (pando-cql by default; cwb-cql, pmltq, tiger: query/dialect/dialect.h)
+    opts.dialect = json_extract_str(body, "dialect");
+    if (!opts.dialect.empty() && normalize_dialect(opts.dialect).empty())
+        return json_error(400, "unknown query language '" + opts.dialect + "' (pando knows pando-cql, cwb-cql, pmltq, tiger)");
     const RequestLimits rl = request_limits(body);
     opts.threads = rl.threads;
     ThreadBudgetScope thread_budget(rl.lim.threads);   // P4.1d: scans keep to the tier too
     opts.max_count_hits = rl.lim.max_count_hits;
     const std::string sid = json_extract_str(body, "session_id");
     const size_t timeout_ms = rl.timeout_ms;
-    if (auto denied = check_denied(cql, opts.strict_quoted_strings, rl)) return *denied;
+    if (auto denied = check_denied(cql, opts.strict_quoted_strings, rl, opts.dialect)) return *denied;
 
     ExecProgress prog;
     Deadline deadline;
@@ -711,6 +716,10 @@ ServerResponse ServerApi::query(const std::string& body) {
     opts.sentence  = json_extract_bool(body, "sentence", false);
     opts.fragment  = json_extract_bool(body, "fragment", false);
     opts.strict_quoted_strings = json_extract_bool(body, "strict_quoted_strings", false);
+    // the query's language (pando-cql by default; cwb-cql, pmltq, tiger: query/dialect/dialect.h)
+    opts.dialect = json_extract_str(body, "dialect");
+    if (!opts.dialect.empty() && normalize_dialect(opts.dialect).empty())
+        return json_error(400, "unknown query language '" + opts.dialect + "' (pando knows pando-cql, cwb-cql, pmltq, tiger)");
     opts.sample    = json_extract_num(body, "sample", 0);
     opts.shuffle   = json_extract_bool(body, "shuffle", false);
     opts.seed      = static_cast<uint32_t>(json_extract_num(body, "seed", 0));
@@ -724,7 +733,7 @@ ServerResponse ServerApi::query(const std::string& body) {
     const size_t timeout_ms = rl.timeout_ms;
     const auto job_limit = std::chrono::milliseconds(rl.lim.total_timeout_ms);
     if (from.empty())
-        if (auto denied = check_denied(query_text, opts.strict_quoted_strings, rl)) return *denied;
+        if (auto denied = check_denied(query_text, opts.strict_quoted_strings, rl, opts.dialect)) return *denied;
     std::string attrs_str = json_extract_str(body, "attrs");
     opts.attrs.clear();
     if (!attrs_str.empty()) {
@@ -764,7 +773,7 @@ ServerResponse ServerApi::query(const std::string& body) {
     // an aligned query (`a:[…] with b:[…] :: …`) computes all its pairs for any page: one
     // cache entry serves every page ("load more" does not run it again), and its total
     // is exact from the start (no background count)
-    const bool parallel_q = query_is_parallel(query_text, opts.strict_quoted_strings);
+    const bool parallel_q = query_is_parallel(query_text, opts.strict_quoted_strings, opts.dialect);
 
     // P6.4: the same query / page / count again (KonText: submit, view, each page)
     auto run_q = [&](const QueryOptions& o) -> std::pair<MatchSet, double> {
@@ -778,7 +787,7 @@ ServerResponse ServerApi::query(const std::string& body) {
                 for (size_t v : {o.offset, o.limit, o.max_total, o.sample, static_cast<size_t>(o.seed)})
                     sig += std::to_string(v) + ",";
             sig += std::string(o.total ? "t" : "-") + (o.shuffle ? "s" : "-") + (o.strict_quoted_strings ? "q" : "-")
-                   + (o.allow_empty_alignment ? "e" : "-");
+                   + (o.allow_empty_alignment ? "e" : "-") + "," + normalize_dialect(o.dialect);
             ck = cache_key({"query/1", query_text, sig});
             if (auto e = cache_.get(ck); e && e->page) return {*e->page, 0.0};
         }

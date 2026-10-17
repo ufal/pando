@@ -60,8 +60,9 @@ PmltqToken PmltqLexer::read_next() {
         return tok;
     };
 
-    // String "..."
-    if (c == '"') {
+    // String "..." or '...'
+    if (c == '"' || c == '\'') {
+        const char q = c;
         ++i_;
         std::string out;
         while (i_ < n) {
@@ -70,7 +71,7 @@ PmltqToken PmltqLexer::read_next() {
                 out += s_[i_++];
                 continue;
             }
-            if (d == '"')
+            if (d == q)
                 return make(PmltqTok::STRING, i_ - start, std::move(out));
             out += d;
         }
@@ -82,7 +83,7 @@ PmltqToken PmltqLexer::read_next() {
         size_t j = i_ + 1;
         while (j < n && std::isdigit(static_cast<unsigned char>(s_[j])))
             ++j;
-        if (j < n && s_[j] == '.') {
+        if (j + 1 < n && s_[j] == '.' && std::isdigit(static_cast<unsigned char>(s_[j + 1]))) {
             ++j;
             while (j < n && std::isdigit(static_cast<unsigned char>(s_[j])))
                 ++j;
@@ -102,7 +103,7 @@ PmltqToken PmltqLexer::read_next() {
         size_t j = i_;
         while (j < n && std::isdigit(static_cast<unsigned char>(s_[j])))
             ++j;
-        if (j < n && s_[j] == '.') {
+        if (j + 1 < n && s_[j] == '.' && std::isdigit(static_cast<unsigned char>(s_[j + 1]))) {
             ++j;
             while (j < n && std::isdigit(static_cast<unsigned char>(s_[j])))
                 ++j;

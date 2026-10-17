@@ -1,3 +1,4 @@
+#include "query/dialect/dialect.h"
 #include "api/query_jobs.h"
 #include "core/json_utils.h"
 #include "query/parser.h"
@@ -67,6 +68,8 @@ std::string QueryJobManager::key_for(const std::string& query, const QueryOption
     k += opts.allow_empty_alignment ? '1' : '0';
     k += '\x1f';
     k += std::to_string(opts.max_total);
+    k += '\x1f';
+    k += normalize_dialect(opts.dialect);   // the same text in another language is another query
     return k;
 }
 
@@ -289,8 +292,7 @@ void QueryJobManager::run_job(Job& j) {
     bool exact = false;
     std::string error;
     try {
-        Parser parser(j.query, ParserOptions{j.opts.strict_quoted_strings});
-        Program prog = parser.parse();
+        Program prog = parse_in_dialect(j.query, j.opts.dialect, ParserOptions{j.opts.strict_quoted_strings}, &corpus_);
         if (prog.empty() || !prog[0].has_query) throw std::runtime_error("not a query");
         // the request's tier: its thread cap for scans, its threads for the ranges
         ThreadBudgetScope budget(j.opts.thread_cap);

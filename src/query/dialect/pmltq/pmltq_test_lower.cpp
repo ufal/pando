@@ -1,38 +1,11 @@
 #include "query/dialect/pmltq/pmltq_test_lower.h"
 
 #include <cctype>
-#include <string_view>
 #include <utility>
 
 namespace pando::pmltq {
 
 namespace {
-
-bool has_regex_metachar(std::string_view s) {
-    for (unsigned char uc : s) {
-        char ch = static_cast<char>(uc);
-        switch (ch) {
-        case '.':
-        case '*':
-        case '+':
-        case '?':
-        case '[':
-        case ']':
-        case '(':
-        case ')':
-        case '{':
-        case '}':
-        case '|':
-        case '^':
-        case '$':
-        case '\\':
-            return true;
-        default:
-            break;
-        }
-    }
-    return false;
-}
 
 std::string strip_quotes(std::string s) {
     if (s.size() >= 2 && s.front() == '"' && s.back() == '"')
@@ -43,8 +16,7 @@ std::string strip_quotes(std::string s) {
 } // namespace
 
 std::string pmltq_map_field(std::string field) {
-    if (field == "deprel")
-        return "dep_rel";
+    // deprel stays deprel: pando's name for the relation (flexencoder's dep_rel is mapped at indexing)
     if (field == "head")
         return "head_tok_pos";
     if (field == "sentord")
@@ -74,37 +46,38 @@ std::string pmltq_map_field(std::string field) {
 
 ConditionPtr lower_pmltq_test_strings(const std::string& field_in, const std::string& op_in,
                                       const std::string& value_in, std::string& err) {
+    // PML-TQ's operators (tree_query_grammar.txt CMP): `=` / `!=` compare strings as they are,
+    // `~` / `!~` match a regular expression anywhere in the value, `~*` / `!~*` the same
+    // ignoring case, `<` `>` `<=` `>=` compare
     std::string op = op_in;
     if (op == "==")
         op = "=";
 
-    std::string val = strip_quotes(value_in);
-    std::string field = pmltq_map_field(std::string(field_in));
-
     AttrCondition ac;
-    ac.attr = std::move(field);
+    ac.attr = pmltq_map_field(std::string(field_in));
+    ac.value = strip_quotes(value_in);
 
     if (op == "=") {
-        if (has_regex_metachar(val)) {
-            ac.op = CompOp::REGEX;
-            ac.value = "^" + val + "$";
-        } else {
-            ac.op = CompOp::EQ;
-            ac.value = val;
-        }
+        ac.op = CompOp::EQ;
     } else if (op == "!=") {
-        if (has_regex_metachar(val)) {
-            err = "PMLTQ: != with regex metacharacters not lowered (use native CQL or literal !=)";
-            return nullptr;
-        }
         ac.op = CompOp::NEQ;
-        ac.value = val;
-    } else if (op == "~") {
+    } else if (op == "~" || op == "~*") {
         ac.op = CompOp::REGEX;
-        ac.value = val;
-    } else if (op == "!~") {
-        err = "PMLTQ: operator !~ not yet lowered (use native CQL or extend lowerer)";
-        return nullptr;
+        if (op == "~*") // in the pattern: %c folds the values, not the pattern
+            ac.value = "(?i)" + ac.value;
+    } else if (op == "!~" || op == "!~*") {
+        ac.op = CompOp::NEQ;
+        ac.neq_regex = true;
+        if (op == "!~*")
+            ac.value = "(?i)" + ac.value;
+    } else if (op == "<") {
+        ac.op = CompOp::LT;
+    } else if (op == ">") {
+        ac.op = CompOp::GT;
+    } else if (op == "<=") {
+        ac.op = CompOp::LTE;
+    } else if (op == ">=") {
+        ac.op = CompOp::GTE;
     } else {
         err = "PMLTQ: unsupported test operator: " + op;
         return nullptr;

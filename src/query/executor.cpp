@@ -10441,6 +10441,7 @@ bool QueryExecutor::passes_position_orders(const TokenQuery& query, const NameIn
         switch (po.op) {
             case CompOp::LT:  ok = (p1 < p2); break;
             case CompOp::GT:  ok = (p1 > p2); break;
+            case CompOp::NEQ: ok = (p1 != p2); break;   // two different tokens
             default: ok = (p1 < p2); break;
         }
         if (!ok) return false;

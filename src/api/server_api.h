@@ -171,7 +171,7 @@ private:
     /// 403 when the query / program uses a feature the tier denies (nullopt = allowed
     /// or unparsable: the normal path reports parse errors).
     std::optional<ServerResponse> check_denied(const std::string& text, bool strict,
-                                               const RequestLimits& rl) const;
+                                               const RequestLimits& rl, const std::string& dialect = "") const;
 
     // per-request deadlines (query_timeout_ms / "timeout_ms"): one watchdog thread
     struct Deadline;
