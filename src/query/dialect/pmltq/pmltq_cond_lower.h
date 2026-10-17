@@ -24,6 +24,10 @@ ConditionPtr lower_condition(const PmltqCondExpr& expr, const std::string& self,
 /// Does `expr` refer to another node than `self` (a `$b.attr` side, or `$a = $b`)?
 bool refers_to_other_node(const PmltqCondExpr& expr, const std::string& self);
 
+/// The token is (negated: is not) its sentence's root word: `deprel = "root"` (pando has no
+/// a-root node; UD's root word hangs from it).
+ConditionPtr lower_test_root(bool negated = false);
+
 /// PML-TQ's relation name as pando's (child, parent, sibling, descendant, ancestor); throws for
 /// the others.
 StructRelType structural_relation(const std::string& relation);

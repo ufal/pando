@@ -55,8 +55,34 @@ ConditionPtr all_of(ConditionPtr a, ConditionPtr b, BoolOp op) {
     return ConditionNode::make_branch(op, std::move(a), std::move(b));
 }
 
+ConditionPtr always(bool yes) {
+    return ConditionNode::make_count(StructRelType::CHILD, nullptr, yes ? CompOp::GTE : CompOp::LT, 0);
+}
+
+/// `parent a-root []` / `ancestor a-root []` with occurrences: pando has no root node; a token has
+/// the root as its parent once when it is the sentence's root word (deprel = root), as an
+/// ancestor always once.
+ConditionPtr lower_root_subquery(const PmltqNested& n, size_t at) {
+    if (n.node->has_cond)
+        fail("conditions on a-root (pando has no root node; a-root [ child a-node […] ] is the sentence's root word)", at);
+    if (n.relation != "parent" && n.relation != "ancestor")
+        fail(n.relation + " a-root (a-root is only a parent or an ancestor)", at);
+    bool zero = false, one = false;
+    for (const auto& o : normalize(n.occurrences)) {
+        zero = zero || o.min == 0;
+        one = one || (o.min <= 1 && (o.max < 0 || o.max >= 1));
+    }
+    if (n.relation == "ancestor")
+        return always(one);
+    if (zero == one)
+        return always(zero);
+    return lower_test_root(!one);
+}
+
 /// A related node with these occurrences as a condition on the outer token.
 ConditionPtr lower_subquery(const PmltqNested& n, size_t at) {
+    if (n.node->kind == PmltqSelectorKind::ARoot)
+        return lower_root_subquery(n, at);
     if (n.optional)
         fail("an optional node (?) inside a test", at);
     if (n.bounded_length)
@@ -109,6 +135,14 @@ ConditionPtr lower_test(const PmltqCondExpr& t) {
 }
 
 } // namespace
+
+ConditionPtr lower_test_root(bool negated) {
+    std::string err;
+    ConditionPtr c = lower_pmltq_test_strings("deprel", negated ? "!=" : "=", "root", err);
+    if (!c)
+        throw std::runtime_error(err);
+    return c;
+}
 
 StructRelType structural_relation(const std::string& relation) {
     static const std::unordered_map<std::string, StructRelType> m = {

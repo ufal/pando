@@ -193,6 +193,24 @@ static void test_lower_tree() {
     assert(err.find("optional") != std::string::npos);
 }
 
+// a-root (pando has no root node): its child is the sentence's root word, a condition
+static void test_lower_root() {
+    std::string err;
+    Program p = lower_native_pmltq_query(parse_pmltq_query(
+        R"(a-root [ child a-node $p := [ upos = "VERB", child a-node [ deprel = "obj" ] ] ])"), err);
+    assert(err.empty());
+    assert(p.at(0).query.tokens.size() == 2 && p.at(0).query.tokens[0].name == "p");
+    p = lower_native_pmltq_query(parse_pmltq_query(R"(a-node [ upos = "VERB", parent a-root [] ])"), err);
+    assert(err.empty() && p.at(0).query.tokens.size() == 1);
+    p = lower_native_pmltq_query(parse_pmltq_query(R"(a-node [ 0x parent a-root [] ])"), err);
+    assert(err.empty() && p.at(0).query.tokens.size() == 1);
+    p = lower_native_pmltq_query(parse_pmltq_query(R"(a-root [])"), err);
+    assert(err.find("a-root") != std::string::npos);
+    err.clear();
+    p = lower_native_pmltq_query(parse_pmltq_query(R"(a-root [ child [], child [] ])"), err);
+    assert(err.find("a-root") != std::string::npos);
+}
+
 static void test_parse_output_distinct_count() {
     PmltqQuery q = parse_pmltq_query(
         "a-node $a := [ form = \"th.*\" ] >> distinct $a.form, count(over $a.form)");
@@ -225,6 +243,7 @@ int main() {
     test_parse_untyped_nested();
     test_parse_conditions();
     test_lower_tree();
+    test_lower_root();
     test_parse_output_distinct_count();
     std::cerr << "PASS pmltq_dialect_test\n";
     return 0;

@@ -84,6 +84,16 @@ private:
     }
 
     void add_related(size_t parent, const PmltqNested& n) {
+        if (n.node->kind == PmltqSelectorKind::ARoot) { // no node: a condition (pando has no root node)
+            if (n.node->has_cond)
+                fail("a-root with conditions or related nodes at byte " + std::to_string(n.byte_offset) +
+                     " (pando has no root node; write the sentence's root word: a-node [ deprel = \"root\" ])");
+            if (n.relation == "parent")
+                nodes[parent].conds.push_back(lower_test_root());
+            else if (n.relation != "ancestor")
+                fail(n.relation + " a-root at byte " + std::to_string(n.byte_offset) + " (a-root is only a parent or an ancestor)");
+            return;
+        }
         if (n.optional)
             fail("an optional node (?" + n.relation + ") at byte " + std::to_string(n.byte_offset) +
                  " (pando matches the nodes that are there; for 'with or without' leave the node out, for 'without' use 0x)");
@@ -247,13 +257,34 @@ void apply_references(const std::vector<Pending>& pending, std::vector<QNode>& n
     }
 }
 
+/// The top selector. `a-root [ child a-node X ]` (pando has no root node): X, the sentence's root
+/// word; `a-root [ descendant a-node X ]`: X, any word.
+void add_selector(TreeBuilder& tb, const PmltqSelector& sel) {
+    if (sel.kind != PmltqSelectorKind::ARoot) {
+        tb.add(sel);
+        return;
+    }
+    const std::string how = " (pando has no root node: a-root [ child a-node [ … ] ] is the sentence's root word, "
+                            "a-root [ descendant a-node [ … ] ] any word)";
+    if (!sel.has_cond)
+        fail("a-root on its own" + how);
+    const PmltqCondExpr& c = sel.cond;
+    if (c.kind != PmltqCondKind::Nested || c.nested->subquery || c.nested->optional ||
+        (c.nested->relation != "child" && c.nested->relation != "descendant") ||
+        c.nested->node->kind == PmltqSelectorKind::ARoot)
+        fail("a-root with conditions other than one child or descendant node" + how);
+    const size_t idx = tb.add(*c.nested->node);
+    if (c.nested->relation == "child")
+        tb.nodes[idx].conds.push_back(lower_test_root());
+}
+
 } // namespace
 
 Program lower_native_pmltq_query(const PmltqQuery& q, std::string& err) {
     Program prog;
     try {
         TreeBuilder tb;
-        tb.add(q.selector);
+        add_selector(tb, q.selector);
         const bool single = tb.nodes.size() == 1;
         if (!single)
             name_nodes(tb.nodes);
