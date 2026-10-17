@@ -23,6 +23,17 @@
 
 namespace pando {
 
+namespace {
+/// The query's language as FQS names it (query/dialect/dialect.h's dialects: native → pando-cql).
+std::string query_language_name(const std::string& dialect) {
+    const std::string d = normalize_dialect(dialect);
+    if (d == "cwb") return "cwb-cql";
+    if (d == "pmltq" || d == "tiger") return d;
+    return "pando-cql";
+}
+} // namespace
+
+
 // Same pipe boundaries as query/executor multivalue_eq (RG-5f).
 static void add_mv_counts(std::string_view stored, size_t weight,
                           std::unordered_map<std::string, size_t>& counts) {
@@ -524,7 +535,7 @@ std::string to_query_result_json(const Corpus& corpus,
                 || pm[i].first.span_ends != pm[i - 1].first.span_ends) ++sources;
         out << "{\n  \"ok\": true,\n  \"backend\": \"pando\",\n  \"operation\": \"query\",\n";
         out << "  \"last_command\": \"query\",\n  \"result\": {\n    \"parallel\": true,\n";
-        out << "    \"query\": {\"language\": \"pando-cql\", \"text\": " << jstr(query_text) << "},\n";
+        out << "    \"query\": {\"language\": " << jstr(query_language_name(opts.dialect)) << ", \"text\": " << jstr(query_text) << "},\n";
         out << "    \"page\": {\"start\": " << pstart << ", \"size\": " << opts.limit
             << ", \"returned\": " << (pend - pstart) << ", \"total\": " << pm.size()
             << ", \"returned_pairs\": " << (pend - pstart) << ", \"total_pairs\": " << pm.size()
@@ -562,7 +573,7 @@ std::string to_query_result_json(const Corpus& corpus,
     out << "  \"operation\": \"query\",\n";
     out << "  \"last_command\": \"query\",\n";
     out << "  \"result\": {\n";
-    out << "    \"query\": {\"language\": \"pando-cql\", \"text\": " << jstr(query_text) << "},\n";
+    out << "    \"query\": {\"language\": " << jstr(query_language_name(opts.dialect)) << ", \"text\": " << jstr(query_text) << "},\n";
     out << "    \"page\": {\"start\": " << start << ", \"size\": " << opts.limit
         << ", \"returned\": " << returned << ", \"total\": " << ms.total_count
         << ", \"total_exact\": " << (ms.total_exact ? "true" : "false") << "},\n";

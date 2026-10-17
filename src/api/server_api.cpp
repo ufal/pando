@@ -622,6 +622,8 @@ ServerResponse ServerApi::run(const std::string& body) {
     opts.dialect = json_extract_str(body, "dialect");
     if (!opts.dialect.empty() && normalize_dialect(opts.dialect).empty())
         return json_error(400, "unknown query language '" + opts.dialect + "' (pando knows pando-cql, cwb-cql, pmltq, tiger)");
+    // or as the program's first word (`PMLTQ a-node [...]; freq by lemma`): it wins
+    if (std::string named = take_language_prefix(cql); !named.empty()) opts.dialect = named;
     const RequestLimits rl = request_limits(body);
     opts.threads = rl.threads;
     ThreadBudgetScope thread_budget(rl.lim.threads);   // P4.1d: scans keep to the tier too
@@ -720,6 +722,8 @@ ServerResponse ServerApi::query(const std::string& body) {
     opts.dialect = json_extract_str(body, "dialect");
     if (!opts.dialect.empty() && normalize_dialect(opts.dialect).empty())
         return json_error(400, "unknown query language '" + opts.dialect + "' (pando knows pando-cql, cwb-cql, pmltq, tiger)");
+    // or as the query's first word (`PMLTQ a-node [...]`): it wins
+    if (std::string named = take_language_prefix(query_text); !named.empty()) opts.dialect = named;
     opts.sample    = json_extract_num(body, "sample", 0);
     opts.shuffle   = json_extract_bool(body, "shuffle", false);
     opts.seed      = static_cast<uint32_t>(json_extract_num(body, "seed", 0));

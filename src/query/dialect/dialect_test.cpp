@@ -36,6 +36,19 @@ int main() {
     // CWB's own programs are read whole; a CWB query with pando steps also works
     assert(parse_in_dialect("A = [lemma=\"be\"]; count A by upos", "cwb").size() == 2);
     assert(parse_in_dialect("[lemma=\"be\"]; freq by upos", "cwb").size() == 2);
+    // the language named as the query's first word (pando-server, as FQS)
+    std::string t = "PMLTQ a-node [ lemma = \"be\" ]";
+    assert(take_language_prefix(t) == "pmltq" && t == "a-node [ lemma = \"be\" ]");
+    t = "  CWB\t[word=\"x\"]";
+    assert(take_language_prefix(t) == "cwb" && t == "[word=\"x\"]");
+    t = "[lemma=\"PMLTQ\"]";
+    assert(take_language_prefix(t).empty() && t == "[lemma=\"PMLTQ\"]");
+    t = "pmltq a-node []"; // capitals only
+    assert(take_language_prefix(t).empty());
+    t = "MANATEE [lemma=\"x\"]"; // not a pando language
+    assert(take_language_prefix(t).empty());
+    t = "PMLTQ";
+    assert(take_language_prefix(t).empty() && t == "PMLTQ");
     std::cerr << "PASS dialect_test\n";
     return 0;
 }

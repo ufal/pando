@@ -24,6 +24,25 @@ std::string normalize_dialect(const std::string& name) {
     return "";
 }
 
+std::string take_language_prefix(std::string& text) {
+    static const char* const words[] = {"PANDO", "CWB", "CQP", "PMLTQ", "PML-TQ", "TIGER"};
+    size_t b = 0;
+    while (b < text.size() && std::isspace(static_cast<unsigned char>(text[b]))) ++b;
+    size_t e = b;
+    while (e < text.size() && !std::isspace(static_cast<unsigned char>(text[e]))) ++e;
+    if (e == text.size()) return ""; // nothing after the word
+    const std::string word = text.substr(b, e - b);
+    for (const char* w : words) {
+        if (word != w) continue;
+        size_t r = e;
+        while (r < text.size() && std::isspace(static_cast<unsigned char>(text[r]))) ++r;
+        if (r == text.size()) return "";
+        text.erase(0, r);
+        return normalize_dialect(word);
+    }
+    return "";
+}
+
 namespace {
 
 /// The offset of the first `;` outside quotes and brackets (std::string::npos when none).

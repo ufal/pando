@@ -18,7 +18,10 @@ the request field **`"dialect"`** on `/query` and `/run` (`native` / `pando-cql`
 `pmltq`, `tiger`; an unknown name is a 400). One entry point for the CLI and the server,
 `parse_in_dialect` (`src/query/dialect/dialect.h`); the dialect is part of the result cache's and the
 count jobs' keys, and the tier's denied features are checked on the translated query. FQS passes its
-`language` flag on as this field.
+`language` flag on as this field. pando-server also takes the language as the query's first word,
+in capitals, as FQS does (`PMLTQ a-node [ lemma = "be" ]`; `PANDO`, `CWB`, `CQP`, `PMLTQ`, `PML-TQ`,
+`TIGER`): the word is taken off and replaces `"dialect"`, so a front end without a language choice
+can send another dialect as it is. The answer's `query.language` names the language used.
 
 A program can start with a query in a dialect and go on with pando's own steps: when the dialect
 cannot read the whole text, the part up to the first `;` (outside quotes and brackets) is read in the
