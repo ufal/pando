@@ -910,6 +910,16 @@ public:
     std::optional<MatchSet> execute_class_join(const TokenQuery& q, size_t max_matches, size_t max_total_cap,
                                                size_t sample_size,
                                                const std::vector<std::string>* aggregate_by_fields) const;
+    // `a:[A] with b:[B] :: a.X = b.X`, one token either side over one positional attribute: the class join
+    // (executor_classes.cpp) as source | target pairs. nullopt for any other shape.
+    std::optional<MatchSet> execute_parallel_class_join(const TokenQuery& source, const TokenQuery& target,
+                                                        const std::vector<GlobalAlignmentFilter>& align,
+                                                        size_t max_matches) const;
+    // The class join over the values of `attr` for a two-token query (its `::` region filters assigned by token
+    // name); `with_self`: a token pairs with itself too (as `with` has it).
+    std::optional<MatchSet> class_join(const TokenQuery& q, const std::string& attr, bool with_self,
+                                       size_t max_matches, size_t max_total_cap,
+                                       const std::vector<std::string>* aggregate_by_fields) const;
     // A relation layer of the query (in its chain or a `::` filter) whose declared scope is wider than the corpus's
     // default_within (scope corpus, or another region): the default does not apply to that query.
     bool layer_crosses_default_within(const TokenQuery& q) const;

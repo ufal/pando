@@ -9231,10 +9231,34 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
                               target_query.global_alignment_filters.begin(),
                               target_query.global_alignment_filters.end());
 
+    // one token either side over one attribute: the class join (executor_classes.cpp)
+    if (auto ms = execute_parallel_class_join(source_query, target_query, merged_alignment, max_matches))
+        return std::move(*ms);
+
     TokenQuery src_exec = source_query;
     TokenQuery tgt_exec = target_query;
     src_exec.global_alignment_filters.clear();
     tgt_exec.global_alignment_filters.clear();
+    // a `::` region filter goes to the side whose token it names, wherever it was written: the trailing `::` after
+    // `with` is parsed onto the target, and a source filter there (`:: a.text_lang="eng" & …`) found no `a`
+    {
+        std::unordered_set<std::string> src_labels, tgt_labels;
+        collect_token_and_region_labels(source_query, &src_labels, &src_labels);
+        collect_token_and_region_labels(target_query, &tgt_labels, &tgt_labels);
+        auto move_named = [](TokenQuery& from, TokenQuery& to, const std::unordered_set<std::string>& theirs,
+                             const std::unordered_set<std::string>& ours) {
+            std::vector<GlobalRegionFilter> keep;
+            for (auto& f : from.global_region_filters) {
+                if (!f.anchor_name.empty() && theirs.count(f.anchor_name) && !ours.count(f.anchor_name))
+                    to.global_region_filters.push_back(std::move(f));
+                else
+                    keep.push_back(std::move(f));
+            }
+            from.global_region_filters = std::move(keep);
+        };
+        move_named(tgt_exec, src_exec, src_labels, tgt_labels);
+        move_named(src_exec, tgt_exec, tgt_labels, src_labels);
+    }
 
     MatchSet result;
     result.num_tokens = source_query.tokens.size() + target_query.tokens.size();
@@ -9245,7 +9269,7 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
     NameIndexMap tgt_names = build_name_map(target_query);
 
     // Apply region filters (e.g. :: match.text_lang="en") before joining.
-    apply_region_filters(source_query, src_names, source_set);
+    apply_region_filters(src_exec, src_names, source_set);
 
     const auto& filters = merged_alignment;
     auto is_anchor_label = [](const TokenQuery& q, const std::string& name) {
@@ -9323,7 +9347,7 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
                     return true;
                 });
             }
-            apply_region_filters(target_query, tgt_names, target_set);
+            apply_region_filters(tgt_exec, tgt_names, target_set);
 
             parallel_alignment_overlap_join_single(
                     corpus_, an1, an2, af, source_set.matches, target_set.matches,
@@ -9338,7 +9362,7 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
     }
 
     MatchSet target_set = execute(tgt_exec, 0, true, 0, 0, 0, 1, nullptr, true);
-    apply_region_filters(target_query, tgt_names, target_set);
+    apply_region_filters(tgt_exec, tgt_names, target_set);
 
     if (filters.size() == 1) {
         const auto& af = filters[0];

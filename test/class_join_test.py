@@ -13,6 +13,8 @@ indexes it as JSONL and declares `relation.tuid=equivalence,attr=tuid`. For each
     each pair once however many units they share);
   * a pair whose tokens lie far apart (across an unaligned 120-token text) to be shown as runs with an elision,
     in the KWIC line, the JSON context and (with --server) the XML fragment, never with what lies between;
+  * `a:[A] with b:[B] :: a.tuid = b.tuid` to take the class join as well, with the pairs of a brute-force reference
+    (a token with itself included) and of the general joins;
   * `count by` over fields of either token to give the buckets of a brute-force tally, fast and generic.
 Exit status 0 = all as required, 1 = a difference, 2 = a run error.
 """
@@ -163,6 +165,38 @@ def main():
               f"{cq}: {len(got[True])} buckets (generic {len(got[False])}, reference {len(want)})")
         r = subprocess.run([a.pando, "--timing", d, cq], capture_output=True, text=True)
         check("path=class_join" in r.stdout + r.stderr, f"{cq}: plan class_join")
+
+    # `a:[A] with b:[B] :: a.tuid = b.tuid` goes through the class join too: the pairs (a token with itself
+    # included, as `with` has it) as the general joins give them, a `::` filter on the source after `with` included
+    def with_pairs(q, fast):
+        out = run(q, fast, "--json", "--limit", "100000")
+        try:
+            r = json.loads(out)["result"]
+        except ValueError:
+            return out[:200]
+        return [(p["source"]["tokens"][0]["pos"], p["target"]["tokens"][0]["pos"]) for p in r.get("pairs", [])]
+    for q, fa, fb in [
+        ('a:[form="house"] with b:[] :: a.tuid = b.tuid', FORM("house"), ANY),
+        ('a:[] with b:[form="huis"] :: a.tuid = b.tuid', ANY, FORM("huis")),
+        ('a:[form="is"] with b:[form="is"] :: a.tuid = b.tuid', FORM("is"), FORM("is")),
+        ('a:[form="the"] with b:[] :: a.text_lang="eng" & b.text_lang!="eng" & a.tuid = b.tuid',
+         AND(FORM("the"), LANG("eng")), lambda i: toks[i][1] != "eng"),
+        ('a:[form="dog"] :: a.text_lang="eng" with b:[] :: b.text_lang="nld" & a.tuid = b.tuid',
+         AND(FORM("dog"), LANG("eng")), LANG("nld")),
+    ]:
+        ref = sorted((i, j) for i in range(n) for j in range(n) if fa(i) and fb(j) and toks[i][2] & toks[j][2])
+        fast, slow = with_pairs(q, True), with_pairs(q, False)
+        r = subprocess.run([a.pando, "--timing", "--count-only", d, q], capture_output=True, text=True)
+        check(fast == ref, f"{q}: {len(fast) if isinstance(fast, list) else fast} pairs (reference {len(ref)})")
+        check("path=class_join" in r.stdout + r.stderr, f"{q}: plan class_join")
+        # the general joins (a source filter after `with` used to give 0 pairs)
+        check(slow == ref, f"{q}: the general joins give {len(slow) if isinstance(slow, list) else slow}")
+    # not of the class join's shape (two source tokens): the general joins, a source filter after `with` read
+    q = 'a:[form="the"] [] with b:[] :: a.text_lang="eng" & b.text_lang="nld" & a.tuid = b.tuid'
+    ref = sorted((i, j) for i in range(n - 1) for j in range(n) if toks[i][0] == "the" and toks[i][1] == "eng"
+                 and toks[j][1] == "nld" and toks[i][2] & toks[j][2])
+    got = with_pairs(q, True)
+    check(got == ref, f"{q}: {len(got) if isinstance(got, list) else got} pairs (reference {len(ref)})")
 
     # display: a pair across the filler text shows the runs around its tokens with an elision, not the filler
     q = 'a:[form="the"] =:tuid b:[form="het"]'

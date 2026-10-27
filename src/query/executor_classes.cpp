@@ -44,8 +44,65 @@ std::optional<MatchSet> QueryExecutor::execute_class_join(const TokenQuery& q, s
         return std::nullopt;
     // a default within narrower than the layer's scope would cut the classes: the generic path drops it for such
     // layers (layer_crosses_default_within); one as wide or wider holds every class, so the classes stand as they are
+    return class_join(q, decl->attr, false, max_matches, max_total_cap, aggregate_by_fields);
+}
+
+// `a:[A] with b:[B] :: a.X = b.X` (one token on either side, the same positional attribute X): the pairs whose X
+// values (their components, for a multivalue X) meet, which are X's classes, a token with itself included as
+// `with` has it. The class join gives them as source | target pairs; nullopt for any other shape (the general
+// joins of execute_parallel take it).
+std::optional<MatchSet> QueryExecutor::execute_parallel_class_join(const TokenQuery& source, const TokenQuery& target,
+                                                                   const std::vector<GlobalAlignmentFilter>& align,
+                                                                   size_t max_matches) const {
+    if (!fastpaths_enabled() || include_empty_alignment_values_ || align.size() != 1) return std::nullopt;
+    if (source.tokens.size() != 1 || target.tokens.size() != 1) return std::nullopt;
+    const std::string& sn = source.tokens[0].name;
+    const std::string& tn = target.tokens[0].name;
+    const GlobalAlignmentFilter& af = align[0];
+    const bool forward = af.name1 == sn && af.name2 == tn, backward = af.name1 == tn && af.name2 == sn;
+    if (sn.empty() || tn.empty() || sn == tn || (!forward && !backward)) return std::nullopt;
+    const std::string attr = normalize_attr(af.attr1);
+    if (attr != normalize_attr(af.attr2) || !corpus_.has_attr(attr) || Corpus::is_internal_attr_name(attr))
+        return std::nullopt;
+    TokenQuery q;
+    for (const TokenQuery* side : {&source, &target}) {
+        if (!side->relations.empty() || !side->within.empty() || side->not_within || side->within_having
+            || !side->containing_clauses.empty() || !side->global_function_filters.empty()
+            || !side->position_orders.empty())
+            return std::nullopt;
+        q.tokens.push_back(side->tokens[0]);
+        // a `::` filter may come after either side whichever token it names (class_join assigns it by name)
+        q.global_region_filters.insert(q.global_region_filters.end(), side->global_region_filters.begin(),
+                                       side->global_region_filters.end());
+    }
+    for (const auto& tok : q.tokens)
+        if (tok.has_repetition() || tok.is_anchor() || tok.is_dep_subtree) return std::nullopt;
+    auto ms = class_join(q, attr, true, max_matches == 0 ? SIZE_MAX : max_matches, 0, nullptr);
+    if (!ms) return std::nullopt;
+    MatchSet out;
+    out.parallel = true;
+    out.num_tokens = 2;
+    out.plan_path = "class_join";
+    out.total_count = ms->total_count;
+    out.total_exact = ms->total_exact;
+    out.parallel_matches.reserve(ms->matches.size());
+    for (const Match& m : ms->matches) {
+        Match a, b;
+        a.positions = {m.positions[0]};
+        a.span_ends = {m.positions[0]};
+        b.positions = {m.positions[1]};
+        b.span_ends = {m.positions[1]};
+        out.parallel_matches.emplace_back(std::move(a), std::move(b));
+    }
+    return out;
+}
+
+std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std::string& attr, bool with_self,
+                                                  size_t max_matches, size_t max_total_cap,
+                                                  const std::vector<std::string>* aggregate_by_fields) const {
+    if (with_self && aggregate_by_fields && !aggregate_by_fields->empty()) return std::nullopt;
     EquivalenceClasses classes;
-    if (!classes.open(corpus_.attr(decl->attr), corpus_.is_multivalue(decl->attr))) return std::nullopt;
+    if (!classes.open(corpus_.attr(attr), corpus_.is_multivalue(attr))) return std::nullopt;
 
     // each side: its token conditions and the `::` region filters on its name (a filter naming both, or none, is
     // not of this shape)
@@ -159,8 +216,8 @@ std::optional<MatchSet> QueryExecutor::execute_class_join(const TokenQuery& q, s
         std::sort(touched.begin(), touched.end());
         touched.erase(std::unique(touched.begin(), touched.end()), touched.end());
     } else {
-        const PositionalAttr& attr = corpus_.attr(decl->attr);
-        const LexiconId n = corpus_.is_multivalue(decl->attr) ? attr.mv_lexicon().size() : attr.lexicon().size();
+        const PositionalAttr& pa = corpus_.attr(attr);
+        const LexiconId n = corpus_.is_multivalue(attr) ? pa.mv_lexicon().size() : pa.lexicon().size();
         for (LexiconId c = 0; c < n; ++c)
             if (classes.is_class(c)) touched.push_back(c);
     }
@@ -355,6 +412,16 @@ std::optional<MatchSet> QueryExecutor::execute_class_join(const TokenQuery& q, s
         return result;
     }
 
+    // `with` pairs a token with itself too: once for each token on both sides (in a class)
+    std::vector<CorpusPos> selves;
+    if (with_self) {
+        for (const Member& m : members)
+            if (m.in_a && m.in_b) selves.push_back(m.pos);
+        std::sort(selves.begin(), selves.end());
+        selves.erase(std::unique(selves.begin(), selves.end()), selves.end());
+        total += selves.size();
+    }
+
     // the page, in hit order as the generic expansion gives it: by the first token, then the second; the A members
     // in corpus order, each with the B members of its classes
     MatchSet result;
@@ -372,7 +439,7 @@ std::optional<MatchSet> QueryExecutor::execute_class_join(const TokenQuery& q, s
             for (; i < order.size() && members[order[i]].pos == a; ++i) {
                 const auto [lo, hi] = range_of[members[order[i]].cls];
                 for (size_t k = lo; k < hi; ++k)
-                    if (members[k].in_b && members[k].pos != a) bs.push_back(members[k].pos);
+                    if (members[k].in_b && (with_self || members[k].pos != a)) bs.push_back(members[k].pos);
             }
             std::sort(bs.begin(), bs.end());
             bs.erase(std::unique(bs.begin(), bs.end()), bs.end());
