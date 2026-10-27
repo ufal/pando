@@ -8461,6 +8461,8 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
     if (auto ms = execute_layer_deviations(query, max_matches, count_total, max_total_cap, sample_size,
                                            aggregate_by_fields))
         return std::move(*ms);
+    if (auto ms = execute_class_join(query, max_matches, max_total_cap, sample_size, aggregate_by_fields))
+        return std::move(*ms);
     if (auto ms = execute_layer_decomposed(query, max_matches, count_total, max_total_cap, sample_size, num_threads,
                                            aggregate_by_fields))
         return std::move(*ms);

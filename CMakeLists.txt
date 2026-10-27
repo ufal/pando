@@ -166,6 +166,7 @@ add_library(pando_core STATIC
     src/query/dialect/dialect.cpp
     src/query/executor.cpp
     src/query/executor_layers.cpp
+    src/query/executor_classes.cpp
     src/query/executor_aggregate.cpp
     src/query/executor_sort.cpp
     src/query/sort_field.cpp
@@ -336,7 +337,10 @@ if(BUILD_TESTING)
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
                 --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/deps_sample.conllu)
         # Equivalence layers (equivalence_layer.*): =:coref over an attribute's classes, declared with --relation
-        add_test(NAME equivalence_layer
+        add_test(NAME class_join
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/class_join_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
+    add_test(NAME equivalence_layer
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/equivalence_layer_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
                 --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/coref_sample.conllu

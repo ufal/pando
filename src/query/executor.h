@@ -904,6 +904,12 @@ public:
     std::optional<MatchSet> execute_layer_deviations(const TokenQuery& q, size_t max_matches, bool count_total,
                                                      size_t max_total_cap, size_t sample_size,
                                                      const std::vector<std::string>* aggregate_by_fields) const;
+    // `a:[A] =:X b:[B]` over an equivalence layer X: the class join (executor_classes.cpp), each class touched by
+    // the more selective side read once; exact total, page in hit order. nullopt when the query is not of that
+    // shape (or aggregates, samples, or the fast paths are off).
+    std::optional<MatchSet> execute_class_join(const TokenQuery& q, size_t max_matches, size_t max_total_cap,
+                                               size_t sample_size,
+                                               const std::vector<std::string>* aggregate_by_fields) const;
     // A relation layer of the query (in its chain or a `::` filter) whose declared scope is wider than the corpus's
     // default_within (scope corpus, or another region): the default does not apply to that query.
     bool layer_crosses_default_within(const TokenQuery& q) const;
