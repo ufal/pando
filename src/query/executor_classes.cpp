@@ -35,8 +35,7 @@ std::optional<MatchSet> QueryExecutor::execute_class_join(const TokenQuery& q, s
     const QueryRelation& rel = q.relations[0];
     if (rel.type != RelationType::EQUIV || rel.layer.empty()) return std::nullopt;
     const RelationDecl* decl = corpus_.relation(rel.layer);
-    if (!decl || decl->kind != RelationDecl::Kind::Equivalence || !rel.label.empty() || !corpus_.has_attr(decl->attr))
-        return std::nullopt;
+    if (!decl || decl->kind != RelationDecl::Kind::Equivalence || !rel.label.empty()) return std::nullopt;
     for (const auto& tok : q.tokens)
         if (tok.has_repetition() || tok.is_anchor() || tok.is_dep_subtree) return std::nullopt;
     if (!q.within.empty() || q.not_within || q.within_having || !q.containing_clauses.empty()
@@ -47,7 +46,7 @@ std::optional<MatchSet> QueryExecutor::execute_class_join(const TokenQuery& q, s
     return class_join(q, decl->attr, false, max_matches, max_total_cap, aggregate_by_fields);
 }
 
-// `a:[A] with b:[B] :: a.X = b.X` (one token on either side, the same positional attribute X): the pairs whose X
+// `a:[A] with b:[B] :: a.X = b.X` (one token on either side, the same token or region attribute X): the pairs whose X
 // values (their components, for a multivalue X) meet, which are X's classes, a token with itself included as
 // `with` has it. The class join gives them as source | target pairs; nullopt for any other shape (the general
 // joins of execute_parallel take it).
@@ -62,8 +61,7 @@ std::optional<MatchSet> QueryExecutor::execute_parallel_class_join(const TokenQu
     const bool forward = af.name1 == sn && af.name2 == tn, backward = af.name1 == tn && af.name2 == sn;
     if (sn.empty() || tn.empty() || sn == tn || (!forward && !backward)) return std::nullopt;
     const std::string attr = normalize_attr(af.attr1);
-    if (attr != normalize_attr(af.attr2) || !corpus_.has_attr(attr) || Corpus::is_internal_attr_name(attr))
-        return std::nullopt;
+    if (attr != normalize_attr(af.attr2) || Corpus::is_internal_attr_name(attr)) return std::nullopt;
     TokenQuery q;
     for (const TokenQuery* side : {&source, &target}) {
         if (!side->relations.empty() || !side->within.empty() || side->not_within || side->within_having
@@ -102,7 +100,7 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
                                                   const std::vector<std::string>* aggregate_by_fields) const {
     if (with_self && aggregate_by_fields && !aggregate_by_fields->empty()) return std::nullopt;
     EquivalenceClasses classes;
-    if (!classes.open(corpus_.attr(attr), corpus_.is_multivalue(attr))) return std::nullopt;
+    if (!classes.open(corpus_, attr)) return std::nullopt;
 
     // each side: its token conditions and the `::` region filters on its name (a filter naming both, or none, is
     // not of this shape)
@@ -216,9 +214,7 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
         std::sort(touched.begin(), touched.end());
         touched.erase(std::unique(touched.begin(), touched.end()), touched.end());
     } else {
-        const PositionalAttr& pa = corpus_.attr(attr);
-        const LexiconId n = corpus_.is_multivalue(attr) ? pa.mv_lexicon().size() : pa.lexicon().size();
-        for (LexiconId c = 0; c < n; ++c)
+        for (LexiconId c = 0; c < classes.class_count(); ++c)
             if (classes.is_class(c)) touched.push_back(c);
     }
     size_t scan_cost = 0;

@@ -336,6 +336,16 @@ bool StructuralAttr::regions_for_value(const std::string& attr_name,
     const RegionValueRev& rv = it->second;
     LexiconId vid = rv.lex.lookup(value);
     if (vid == UNKNOWN_LEX) { out_count = 0; return true; }
+    return regions_for_id(attr_name, vid, out_regions, out_count);
+}
+
+bool StructuralAttr::regions_for_id(const std::string& attr_name, LexiconId vid,
+                                    const int64_t*& out_regions, size_t& out_count) const {
+    auto it = region_value_rev_.find(attr_name);
+    if (it == region_value_rev_.end()) return false;
+    const RegionValueRev& rv = it->second;
+    out_count = 0;
+    if (vid < 0) return true;
     const auto* idx = rv.rev_idx.as<int64_t>();
     size_t vi = static_cast<size_t>(vid);
     if (vi + 1 >= rv.rev_idx.count<int64_t>()) { out_count = 0; return true; }

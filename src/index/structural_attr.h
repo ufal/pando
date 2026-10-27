@@ -168,6 +168,9 @@ public:
     // Returns false if no reverse index. The pointer is into mmap'd memory.
     bool regions_for_value(const std::string& attr_name, const std::string& value,
                            const int64_t*& out_regions, size_t& out_count) const;
+    // The same by the value's id in the reverse index lexicon (region_attr_lex_lookup).
+    bool regions_for_id(const std::string& attr_name, LexiconId id,
+                        const int64_t*& out_regions, size_t& out_count) const;
 
 private:
     struct RegionValueRev {

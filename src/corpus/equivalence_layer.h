@@ -1,7 +1,9 @@
 #pragma once
 
 // Equivalence layers (dev/PROPOSAL-RELATION-LAYERS.md): classes of tokens named by the values of an attribute
-// (`tuid` across translations, `coref` entities, `err_gid` groups), queried with `[A] =:X [B]`. Nothing is stored
+// (`tuid` across translations, `coref` entities, `err_gid` groups), or of regions named by a region attribute
+// (`s_tuid`: a sentence and its translations, its members their tokens), queried with `[A] =:X [B]`
+// (equivalence_classes.h reads them). Nothing is stored
 // besides the attribute and its reverse index; the declaration records what the classes are measured to be, which
 // decides the join a query can use (within a sentence, a text, or across the corpus).
 //
@@ -24,7 +26,8 @@ struct EquivalenceStats {
 
 // `decl` as declared (kind equivalence, attr); returns it with scope (the smallest of s / the document region
 // (`text`, else `doc`) / corpus that holds every class) and span (the largest distance between a class's first and
-// last member) measured. Throws when the attribute is missing.
+// last member) measured; stats.members counts tokens (for a region attribute, the tokens of its regions). Throws when
+// the attribute is missing.
 RelationDecl measure_equivalence(const Corpus& corpus, RelationDecl decl, EquivalenceStats* stats = nullptr);
 
 }  // namespace pando

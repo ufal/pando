@@ -15,6 +15,8 @@ indexes it as JSONL and declares `relation.tuid=equivalence,attr=tuid`. For each
     in the KWIC line, the JSON context and (with --server) the XML fragment, never with what lies between;
   * `a:[A] with b:[B] :: a.tuid = b.tuid` to take the class join as well, with the pairs of a brute-force reference
     (a token with itself included) and of the general joins;
+  * `=:s_tuid` over a region attribute (sentences aligned by `s_tuid`; one left unaligned) and `with … a.s_tuid =
+    b.s_tuid`: the class join with the pairs of tokens in aligned sentences, as the reference and the general paths;
   * `count by` over fields of either token to give the buckets of a brute-force tally, fast and generic.
 Exit status 0 = all as required, 1 = a difference, 2 = a run error.
 """
@@ -37,7 +39,9 @@ WORDS = {"eng": ["the", "house", "is", "old", "a", "dog"], "ces": ["dům", "je",
 
 
 def generate(rnd):
-    """(events, tokens): six texts of 15-30 tokens, languages in turn; tokens as (form, lang, set of units)."""
+    """(events, tokens, sentence tuids): six texts of 15-30 tokens, languages in turn, and an unaligned filler text;
+    tokens as (form, lang, set of units). Each text is cut into sentences of 4-8 tokens; sentence k of the texts of
+    one round of languages shares the sentence tuid `p<round>.<k>` (`s_tuid`), one sentence has none (`_`)."""
     toks, texts = [], []
     for t in range(6):
         lang = LANGS[t % 3]
@@ -48,21 +52,37 @@ def generate(rnd):
             if r > 0.8:
                 units.add(f"u{rnd.randint(1, 12)}")
             toks.append((rnd.choice(WORDS[lang]), lang, units))
-        texts.append((start, len(toks) - 1, lang))
+        texts.append((start, len(toks) - 1, lang, t))
         if t == 2:   # an unaligned text in between, longer than the display gap (match_display.h)
             start = len(toks)
             toks += [("filler", "xxx", set())] * 120
-            texts.append((start, len(toks) - 1, "xxx"))
+            texts.append((start, len(toks) - 1, "xxx", None))
+    cut = random.Random(11)
+    sents = []   # (first, last, sentence tuid)
+    for a, b, lang, t in texts:
+        k, p = 0, a
+        while p <= b:
+            q = b if t is None else min(b, p + cut.randint(3, 7))
+            if b - q < 3:
+                q = b
+            stuid = "_" if t is None or (t == 4 and k == 0) else f"p{t // 3}.{k}"
+            sents.append((p, q, stuid))
+            k, p = k + 1, q + 1
+    stuids = [None] * len(toks)
+    for a, b, st in sents:
+        for p in range(a, b + 1):
+            stuids[p] = None if st == "_" else st
     events = [{"type": "header", "version": 2, "positional": ["form", "tuid"], "multivalue": ["tuid"],
                "structural": ["s", "text"]}]
     # (JSONL v2: an `s` region follows its own tokens)
-    for k, (a, b, lang) in enumerate(texts):
+    for k, (a, b, st) in enumerate(sents):
         events += [{"type": "token", "form": f, "tuid": "|".join(sorted(u)) or "_"} for f, _, u in toks[a:b + 1]]
-        events.append({"type": "region", "struct": "s", "start_pos": a, "end_pos": b, "attrs": {"id": f"s{k}"}})
-    for k, (a, b, lang) in enumerate(texts):
+        events.append({"type": "region", "struct": "s", "start_pos": a, "end_pos": b,
+                       "attrs": {"id": f"s{k}", "tuid": st}})
+    for k, (a, b, lang, _) in enumerate(texts):
         events.append({"type": "region", "struct": "text", "start_pos": a, "end_pos": b,
                        "attrs": {"lang": lang, "id": f"t{k}"}})
-    return events, toks
+    return events, toks, stuids
 
 
 def main():
@@ -72,14 +92,15 @@ def main():
     ap.add_argument("--server", help="pando-server: also check the XML fragment of a far-apart pair")
     a = ap.parse_args()
     rnd = random.Random(7)
-    events, toks = generate(rnd)
+    events, toks, stuids = generate(rnd)
     tmp = tempfile.mkdtemp(prefix="pando_classjoin_")
     src, d = os.path.join(tmp, "c.jsonl"), os.path.join(tmp, "idx")
     with open(src, "w", encoding="utf-8") as f:
         for e in events:
             f.write(json.dumps(e, ensure_ascii=False) + "\n")
     for cmd in ([a.pando_index, "--format", "jsonl", src, d],
-                [a.pando_index, "--relation", "tuid=equivalence,attr=tuid", d]):
+                [a.pando_index, "--relation", "tuid=equivalence,attr=tuid", d],
+                [a.pando_index, "--relation", "s_tuid=equivalence,attr=s_tuid", d]):
         p = subprocess.run(cmd, capture_output=True, text=True)
         if p.returncode != 0:
             print(f"run error: {' '.join(cmd)}\n{p.stderr}")
@@ -197,6 +218,28 @@ def main():
                  and toks[j][1] == "nld" and toks[i][2] & toks[j][2])
     got = with_pairs(q, True)
     check(got == ref, f"{q}: {len(got) if isinstance(got, list) else got} pairs (reference {len(ref)})")
+
+    # classes of regions: `s_tuid` (sentences and their translations); a token's class is its sentence's tuid
+    info = open(os.path.join(d, "corpus.info"), encoding="utf-8").read()
+    check("relation.s_tuid=equivalence,attr=s_tuid,scope=corpus" in info, "s_tuid declared and measured (scope corpus)")
+    same_s = lambda i, j: stuids[i] is not None and stuids[i] == stuids[j]
+    for q, fa, fb in [
+        ('a:[] =:s_tuid b:[]', ANY, ANY),
+        ('a:[form="house"] =:s_tuid b:[form="huis"]', FORM("house"), FORM("huis")),
+        ('a:[] =:s_tuid b:[] :: a.text_lang="eng" & b.text_lang="ces"', LANG("eng"), LANG("ces")),
+        ('a:[form="is"] =:s_tuid b:[form="is"]', FORM("is"), FORM("is")),
+    ]:
+        ref = sorted((i, j) for i in range(n) for j in range(n) if i != j and fa(i) and fb(j) and same_s(i, j))
+        fast, slow = hits(q, True), hits(q, False)
+        r = subprocess.run([a.pando, "--timing", "--count-only", d, q], capture_output=True, text=True)
+        check(fast == ref and sorted(slow) == ref and "path=class_join" in r.stdout + r.stderr
+              and (r.stdout.split() or ["?"])[0] == str(len(ref)),
+              f"{q}: {len(fast)} hits (generic {len(slow)}, reference {len(ref)}), total and plan")
+    q = 'a:[form="house"] :: a.text_lang="eng" with b:[] :: b.text_lang="nld" & a.s_tuid = b.s_tuid'
+    ref = sorted((i, j) for i in range(n) for j in range(n) if toks[i][0] == "house" and toks[i][1] == "eng"
+                 and toks[j][1] == "nld" and same_s(i, j))
+    fast, slow = with_pairs(q, True), with_pairs(q, False)
+    check(fast == ref and slow == ref, f"{q}: {len(fast)} pairs (general joins {len(slow)}, reference {len(ref)})")
 
     # display: a pair across the filler text shows the runs around its tokens with an elision, not the filler
     q = 'a:[form="the"] =:tuid b:[form="het"]'

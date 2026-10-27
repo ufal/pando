@@ -6,6 +6,7 @@
 // with another label is one relation between the two tokens.
 
 #include "query/executor.h"
+#include "corpus/equivalence_classes.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -42,29 +43,20 @@ bool QueryExecutor::rewrite_head_layer(const TokenQuery& q, TokenQuery& out) {
 }
 
 // `[A] =:X [B]`: the other members of A's classes in the equivalence layer X, whose classes are the values of an
-// attribute (relation_decl.h `attr`; a multivalue attribute puts a token in several classes)
+// attribute (relation_decl.h `attr`): a token attribute (a multivalue one puts a token in several classes) or a
+// region attribute (`s_tuid`: the tokens of the regions with the same value), read as equivalence_classes.h does
 std::vector<CorpusPos> QueryExecutor::find_class_mates(CorpusPos pos, const RelationDecl& decl) const {
-    std::vector<CorpusPos> out;
-    if (!corpus_.has_attr(decl.attr))
+    EquivalenceClasses classes;
+    if (!classes.open(corpus_, decl.attr))
         throw std::runtime_error("The equivalence layer '" + decl.name + "' names the attribute '" + decl.attr +
-                                 "', which this corpus does not have");
-    const std::string_view v = corpus_.attr(decl.attr).value_at(pos);
-    const bool mv = corpus_.is_multivalue(decl.attr);
-    size_t a = 0;
-    while (a <= v.size()) {
-        size_t b = mv ? v.find('|', a) : std::string_view::npos;
-        if (b == std::string_view::npos) b = v.size();
-        const std::string_view id = v.substr(a, b - a);
-        if (!id.empty() && id != "_") {
-            AttrCondition ac;
-            ac.attr = decl.attr;
-            ac.op = CompOp::EQ;
-            ac.value = std::string(id);
-            for (CorpusPos p : resolve_leaf(ac))
-                if (p != pos) out.push_back(p);
-        }
-        a = b + 1;
-    }
+                                 "', which this corpus does not have as a token attribute or a single-valued "
+                                 "region attribute");
+    std::vector<CorpusPos> out;
+    classes.for_each_class(pos, [&](LexiconId c) {
+        classes.for_each_member(c, [&](CorpusPos p) {
+            if (p != pos) out.push_back(p);
+        });
+    });
     std::sort(out.begin(), out.end());
     out.erase(std::unique(out.begin(), out.end()), out.end());
     return out;
