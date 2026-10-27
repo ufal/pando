@@ -407,7 +407,11 @@ static void emit_hit_json(std::ostringstream& out, const Corpus& corpus, const M
     if (opts.fragment) {
         CorpusPos lo = 0, hi = 0;
         context_bounds(corpus, m, opts.context, opts.sentence, lo, hi);
-        out << ", \"fragment\": " << jstr(build_fragment(corpus, lo, hi, attr_names));
+        // tokens far apart: the runs around them, a <gap/> between (match_display.h)
+        std::string frag;
+        for (const auto& [a, b] : display_runs(corpus, m.matched_positions(), lo, hi))
+            frag += (frag.empty() ? "" : " <gap/> ") + build_fragment(corpus, a, b, attr_names);
+        out << ", \"fragment\": " << jstr(frag);
         // highlight_map (flexicorp highlight_contract): matched ids, by query token
         std::vector<std::string> all;
         std::map<size_t, std::vector<std::string>> by_group;

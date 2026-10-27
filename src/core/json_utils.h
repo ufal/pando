@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/match_display.h"
+
 // Shared JSON helpers used by query_main.cpp, query_json.cpp, and server_main.cpp.
 
 #include "core/types.h"
@@ -341,12 +343,16 @@ inline KwicContext build_context(const Corpus& corpus, const Match& m, int ctx_w
         ctx.left += form.value_at(p);
     }
 
-    // Match text: full span from first to last in corpus order.
-    // For discontinuous matches this includes gap tokens; the JSON
-    // "tokens" array has the per-token detail for consumers that need it.
-    for (CorpusPos p = first; p <= last; ++p) {
-        if (!ctx.match.empty()) ctx.match += ' ';
-        ctx.match += form.value_at(p);
+    // Match text: the span from first to last in corpus order. For discontinuous matches this includes gap
+    // tokens; tokens far apart (other sentences, other texts) are shown as runs with "…" between
+    // (match_display.h). The JSON "tokens" array has the per-token detail for consumers that need it.
+    const auto runs = display_runs(corpus, m.matched_positions(), first, last);
+    for (size_t r = 0; r < runs.size(); ++r) {
+        if (r > 0) ctx.match += " \u2026";
+        for (CorpusPos p = runs[r].first; p <= runs[r].second; ++p) {
+            if (!ctx.match.empty()) ctx.match += ' ';
+            ctx.match += form.value_at(p);
+        }
     }
 
     for (CorpusPos p = last + 1; p <= right_end; ++p) {

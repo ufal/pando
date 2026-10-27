@@ -40,6 +40,9 @@ public:
         if (is_class(id)) f(id);
     }
 
+    // the number of members of a class
+    size_t size(LexiconId cls) const { return mv_ ? attr_->mv_count_of_id(cls) : attr_->rev_span_of_id(cls).count; }
+
     // f(member position) for each token of the class, in corpus order
     template <typename F>
     void for_each_member(LexiconId cls, F&& f) const {

@@ -5,6 +5,7 @@
 #include "api/query_json.h"
 #include "api/coll_counts.h"
 #include "core/json_utils.h"
+#include "core/match_display.h"
 #include "query/keyness_select.h"
 #include "query/ast.h"
 #include "query/parser.h"
@@ -387,17 +388,15 @@ static std::string build_right_chars(const Corpus& corpus, CorpusPos last, int c
 // Build the match-span string for text KWIC output.
 // Walks from first_pos to last_pos, wrapping contiguous matched positions
 // in <! !> delimiters.  Unmatched positions between match groups are shown
-// as plain text (gap between discontinuous match tokens).
+// as plain text (gap between discontinuous match tokens); tokens far apart
+// (other sentences, other texts) are shown as runs with " …" between
+// (match_display.h).
 static std::string build_match_span(const Corpus& corpus, const Match& m,
                                     const std::vector<std::string>& extra_attrs) {
     const auto& form = corpus.attr("form");
     auto matched = m.matched_positions();  // sorted, unique
     if (matched.empty()) return "";
 
-    CorpusPos min_p = matched.front();
-    CorpusPos max_p = matched.back();
-
-    // Build a fast lookup (for small spans, linear scan is fine)
     auto is_matched = [&](CorpusPos p) {
         return std::binary_search(matched.begin(), matched.end(), p);
     };
@@ -406,23 +405,31 @@ static std::string build_match_span(const Corpus& corpus, const Match& m,
 
     std::string text;
     bool in_highlight = false;
-    for (CorpusPos p = min_p; p <= max_p; ++p) {
-        bool hit = is_matched(p);
-        if (hit && !in_highlight) {
-            text += color ? "\033[1;31m" : " <!";
-            in_highlight = true;
-        } else if (!hit && in_highlight) {
-            text += color ? "\033[0m" : " !>";
+    const auto runs = display_runs(corpus, matched, matched.front(), matched.back());
+    for (size_t r = 0; r < runs.size(); ++r) {
+        if (r > 0) {
+            if (in_highlight) text += color ? "\033[0m" : " !>";
             in_highlight = false;
+            text += " \u2026";
         }
-        text += ' ';
-        text += form.value_at(p);
-        if (hit) {
-            for (const auto& attr_name : extra_attrs) {
-                if (attr_name == "form") continue;
-                if (!corpus.has_attr(attr_name)) continue;
-                text += '/';
-                text += corpus.attr(attr_name).value_at(p);
+        for (CorpusPos p = runs[r].first; p <= runs[r].second; ++p) {
+            bool hit = is_matched(p);
+            if (hit && !in_highlight) {
+                text += color ? "\033[1;31m" : " <!";
+                in_highlight = true;
+            } else if (!hit && in_highlight) {
+                text += color ? "\033[0m" : " !>";
+                in_highlight = false;
+            }
+            text += ' ';
+            text += form.value_at(p);
+            if (hit) {
+                for (const auto& attr_name : extra_attrs) {
+                    if (attr_name == "form") continue;
+                    if (!corpus.has_attr(attr_name)) continue;
+                    text += '/';
+                    text += corpus.attr(attr_name).value_at(p);
+                }
             }
         }
     }

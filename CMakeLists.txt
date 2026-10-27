@@ -339,7 +339,8 @@ if(BUILD_TESTING)
         # Equivalence layers (equivalence_layer.*): =:coref over an attribute's classes, declared with --relation
         add_test(NAME class_join
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/class_join_test.py
-                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
+                --server $<TARGET_FILE:pando-server>)
     add_test(NAME equivalence_layer
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/equivalence_layer_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
