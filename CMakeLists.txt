@@ -154,6 +154,7 @@ add_library(pando_core STATIC
     src/index/dependency_index.cpp
     src/index/relation_decl.cpp
     src/index/relation_layer.cpp
+    src/corpus/derive_deps.cpp
     src/corpus/corpus.cpp
     src/corpus/builder.cpp
     src/corpus/streaming_builder.cpp

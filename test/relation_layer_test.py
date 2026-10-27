@@ -13,6 +13,8 @@ an empty node, a token with DEPS `_`) and requires:
     against a brute-force evaluation per sentence;
   * relation filters between named tokens (`:: a !>:head b`, `:: b >>:deps a`) next to the position order
     (`:: a < b`);
+  * `pando-index --derive` (derive_deps.h): `eff` (effective heads, replacing `conj`) and conj-propagation (added
+    edges, as enhanced UD), against the same rules written out here (edge counts per label) and edges by hand;
   * `--format conllu` to give back each token's DEPS (sorted; `_` as the basic edge; tokens with an edge to an empty
     node left out of the comparison).
 Exit status 0 = all as required, 1 = a difference, 2 = a run error.
@@ -131,6 +133,42 @@ def brute_negated(path, kept_cond, other_cond, layer, label):
     return n
 
 
+def derived_edges(s, eff):
+    """derive_deps.cpp's rules on one sentence (eff: effective-head, else conj-propagation): per token the set of
+    (head, label), the basic edge included unless replaced."""
+    base = lambda r: r.split(":")[0]
+    no_prop = {"parataxis", "list", "aux", "cop", "punct", "reparandum", "orphan", "discourse"}
+    head = [int(t[6]) for t in s]
+    rel = [t[7] for t in s]
+    edges = [{(head[i], rel[i])} for i in range(len(s))]
+    children = {}
+    for i, h in enumerate(head):
+        children.setdefault(h, []).append(i + 1)
+    subj = lambda c: any(base(rel[k - 1]) in ("nsubj", "csubj") for k in children.get(c, []))
+    conjuncts = [i for i in range(len(s)) if base(rel[i]) == "conj" and head[i] > 0]
+    for i in conjuncts:
+        f = head[i]
+        if eff:
+            while base(rel[f - 1]) == "conj" and head[f - 1] > 0:
+                f = head[f - 1]
+            edges[i] = {(head[f - 1], rel[f - 1])}
+        elif base(rel[f - 1]) != "conj" and head[f - 1] > 0 and base(rel[f - 1]) not in no_prop:
+            edges[i].add((head[f - 1], rel[f - 1]))
+    for i in conjuncts:
+        if s[i][3] not in ("VERB", "ADJ", "AUX") or subj(i + 1):
+            continue
+        f = head[i]
+        while eff and not subj(f) and base(rel[f - 1]) == "conj" and head[f - 1] > 0:
+            f = head[f - 1]
+        for sb in children.get(f, []):
+            if base(rel[sb - 1]) not in ("nsubj", "csubj"):
+                continue
+            for sj in [sb] + [c for c in children.get(sb, []) if base(rel[c - 1]) == "conj"]:
+                if sj != i + 1:
+                    edges[sj - 1].add((i + 1, rel[sb - 1]))
+    return edges
+
+
 UP = lambda u: (lambda t: t[3] == u)
 LEM = lambda l: (lambda t: t[2] == l)
 CHAINS = [   # query, token conditions, relations (op, layer, label)
@@ -224,6 +262,52 @@ def main():
     ok = got == want
     failures += not ok
     print(f"{'ok  ' if ok else 'FAIL'} count by b.lemma over >:deps:nsubj: {got} (reference {want})")
+
+    # derived layers: `eff` (effective-head, the default) and `cprop` (--rule conj-propagation), their edges per
+    # label as the rules give them, and a few edges by hand
+    expected = {
+        "eff": [('[lemma="walk"] >:eff:nsubj [lemma="Mary"]', 1), ('[lemma="John"] >:eff [lemma="Mary"]', 0),
+                ('[lemma="snore"] >:eff:nsubj [lemma="dog"]', 1), ('[lemma="say"] >:eff:parataxis [lemma="see"]', 1),
+                ('[lemma="think"] >:eff:ccomp [lemma="jump"]', 1), ('[lemma="jump"] >:eff:nsubj [lemma="Ann"]', 1),
+                ('[lemma="love"] >:eff:xcomp [lemma="talk"]', 1), ('[lemma="walk"] >:eff [lemma="talk"]', 0)],
+        "cprop": [('[lemma="walk"] >:cprop:nsubj [lemma="Mary"]', 1), ('[lemma="John"] >:cprop [lemma="Mary"]', 2),
+                  ('[lemma="snore"] >:cprop:nsubj [lemma="dog"]', 1), ('[lemma="say"] >:cprop [lemma="see"]', 0),
+                  ('[lemma="think"] >:cprop [lemma="jump"]', 0), ('[lemma="love"] >:cprop:xcomp [lemma="talk"]', 1)],
+    }
+    for name, extra, eff in [("eff", [], True), ("cprop", ["--rule", "conj-propagation"], False)]:
+        r = subprocess.run([a.pando_index, "--derive", name, d] + extra, capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"FAIL: --derive {name}:", r.stderr.strip()[:300])
+            failures += 1
+            continue
+        want = {}
+        for s in sentences(a.conllu):
+            for es in derived_edges(s, eff):
+                for h, lab in es:
+                    if h > 0:
+                        want[lab] = want.get(lab, 0) + 1
+        bad = 0
+        for lab in sorted(want):
+            got = count(f'[] >:{name}:"{lab}" []')
+            if got != str(want[lab]):
+                bad += 1
+                print(f"FAIL [] >:{name}:{lab} []: {got} (reference {want[lab]})")
+        failures += bad
+        print(f"{'ok  ' if not bad else 'FAIL'} --derive {name}: {len(want)} labels against the rules")
+        for q, want_n in expected[name]:
+            got = count(q)
+            ok = got == str(want_n)
+            failures += not ok
+            print(f"{'ok  ' if ok else 'FAIL'} {q}: {got} (expected {want_n})")
+    info = open(os.path.join(d, "corpus.info"), encoding="utf-8").read()
+    for line in ("source=derived:effective-head", "source=derived:conj-propagation"):
+        if line not in info:
+            print(f"FAIL: no relation declared {line}")
+            failures += 1
+    r = subprocess.run([a.pando_index, "--derive", "deps", d], capture_output=True, text=True)
+    if r.returncode == 0:
+        print("FAIL: --derive deps overwrote the annotated deps layer")
+        failures += 1
 
     # DEPS round trip through the CoNLL-U output
     r = subprocess.run([a.pando, "--limit", "100000", "--format", "conllu", d, "[]"], capture_output=True, text=True)

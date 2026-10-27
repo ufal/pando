@@ -17,6 +17,7 @@
 #include <fstream>
 #include <functional>
 #include <memory>
+#include "corpus/derive_deps.h"
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -656,6 +657,49 @@ int main(int argc, char* argv[]) {
         std::cout << "pando-index " << pando::build_string() << "\n";
         return 0;
     }
+    if ((argc == 4 || argc == 6) && std::string(argv[1]) == "--derive") {
+        // `pando-index --derive NAME <corpus_dir> [--rule R]`: a derived pointer layer from the basic tree
+        // (derive_deps.h): `eff` (effective heads, the default rule), or `deps` for a corpus without DEPS
+        // (conj-propagation, the default for that name)
+        const std::string name = argv[2], dir = argv[3];
+        pando::DeriveRule rule = name == "deps" ? pando::DeriveRule::ConjPropagation : pando::DeriveRule::EffectiveHead;
+        if (argc == 6 && (std::string(argv[4]) != "--rule" || !pando::parse_derive_rule(argv[5], rule))) {
+            std::cerr << "Error: --rule effective-head or --rule conj-propagation\n";
+            return 1;
+        }
+        try {
+            pando::Corpus corpus;
+            corpus.open(dir);
+            if (const pando::RelationDecl* old = corpus.relation(name);
+                old && old->source.rfind("derived:", 0) != 0) {
+                std::cerr << "Error: " << dir << " has an annotated relation '" << name
+                          << "'; derive under another name (pando-index --derive eff " << dir << ")\n";
+                return 1;
+            }
+            if (name == "head") {
+                std::cerr << "Error: 'head' is the basic tree\n";
+                return 1;
+            }
+            // a layer derived before may be mapped by `corpus`: unlink, then write new files
+            std::error_code ec;
+            for (const char* ext : {".src", ".off", ".tgt", ".lab", ".labels", ".rtgt", ".rsrc", ".rlab"})
+                fs::remove(dir + "/rel." + name + ext, ec);
+            pando::DerivedDepsStats st;
+            pando::RelationDecl d = pando::derive_deps_layer(corpus, dir, name, rule, &st);
+            if (const pando::RelationDecl* h = corpus.relation("head"); h && h->span > d.span) d.span = h->span;
+            if (!record_relation(dir, d)) {
+                std::cerr << "Error: cannot record relation." << name << " in " << dir << "/corpus.info\n";
+                return 1;
+            }
+            std::cerr << "Relation " << name << ": " << d.format() << "\n"
+                      << "  " << st.deviating << " of " << st.tokens << " tokens differ from the basic tree: "
+                      << st.conj_heads << " conjunct heads, " << st.shared_subjects << " shared subjects\n";
+            return 0;
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << "\n";
+            return 1;
+        }
+    }
     if (argc >= 3 && std::string(argv[1]) == "--upgrade") {
         std::string pairs = kDefaultDepPairs;
         std::string bitmaps = kDefaultBitmaps;
@@ -794,6 +838,11 @@ int main(int argc, char* argv[]) {
                   << "                    ROOT/current at it (servers hot-swap; nothing is rewritten in place)\n"
                   << "  --keep N          with --publish: versions kept (default 3; the current and the\n"
                   << "                    previous one always)\n"
+                  << "\n  pando-index --derive NAME <corpus_dir> [--rule effective-head|conj-propagation]\n"
+                  << "                    a pointer layer NAME derived from the basic tree, queried with >:NAME:\n"
+                  << "                    effective-head (default; e.g. eff): conjuncts get their first conjunct's\n"
+                  << "                    head instead of conj, shared subjects are added; conj-propagation (default\n"
+                  << "                    for deps): enhanced UD's added edges, for a corpus without DEPS\n"
                   << "\n  pando-index --upgrade <corpus_dir>\n"
                   << "                    Add derived files to an existing index\n"
                   << "                    (dep.head_rel, <attr>.fold_*.perm for %c/%d,\n"

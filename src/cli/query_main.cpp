@@ -555,15 +555,18 @@ static std::string build_constituency_line(const Corpus& corpus, Region sent) {
 }  // namespace
 
 // The line under a page of hits, "21-40 of 1108 matches": when hits were left out, when the search stopped at the
-// page ("1-20 of 20+ matches", more may follow), and with --total always ("1108 matches" when the page holds them all).
+// page ("1-20 (--total for the count)": more may follow), and with --total always ("1108 matches" when the page holds
+// them all; "1-20 of 50+ matches" when --max-total capped the count).
 static std::string total_line(const MatchSet& ms, size_t stored, size_t end, const Options& opts) {
     if (!opts.total && ms.total_exact && end >= stored) return "";   // all hits on the page
     const size_t first = std::min(opts.offset, end);
+    const std::string range = std::to_string(first + 1) + "-" + std::to_string(end);
+    // the search stopped at the page: no total to give
+    if (!ms.total_exact && !opts.total) return range + " (--total for the count)";
     const std::string total = std::to_string(ms.total_count) + (ms.total_exact ? "" : "+");
-    const std::string hint = !ms.total_exact && !opts.total ? " (--total for the exact count)" : "";
     if (ms.total_exact && first == 0 && end >= ms.total_count) return total + (ms.total_count == 1 ? " match" : " matches");
-    if (end == first) return "no hits from " + std::to_string(first + 1) + " of " + total + " matches" + hint;
-    return std::to_string(first + 1) + "-" + std::to_string(end) + " of " + total + " matches" + hint;
+    if (end == first) return "no hits from " + std::to_string(first + 1) + " of " + total + " matches";
+    return range + " of " + total + " matches";
 }
 
 static void emit_conllu(const Corpus& corpus, const MatchSet& ms, const Options& opts) {
