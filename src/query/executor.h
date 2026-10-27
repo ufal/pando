@@ -1003,6 +1003,10 @@ private:
     std::vector<CorpusPos> find_layer_related(CorpusPos pos, const QueryRelation& qr, RelationType rel,
                                               bool reversed) const;
 
+    // `:: a >:X b` and the other relation filters: does the relation hold from `a` to `b` (`head` is the basic tree,
+    // its label the dependent's deprel; a negated operator holds when the positive one does not)
+    bool relation_holds(CorpusPos a, CorpusPos b, const QueryRelation& qr) const;
+
     // As above, through the relation's layer when it names one (`qr.layer`), else the basic tree.
     template<typename F>
     void for_each_related(CorpusPos pos, const QueryRelation& qr, RelationType rel, bool reversed, F&& f) const {

@@ -84,4 +84,25 @@ std::vector<CorpusPos> QueryExecutor::find_layer_related(CorpusPos pos, const Qu
     return out;
 }
 
+bool QueryExecutor::relation_holds(CorpusPos a, CorpusPos b, const QueryRelation& qr) const {
+    RelationType rel = qr.type;
+    const bool negated = rel == RelationType::NOT_GOVERNS || rel == RelationType::NOT_GOV_BY;
+    if (rel == RelationType::NOT_GOVERNS) rel = RelationType::GOVERNS;
+    if (rel == RelationType::NOT_GOV_BY) rel = RelationType::GOVERNED_BY;
+    bool found = false;
+    if (qr.layer == "head") {
+        // the basic tree; a label is the dependent's deprel (b for `>`, a for `<`)
+        for (CorpusPos r : find_related(a, rel, false))
+            if (r == b) { found = true; break; }
+        if (found && !qr.label.empty()) {
+            const CorpusPos dep = rel == RelationType::GOVERNS ? b : a;
+            found = corpus_.has_attr("deprel") && corpus_.attr("deprel").value_at(dep) == qr.label;
+        }
+    } else {
+        const auto related = find_layer_related(a, qr, rel, false);
+        found = std::binary_search(related.begin(), related.end(), b);
+    }
+    return found != negated;
+}
+
 }  // namespace pando

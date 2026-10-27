@@ -10613,6 +10613,10 @@ bool QueryExecutor::passes_position_orders(const TokenQuery& query, const NameIn
         CorpusPos p1 = resolve_name(m, name_map, po.name1);
         CorpusPos p2 = resolve_name(m, name_map, po.name2);
         if (p1 == NO_HEAD || p2 == NO_HEAD) return false;
+        if (po.is_relation) {
+            if (!relation_holds(p1, p2, po.relation)) return false;
+            continue;
+        }
         bool ok = false;
         switch (po.op) {
             case CompOp::LT:  ok = (p1 < p2); break;

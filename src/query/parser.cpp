@@ -1743,13 +1743,26 @@ void Parser::parse_global_filters(TokenQuery& tq) {
                                              "(`=` compares, `name:` binds)");
                 throw std::runtime_error("Expected `" + t.text + ".attr`, a function or a "
                                          "struct_attr before `=` in global filter");
-            } else if (next.type == TokType::LT || next.type == TokType::GT || next.type == TokType::NEQ) {
+            } else if (next.type == TokType::LT || next.type == TokType::GT || next.type == TokType::NEQ
+                       || next.type == TokType::BANG_GT || next.type == TokType::BANG_LT
+                       || next.type == TokType::GTGT || next.type == TokType::LTLT) {
                 // Positional ordering: :: a < b or :: a > b, and :: a != b (two different tokens)
-                // (no '_' in first name — not struct_attr)
+                // (no '_' in first name — not struct_attr); with a layer a relation: :: a >:head b, :: a !>:deps b
                 CompOp op = next.type == TokType::LT ? CompOp::LT : next.type == TokType::GT ? CompOp::GT : CompOp::NEQ;
-                lexer_.consume();
+                QueryRelation rel;
+                if (next.type == TokType::NEQ) lexer_.consume();
+                else try_parse_relation(rel);   // consumes the operator, and a `:layer[:label]` after it
+                const bool plain_order = next.type == TokType::LT || next.type == TokType::GT || next.type == TokType::NEQ;
+                if (rel.layer.empty() && !plain_order)
+                    throw std::runtime_error("A relation between named tokens after :: names its layer: :: " + t.text +
+                                             " !>:head b, :: " + t.text + " >>:deps b");
                 Token name2 = lexer_.expect(TokType::IDENT);
-                tq.position_orders.push_back({t.text, name2.text, op});
+                TokenQuery::PositionOrder po{t.text, name2.text, op};
+                if (!rel.layer.empty()) {
+                    po.is_relation = true;
+                    po.relation = rel;
+                }
+                tq.position_orders.push_back(std::move(po));
             } else if (next.type == TokType::DOT) {
                 // a.attr ... — could be anchored region filter or alignment
                 lexer_.consume(); // consume DOT

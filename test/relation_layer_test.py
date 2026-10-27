@@ -10,7 +10,11 @@ an empty node, a token with DEPS `_`) and requires:
     count in the CoNLL-U (edges to empty nodes left out, DEPS `_` = the basic edge);
   * `>:head:label` to equal `>` with a deprel condition;
   * layers in longer queries (chains, mixed with sequence, `!>:deps` / `!<:deps`, `>>:deps`, `count by`), checked
-    against a brute-force evaluation per sentence.
+    against a brute-force evaluation per sentence;
+  * relation filters between named tokens (`:: a !>:head b`, `:: b >>:deps a`) next to the position order
+    (`:: a < b`);
+  * `--format conllu` to give back each token's DEPS (sorted; `_` as the basic edge; tokens with an edge to an empty
+    node left out of the comparison).
 Exit status 0 = all as required, 1 = a difference, 2 = a run error.
 """
 
@@ -99,15 +103,16 @@ def related(s, i, j, rel):
     return anc in seen and anc != desc
 
 
-def brute_count(path, conds, rels):
-    """Hits of a chain query: every assignment of sentence tokens to the query tokens."""
+def brute_count(path, conds, rels, extra=None):
+    """Hits of a chain query: every assignment of sentence tokens to the query tokens (and `extra(s, tokens)`, a
+    `::` filter, holds)."""
     n = 0
     for s in sentences(path):
         def extend(prefix):
             nonlocal n
             k = len(prefix)
             if k == len(conds):
-                n += 1
+                n += extra is None or extra(s, prefix)
                 return
             for j, t in enumerate(s):
                 if conds[k](t) and (k == 0 or related(s, prefix[-1], j, rels[k - 1])):
@@ -143,6 +148,19 @@ CHAINS = [   # query, token conditions, relations (op, layer, label)
      [("<", "deps", "nsubj"), ("<", "head", None)]),
     ('[upos="VERB"] >:deps:nsubj [] [upos="VERB"]', [UP("VERB"), ANY, UP("VERB")],
      [(">", "deps", "nsubj"), ("seq", None, None)]),
+]
+FILTERED = [   # `:: a REL b` between the two named tokens: query, conditions, chain relation, filter
+    ('a:[] >:deps b:[] :: a !>:head b', [ANY, ANY], [(">", "deps", None)],
+     lambda s, t: not related(s, t[0], t[1], (">", "head", None))),
+    ('a:[] >:deps b:[] :: a >:head b', [ANY, ANY], [(">", "deps", None)],
+     lambda s, t: related(s, t[0], t[1], (">", "head", None))),
+    ('a:[upos="VERB"] >:deps:nsubj b:[] :: a !>:head:nsubj b', [UP("VERB"), ANY], [(">", "deps", "nsubj")],
+     lambda s, t: not related(s, t[0], t[1], (">", "head", "nsubj"))),
+    ('a:[] > b:[] :: a !>:deps b', [ANY, ANY], [(">", "head", None)],
+     lambda s, t: not related(s, t[0], t[1], (">", "deps", None))),
+    ('a:[upos="NOUN"] [] b:[] :: b >>:deps a', [UP("NOUN"), ANY, ANY], [("seq", None, None), ("seq", None, None)],
+     lambda s, t: related(s, t[2], t[0], (">>", "deps", None))),
+    ('a:[] >:deps b:[] :: a < b', [ANY, ANY], [(">", "deps", None)], lambda s, t: t[0] < t[1]),
 ]
 NEGATED = [  # query, kept (head side), other (dependent side), layer, label
     ('[upos="VERB"] !>:deps:nsubj []', UP("VERB"), ANY, "deps", "nsubj"),
@@ -182,6 +200,7 @@ def main():
         return r.stdout.split()[-1] if r.returncode == 0 and r.stdout.split() else "ERROR " + r.stderr.strip()[:200]
 
     checks = [(q, brute_count(a.conllu, c, r)) for q, c, r in CHAINS]
+    checks += [(q, brute_count(a.conllu, c, r, f)) for q, c, r, f in FILTERED]
     checks += [(q, brute_negated(a.conllu, k, o, l, lab)) for q, k, o, l, lab in NEGATED]
     for q, want in checks:
         got = count(q)
@@ -205,6 +224,21 @@ def main():
     ok = got == want
     failures += not ok
     print(f"{'ok  ' if ok else 'FAIL'} count by b.lemma over >:deps:nsubj: {got} (reference {want})")
+
+    # DEPS round trip through the CoNLL-U output
+    r = subprocess.run([a.pando, "--limit", "100000", "--format", "conllu", d, "[]"], capture_output=True, text=True)
+    out = [l.split("\t") for l in r.stdout.splitlines() if l and not l.startswith("#")]
+    src = [t for s in sentences(a.conllu) for t in s]
+    bad = 0
+    for t, o in zip(src, out):
+        if any("." in e.split(":")[0] for e in t[8].split("|")):
+            continue
+        want = t[8] if t[8] != "_" else f"{t[6]}:{t[7]}"
+        want = "|".join(sorted(want.split("|"), key=lambda e: (int(e.split(":")[0]), e.split(":", 1)[1])))
+        bad += want != o[8]
+    ok = len(out) == len(src) and bad == 0
+    failures += not ok
+    print(f"{'ok  ' if ok else 'FAIL'} DEPS in --format conllu: {len(out)} tokens, {bad} different")
 
     b = subprocess.run([a.pando, "--count-only", d, '[upos="VERB"] > [deprel="nsubj"]'], capture_output=True, text=True)
     h = subprocess.run([a.pando, "--count-only", d, '[upos="VERB"] >:head:nsubj []'], capture_output=True, text=True)

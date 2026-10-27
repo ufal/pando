@@ -554,6 +554,18 @@ static std::string build_constituency_line(const Corpus& corpus, Region sent) {
 
 }  // namespace
 
+// The line under a page of hits, "21-40 of 1108 matches": when hits were left out, when the search stopped at the
+// page ("1-20 of 20+ matches", more may follow), and with --total always ("1108 matches" when the page holds them all).
+static std::string total_line(const MatchSet& ms, size_t stored, size_t end, const Options& opts) {
+    if (!opts.total && ms.total_exact && end >= stored) return "";   // all hits on the page
+    const size_t first = std::min(opts.offset, end);
+    const std::string total = std::to_string(ms.total_count) + (ms.total_exact ? "" : "+");
+    const std::string hint = !ms.total_exact && !opts.total ? " (--total for the exact count)" : "";
+    if (ms.total_exact && first == 0 && end >= ms.total_count) return total + (ms.total_count == 1 ? " match" : " matches");
+    if (end == first) return "no hits from " + std::to_string(first + 1) + " of " + total + " matches" + hint;
+    return std::to_string(first + 1) + "-" + std::to_string(end) + " of " + total + " matches" + hint;
+}
+
 static void emit_conllu(const Corpus& corpus, const MatchSet& ms, const Options& opts) {
     if (!corpus.has_structure("s")) {
         std::cerr << "Error: --conllu requires sentence structure 's' (build from CoNLL-U / UD index).\n";
@@ -561,6 +573,7 @@ static void emit_conllu(const Corpus& corpus, const MatchSet& ms, const Options&
     }
     const StructuralAttr& sent = corpus.structure("s");
     const bool has_deps = corpus.has_deps();
+    const RelationLayer* deps_layer = has_deps ? corpus.relation_layer("deps") : nullptr;
 
     size_t stored = ms.matches.size();
     size_t start = std::min(opts.offset, stored);
@@ -672,6 +685,21 @@ static void emit_conllu(const Corpus& corpus, const MatchSet& ms, const Options&
                 head_col = "_";
             }
 
+            // DEPS from the `deps` layer (relation_layer.h): its own edges, or the inherited basic edge; edges to
+            // empty nodes are not in the index
+            std::string deps_col = "_";
+            if (deps_layer) {
+                std::vector<std::pair<int, std::string>> edges;
+                deps_layer->for_each_head(p, [&](CorpusPos h, std::string_view label) {
+                    edges.emplace_back(h == NO_HEAD ? 0 : static_cast<int>(h - rgn.start + 1), std::string(label));
+                    return true;
+                });
+                std::sort(edges.begin(), edges.end());
+                if (!edges.empty()) deps_col.clear();
+                for (const auto& [h, label] : edges)
+                    deps_col += (deps_col.empty() ? "" : "|") + std::to_string(h) + ":" + label;
+            }
+
             std::string misc = "_";
             if (corpus.has_attr("tuid")) {
                 std::string_view tv = corpus.attr("tuid").value_at(p);
@@ -680,17 +708,13 @@ static void emit_conllu(const Corpus& corpus, const MatchSet& ms, const Options&
             }
 
             std::cout << tid << '\t' << form << '\t' << lemma << '\t' << upos << '\t' << xpos << '\t'
-                      << feats << '\t' << head_col << '\t' << deprel << "\t_\t" << misc << "\n";
+                      << feats << '\t' << head_col << '\t' << deprel << '\t' << deps_col << '\t' << misc << "\n";
         }
         std::cout << "\n";
     }
 
-    if (end < stored) {
-        if (ms.total_exact)
-            std::cout << "# (" << ms.total_count << " matches, " << (ms.total_count - end) << " more)\n";
-        else
-            std::cout << "# (" << ms.total_count << "+ matches, use --total for exact count)\n";
-    }
+    const std::string tl = total_line(ms, stored, end, opts);
+    if (!tl.empty()) std::cout << "# " << tl << "\n";
 }
 
 static void emit_kwic(const Corpus& corpus, const std::string& query_text,
@@ -790,13 +814,8 @@ static void emit_kwic(const Corpus& corpus, const std::string& query_text,
         std::cout << left << span << " " << right << "\n";
     }
 
-    if (end < stored) {
-        if (ms.total_exact)
-            std::cout << "(" << ms.total_count << " matches, "
-                      << (ms.total_count - end) << " more)\n";
-        else
-            std::cout << "(" << ms.total_count << "+ matches, use --total for exact count)\n";
-    }
+    const std::string tl = total_line(ms, stored, end, opts);
+    if (!tl.empty()) std::cout << tl << "\n";
 }
 
 static void emit_hits_text(const Corpus& corpus, const std::string& query_text,

@@ -357,6 +357,10 @@ struct TokenQuery {
     struct PositionOrder {
         std::string name1, name2;
         CompOp op;  // LT or GT; NEQ: two different tokens
+        // `:: a >:head b`, `:: a !>:head:nsubj b`, `:: a <<:deps b`: a relation between two named tokens (the layer
+        // is required here, as `:: a < b` is a position order); checked per hit
+        bool is_relation = false;
+        QueryRelation relation{};
     };
     std::vector<PositionOrder> position_orders;
 };
