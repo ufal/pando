@@ -7292,7 +7292,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
             if (tok.is_dep_subtree) any_dep_subtree = true;
         }
         if (n == 2 && no_rep && no_anchor && !any_dep_subtree
-            && q.relations.size() == 1 && corpus_.has_deps()
+            && q.relations.size() == 1 && q.relations[0].layer.empty() && corpus_.has_deps()
             && fastpath_mode() == FastPathMode::On) {
             RelationType rt = q.relations[0].type;
             if (rt == RelationType::GOVERNS || rt == RelationType::GOVERNED_BY) {
@@ -8387,7 +8387,7 @@ static bool rewrite_parent_query(const Corpus& corpus, const TokenQuery& q, Toke
 
 static bool rewrite_head_attrs(const Corpus& corpus, const TokenQuery& q, TokenQuery& out,
                                bool& parent_first) {
-    if (q.tokens.size() != 2 || q.relations.size() != 1) return false;
+    if (q.tokens.size() != 2 || q.relations.size() != 1 || !q.relations[0].layer.empty()) return false;
     const RelationType rt = q.relations[0].type;
     if (rt != RelationType::GOVERNS && rt != RelationType::GOVERNED_BY) return false;
     if (!corpus.has_deps() || !corpus.deps().head_rel_data()) return false;
@@ -8444,16 +8444,11 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
     if (TokenQuery simple; simplify_bare_strings(corpus_, query, simple))
         return execute(simple, max_matches, count_total, max_total_cap, sample_size, random_seed, num_threads,
                        aggregate_by_fields, skip_name_validation);
-    // relation layers: `>:head` is the basic tree; another layer has its own join (executor_layers.cpp)
+    // relation layers: `>:head` is the basic tree; another layer goes through the generic expansion
+    // (for_each_related with the layer, executor_layers.cpp), which every dependency fast path leaves to it
     if (TokenQuery hq; rewrite_head_layer(query, hq))
         return execute(hq, max_matches, count_total, max_total_cap, sample_size, random_seed, num_threads,
                        aggregate_by_fields, skip_name_validation);
-    for (const auto& r : query.relations)
-        if (!r.layer.empty()) {
-            if ((aggregate_by_fields && !aggregate_by_fields->empty()) || sample_size > 0)
-                throw std::runtime_error(":" + r.layer + " takes no count by or sample yet; the hits and their total work");
-            return execute_layer_relation(query, max_matches, count_total, max_total_cap);
-        }
     // P4.14: `within R having COND` → a precomputed restriction (unless PANDO_HAVING_MASK=off)
     static const bool having_mask = [] {
         const char* v = std::getenv("PANDO_HAVING_MASK");
@@ -8927,7 +8922,7 @@ void QueryExecutor::expand_seed(const TokenQuery& query,
                     CorpusPos from_pos = pm[step.from];
                     if (from_pos == NO_HEAD) continue;
                     bool any_match = false;
-                    for_each_related(from_pos, pos_rel, step.reversed, [&](CorpusPos r) -> bool {
+                    for_each_related(from_pos, query.relations[step.edge_idx], pos_rel, step.reversed, [&](CorpusPos r) -> bool {
                         if (r >= 0 && r < corpus_.size() &&
                             check_conditions(r, target_cond)) {
                             any_match = true;
@@ -9028,7 +9023,7 @@ void QueryExecutor::expand_seed(const TokenQuery& query,
                         new_partial.push_back(std::move(skipped));
                     }
 
-                    for_each_related(from_pos, rel, step.reversed, [&](CorpusPos r) -> bool {
+                    for_each_related(from_pos, query.relations[step.edge_idx], rel, step.reversed, [&](CorpusPos r) -> bool {
                         if (r >= 0 && r < corpus_.size() &&
                             check_conditions(r, target_cond)) {
                             auto extended = pm;
@@ -9966,14 +9961,14 @@ TokenQuery QueryExecutor::strip_anchors(const TokenQuery& query,
         // Find the relation on the edge closest to 'from' going toward 'to'
         // The original relations[i] connects tokens[i] and tokens[i+1]
         // Between from and to, pick the first non-anchor relation
-        RelationType rel = RelationType::SEQUENCE;  // default
+        QueryRelation rel{RelationType::SEQUENCE};  // default
         for (size_t e = from; e < to && e < query.relations.size(); ++e) {
             if (!query.tokens[e].is_anchor() || !query.tokens[e + 1].is_anchor()) {
-                rel = query.relations[e].type;
+                rel = query.relations[e];
                 break;
             }
         }
-        cleaned.relations.push_back({rel});
+        cleaned.relations.push_back(rel);
     }
 
     return cleaned;

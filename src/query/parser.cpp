@@ -1406,6 +1406,7 @@ ConditionPtr Parser::parse_primary_condition() {
 }
 
 bool Parser::try_parse_relation(QueryRelation& rel) {
+    rel = QueryRelation{};   // callers reuse one variable along a chain: no layer or label carried over
     Token t = lexer_.peek();
     switch (t.type) {
         case TokType::GT:      rel.type = RelationType::GOVERNS;       break;
@@ -1450,9 +1451,9 @@ bool Parser::try_parse_relation(QueryRelation& rel) {
             lexer_.consume();
             rel.label = label.text;
         }
-        if (rel.type != RelationType::GOVERNS && rel.type != RelationType::GOVERNED_BY)
-            throw std::runtime_error("A relation layer (':" + rel.layer + "') goes with > or <: [A] >:" + rel.layer +
-                                     " [B] (B's " + rel.layer + " head is A) or [A] <:" + rel.layer + " [B]");
+        if (!rel.label.empty() && (rel.type == RelationType::TRANS_GOVERNS || rel.type == RelationType::TRANS_GOV_BY))
+            throw std::runtime_error("A label goes with a single edge (>:" + rel.layer + ":" + rel.label + ", <:, !>:, !<:); >>:" +
+                                     rel.layer + " and <<:" + rel.layer + " follow edges of any label");
     }
     return true;
 }

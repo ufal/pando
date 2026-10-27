@@ -890,9 +890,8 @@ public:
                      bool skip_name_validation = false);
 
     // Relation layers (executor_layers.cpp): `>:head[:label]` rewritten into the basic tree; another layer
-    // (`[A] >:deps [B]`) joined from the dependent side, one hit per pair
+    // (`[A] >:deps [B]`) is traversed edge by edge in the generic expansion (find_layer_related)
     static bool rewrite_head_layer(const TokenQuery& q, TokenQuery& out);
-    MatchSet execute_layer_relation(const TokenQuery& q, size_t max_matches, bool count_total, size_t max_total_cap) const;
 
     // #16: Source | Target: run source and target queries, join on source_query.global_alignment_filters.
     // Returns MatchSet with parallel_matches filled; matches is empty.
@@ -997,6 +996,22 @@ private:
             for (CorpusPos r : v)
                 if (!f(r)) break;
         }
+    }
+
+    // The positions related to `pos` in a relation layer (`>:deps`, `<:deps:nsubj`, `>>:deps`): `rel` as in
+    // find_related (a negated type is traversed as its positive form), distinct positions in corpus order.
+    std::vector<CorpusPos> find_layer_related(CorpusPos pos, const QueryRelation& qr, RelationType rel,
+                                              bool reversed) const;
+
+    // As above, through the relation's layer when it names one (`qr.layer`), else the basic tree.
+    template<typename F>
+    void for_each_related(CorpusPos pos, const QueryRelation& qr, RelationType rel, bool reversed, F&& f) const {
+        if (qr.layer.empty()) {
+            for_each_related(pos, rel, reversed, std::forward<F>(f));
+            return;
+        }
+        for (CorpusPos r : find_layer_related(pos, qr, rel, reversed))
+            if (!f(r)) break;
     }
 
     // ── Seed resolution (uses inverted index for the starting token) ────

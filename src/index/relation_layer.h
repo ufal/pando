@@ -10,9 +10,14 @@
 //   rel.NAME.tgt     int64  per edge the target position (the head), -1 for the root
 //   rel.NAME.lab     int32  per edge the label id
 //   rel.NAME.labels  text   the labels, one per line, by id
+//   rel.NAME.rtgt    int64  the deviating edges again, by target (head) ascending: the heads (roots left out)
+//   rel.NAME.rsrc    int64  … their sources (the dependents)
+//   rel.NAME.rlab    int32  … their label ids
 
 #include "core/mmap_file.h"
 #include "core/types.h"
+
+#include <algorithm>
 
 #include <cstdio>
 #include <string>
@@ -59,6 +64,9 @@ private:
     FILE* off_ = nullptr;
     FILE* tgt_ = nullptr;
     FILE* lab_ = nullptr;
+    FILE* rtgt_ = nullptr;
+    FILE* rsrc_ = nullptr;
+    FILE* rlab_ = nullptr;
     int64_t written_edges_ = 0;
     std::unordered_map<std::string, int32_t> label_ids_;
     std::vector<std::string> labels_;
@@ -78,13 +86,18 @@ public:
     template <typename F>
     void for_each_head(CorpusPos pos, F&& f) const;
 
+    // f(dependent position, label) for every edge whose head is `pos`: the inherited basic children (those that do not
+    // deviate) and the deviating tokens' edges to `pos`; f returns false to stop
+    template <typename F>
+    void for_each_child(CorpusPos pos, F&& f) const;
+
     size_t deviating() const { return nsrc_; }
     const std::string& label(int32_t id) const { return labels_[static_cast<size_t>(id)]; }
 
 private:
     bool valid_ = false;
-    MmapFile src_, off_, tgt_, lab_;
-    size_t nsrc_ = 0;
+    MmapFile src_, off_, tgt_, lab_, rtgt_, rsrc_, rlab_;
+    size_t nsrc_ = 0, nedge_ = 0, nrev_ = 0;
     std::vector<std::string> labels_;
     const DependencyIndex* base_ = nullptr;
     const PositionalAttr* base_label_ = nullptr;
@@ -93,6 +106,7 @@ private:
     int64_t find(CorpusPos pos) const;
     CorpusPos base_head(CorpusPos pos) const;
     std::string_view base_label(CorpusPos pos) const;
+    std::vector<CorpusPos> base_children(CorpusPos pos) const;
 };
 
 template <typename F>
@@ -107,6 +121,19 @@ void RelationLayer::for_each_head(CorpusPos pos, F&& f) const {
     const auto* lab = lab_.as<int32_t>();
     for (int64_t e = off[i]; e < off[i + 1]; ++e)
         if (!f(static_cast<CorpusPos>(tgt[e]), std::string_view(labels_[static_cast<size_t>(lab[e])]))) return;
+}
+
+template <typename F>
+void RelationLayer::for_each_child(CorpusPos pos, F&& f) const {
+    for (CorpusPos c : base_children(pos))
+        if (find(c) < 0 && !f(c, base_label(c))) return;
+    if (nrev_ == 0) return;
+    const auto* rtgt = rtgt_.as<int64_t>();
+    const auto* rsrc = rsrc_.as<int64_t>();
+    const auto* rlab = rlab_.as<int32_t>();
+    for (auto e = std::lower_bound(rtgt, rtgt + nrev_, static_cast<int64_t>(pos)) - rtgt;
+         e < static_cast<int64_t>(nrev_) && rtgt[e] == pos; ++e)
+        if (!f(static_cast<CorpusPos>(rsrc[e]), std::string_view(labels_[static_cast<size_t>(rlab[e])]))) return;
 }
 
 }  // namespace pando

@@ -31,3 +31,9 @@
 6	newspapers	newspaper	NOUN	_	_	5	orphan	5.1:obj	SpaceAfter=No
 7	.	.	PUNCT	_	_	2	punct	_	_
 
+# sent_id = d4
+# text = Run home!
+1	Run	run	VERB	_	_	0	root	0:root	_
+2	home	home	ADV	_	_	1	advmod	1:advmod	SpaceAfter=No
+3	!	!	PUNCT	_	_	1	punct	1:punct	_
+

@@ -8,7 +8,9 @@ an empty node, a token with DEPS `_`) and requires:
   * `relation.deps=…,inherit=head` in corpus.info, only the deviating tokens stored;
   * `[A] >:deps [B]`, `[A] <:deps [B]`, labels (`>:deps:nsubj`, quoted `>:deps:"conj:and"`) to count as a direct
     count in the CoNLL-U (edges to empty nodes left out, DEPS `_` = the basic edge);
-  * `>:head:label` to equal `>` with a deprel condition.
+  * `>:head:label` to equal `>` with a deprel condition;
+  * layers in longer queries (chains, mixed with sequence, `!>:deps` / `!<:deps`, `>>:deps`, `count by`), checked
+    against a brute-force evaluation per sentence.
 Exit status 0 = all as required, 1 = a difference, 2 = a run error.
 """
 
@@ -72,6 +74,83 @@ CASES = [   # query, reference(head_ok, dep_ok, label, basic)
 ]
 
 
+def layer_heads(tok, layer, label=None):
+    """1-based heads of a token in a layer ('deps' or 'head'), optionally with one label."""
+    edges = deps_edges(tok) if layer == "deps" else {(int(tok[6]), tok[7])}
+    return {h for h, lab in edges if h > 0 and (label is None or lab == label)}
+
+
+def related(s, i, j, rel):
+    """rel holds between 0-based tokens i and j of sentence s (i written first in the query)."""
+    op, layer, label = rel
+    if op == "seq":
+        return j == i + 1
+    if op in (">", "<"):
+        head, dep = (i, j) if op == ">" else (j, i)
+        return head + 1 in layer_heads(s[dep], layer, label)
+    # >> / <<: reachable over one or more edges
+    anc, desc = (i, j) if op == ">>" else (j, i)
+    seen, todo = set(), [desc]
+    while todo:
+        for h in layer_heads(s[todo.pop()], layer):
+            if h - 1 not in seen:
+                seen.add(h - 1)
+                todo.append(h - 1)
+    return anc in seen and anc != desc
+
+
+def brute_count(path, conds, rels):
+    """Hits of a chain query: every assignment of sentence tokens to the query tokens."""
+    n = 0
+    for s in sentences(path):
+        def extend(prefix):
+            nonlocal n
+            k = len(prefix)
+            if k == len(conds):
+                n += 1
+                return
+            for j, t in enumerate(s):
+                if conds[k](t) and (k == 0 or related(s, prefix[-1], j, rels[k - 1])):
+                    extend(prefix + [j])
+        extend([])
+    return n
+
+
+def brute_negated(path, kept_cond, other_cond, layer, label):
+    """`[A] !> [B]` keeps A, `[A] !< [B]` keeps B: the head side, kept when no dependent has the other condition."""
+    n = 0
+    for s in sentences(path):
+        for k, t in enumerate(s):
+            if kept_cond(t):
+                n += not any(other_cond(d) and k + 1 in layer_heads(d, layer, label) for d in s)
+    return n
+
+
+UP = lambda u: (lambda t: t[3] == u)
+LEM = lambda l: (lambda t: t[2] == l)
+CHAINS = [   # query, token conditions, relations (op, layer, label)
+    ('[upos="PROPN"] <:deps:nsubj [upos="VERB"] >:deps:obj []', [UP("PROPN"), UP("VERB"), ANY],
+     [("<", "deps", "nsubj"), (">", "deps", "obj")]),
+    ('[upos="DET"] [upos="NOUN"] <:deps [upos="VERB"]', [UP("DET"), UP("NOUN"), UP("VERB")],
+     [("seq", None, None), ("<", "deps", None)]),
+    ('[lemma="sleep"] >>:deps []', [LEM("sleep"), ANY], [(">>", "deps", None)]),
+    ('[] <<:deps [lemma="sleep"]', [ANY, LEM("sleep")], [("<<", "deps", None)]),
+    ('[upos="NOUN"] <:deps [] <:deps []', [UP("NOUN"), ANY, ANY], [("<", "deps", None), ("<", "deps", None)]),
+    ('[upos="NOUN"] <:deps [upos="VERB"] <:head:conj []', [UP("NOUN"), UP("VERB"), ANY],
+     [("<", "deps", None), ("<", "head", "conj")]),
+    # a layer on one edge must not carry over to the next plain one
+    ('[upos="NOUN"] <:deps:nsubj [upos="VERB"] < []', [UP("NOUN"), UP("VERB"), ANY],
+     [("<", "deps", "nsubj"), ("<", "head", None)]),
+    ('[upos="VERB"] >:deps:nsubj [] [upos="VERB"]', [UP("VERB"), ANY, UP("VERB")],
+     [(">", "deps", "nsubj"), ("seq", None, None)]),
+]
+NEGATED = [  # query, kept (head side), other (dependent side), layer, label
+    ('[upos="VERB"] !>:deps:nsubj []', UP("VERB"), ANY, "deps", "nsubj"),
+    ('[upos="NOUN"] !<:deps [upos="VERB"]', UP("VERB"), UP("NOUN"), "deps", None),
+    ('[upos="VERB"] !>:head:nsubj []', UP("VERB"), ANY, "head", "nsubj"),
+]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--pando", required=True)
@@ -98,6 +177,35 @@ def main():
         ok = got == str(want)
         failures += not ok
         print(f"{'ok  ' if ok else 'FAIL'} {q}: {got} (reference {want})")
+    def count(q):
+        r = subprocess.run([a.pando, "--count-only", d, q], capture_output=True, text=True)
+        return r.stdout.split()[-1] if r.returncode == 0 and r.stdout.split() else "ERROR " + r.stderr.strip()[:200]
+
+    checks = [(q, brute_count(a.conllu, c, r)) for q, c, r in CHAINS]
+    checks += [(q, brute_negated(a.conllu, k, o, l, lab)) for q, k, o, l, lab in NEGATED]
+    for q, want in checks:
+        got = count(q)
+        ok = got == str(want)
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} {q}: {got} (reference {want})")
+
+    # count by over a layer: the groups add up as the reference says
+    want = {}
+    for s in sentences(a.conllu):
+        for t in s:
+            for h in layer_heads(t, "deps", "nsubj"):
+                if s[h - 1][3] == "VERB":
+                    want[t[2]] = want.get(t[2], 0) + 1
+    r = subprocess.run([a.pando, d, 'a:[upos="VERB"] >:deps:nsubj b:[]; count by b.lemma'], capture_output=True, text=True)
+    got = {}
+    for line in r.stdout.splitlines():
+        f = line.split("\t")
+        if len(f) >= 2 and f[1].isdigit():
+            got[f[0]] = int(f[1])
+    ok = got == want
+    failures += not ok
+    print(f"{'ok  ' if ok else 'FAIL'} count by b.lemma over >:deps:nsubj: {got} (reference {want})")
+
     b = subprocess.run([a.pando, "--count-only", d, '[upos="VERB"] > [deprel="nsubj"]'], capture_output=True, text=True)
     h = subprocess.run([a.pando, "--count-only", d, '[upos="VERB"] >:head:nsubj []'], capture_output=True, text=True)
     if b.stdout.split()[-1:] != h.stdout.split()[-1:]:

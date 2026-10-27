@@ -1,13 +1,15 @@
-// Relation layers in queries (dev/PROPOSAL-RELATION-LAYERS.md): `[A] >:X [B]` / `[A] <:X [B]`, optionally with a label
-// (`>:X:nsubj`). `>:head` is the basic tree: rewritten into `>` / `<` with a deprel condition, so the tree's fast paths
-// apply. Other layers (relation_layer.h, e.g. enhanced `deps`) are joined here: the dependent side's candidates, each
-// one's heads in the layer (its own edges, or the inherited basic edge), the head side checked at each head; one hit
-// per (head, dependent) pair.
+// Relation layers in queries (dev/PROPOSAL-RELATION-LAYERS.md): `[A] >:X [B]`, `<:X`, `!>:X`, `!<:X`, `>>:X`, `<<:X`,
+// optionally with a label on a single edge (`>:X:nsubj`). `>:head` is the basic tree: rewritten into the plain operators
+// with a deprel condition, so the tree's fast paths apply. Other layers (relation_layer.h, e.g. enhanced `deps`) are
+// traversed edge by edge in the generic expansion (expand_seed → for_each_related), so they combine with everything
+// it supports: more tokens, names, filters, within, count by. One hit per (head, dependent) pair: an edge repeated
+// with another label is one relation between the two tokens.
 
 #include "query/executor.h"
 
 #include <algorithm>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace pando {
 
@@ -21,8 +23,9 @@ bool QueryExecutor::rewrite_head_layer(const TokenQuery& q, TokenQuery& out) {
         QueryRelation& r = out.relations[i];
         if (r.layer != "head") continue;
         if (!r.label.empty()) {
-            // the label is the dependent's deprel: B for `[A] > [B]`, A for `[A] < [B]`
-            QueryToken& dep = out.tokens[r.type == RelationType::GOVERNS ? i + 1 : i];
+            // the label is the dependent's deprel: B for `[A] > [B]` / `!>`, A for `[A] < [B]` / `!<`
+            const bool dep_second = r.type == RelationType::GOVERNS || r.type == RelationType::NOT_GOVERNS;
+            QueryToken& dep = out.tokens[dep_second ? i + 1 : i];
             AttrCondition ac;
             ac.attr = "deprel";
             ac.op = CompOp::EQ;
@@ -36,76 +39,49 @@ bool QueryExecutor::rewrite_head_layer(const TokenQuery& q, TokenQuery& out) {
     return true;
 }
 
-MatchSet QueryExecutor::execute_layer_relation(const TokenQuery& q, size_t max_matches, bool count_total,
-                                               size_t max_total_cap) const {
-    const QueryRelation& rel = q.relations.at(0);
-    const RelationLayer* layer = corpus_.relation_layer(rel.layer);
-    if (!layer)
-        throw std::runtime_error("This corpus has no relation layer '" + rel.layer + "'" +
-                                 (corpus_.relations().empty() ? std::string() : " (it has: " + [&] {
-                                     std::string names;
-                                     for (const auto& r : corpus_.relations()) names += (names.empty() ? "" : ", ") + r.name;
-                                     return names;
-                                 }() + ")"));
-    if (q.tokens.size() != 2 || q.relations.size() != 1)
-        throw std::runtime_error(":" + rel.layer + " works between two tokens for now: [A] >:" + rel.layer + " [B]");
-    for (const auto& t : q.tokens)
-        if (t.has_repetition() || t.is_anchor() || t.is_dep_subtree)
-            throw std::runtime_error(":" + rel.layer + " takes plain tokens on both sides for now");
-    if (!q.global_region_filters.empty() || !q.global_alignment_filters.empty() || !q.global_function_filters.empty()
-        || !q.position_orders.empty() || q.within_having || q.not_within || !q.containing_clauses.empty())
-        throw std::runtime_error(":" + rel.layer + " takes no :: filters, within, containing yet; plain tokens work");
-
-    // [A] >:X [B]: B's X heads include A (A governs); [A] <:X [B]: A's X heads include B
-    const bool head_first = rel.type == RelationType::GOVERNS;
-    const size_t dep_i = head_first ? 1 : 0, head_i = 1 - dep_i;
-    const ConditionPtr& dep_cond = q.tokens[dep_i].conditions;
-    const ConditionPtr& head_cond = q.tokens[head_i].conditions;
-
-    std::vector<CorpusPos> deps = dep_cond ? resolve_conditions(dep_cond) : std::vector<CorpusPos>{};
-    if (!dep_cond) {
-        deps.resize(static_cast<size_t>(corpus_.size()));
-        for (size_t p = 0; p < deps.size(); ++p) deps[p] = static_cast<CorpusPos>(p);
+std::vector<CorpusPos> QueryExecutor::find_layer_related(CorpusPos pos, const QueryRelation& qr, RelationType rel,
+                                                         bool reversed) const {
+    const RelationLayer* layer = corpus_.relation_layer(qr.layer);
+    if (!layer) {
+        std::string names;
+        for (const auto& r : corpus_.relations()) names += (names.empty() ? "" : ", ") + r.name;
+        throw std::runtime_error("This corpus has no relation layer '" + qr.layer + "'" +
+                                 (names.empty() ? std::string() : " (it has: " + names + ")"));
     }
+    // the direction actually walked: towards the dependents (down) or the heads (up)
+    bool down = rel == RelationType::GOVERNS || rel == RelationType::TRANS_GOVERNS || rel == RelationType::NOT_GOVERNS;
+    if (reversed) down = !down;
+    const bool transitive = rel == RelationType::TRANS_GOVERNS || rel == RelationType::TRANS_GOV_BY;
 
-    MatchSet result;
-    result.num_tokens = 2;
-    result.plan_path = "layer_join";
-    std::vector<std::pair<CorpusPos, CorpusPos>> pairs;   // (first token, second token)
-    size_t total = 0;
-    bool capped = false;
-    for (CorpusPos d : deps) {
-        layer->for_each_head(d, [&](CorpusPos h, std::string_view label) {
-            if (h == NO_HEAD) return true;
-            if (!rel.label.empty() && label != rel.label) return true;
-            if (head_cond && !check_conditions(h, head_cond)) return true;
-            ++total;
-            if (max_matches == 0 || pairs.size() < max_matches || count_total)
-                pairs.emplace_back(head_first ? h : d, head_first ? d : h);
-            if (max_total_cap > 0 && total >= max_total_cap) { capped = true; return false; }
+    std::vector<CorpusPos> out;
+    auto step = [&](CorpusPos from, auto&& f) {
+        auto take = [&](CorpusPos p, std::string_view label) {
+            if (p != NO_HEAD && (qr.label.empty() || label == qr.label)) f(p);
             return true;
-        });
-        if (capped) break;
-        if (!count_total && max_matches > 0 && pairs.size() >= max_matches) break;
+        };
+        if (down) layer->for_each_child(from, take);
+        else layer->for_each_head(from, take);
+    };
+    if (!transitive) {
+        step(pos, [&](CorpusPos p) { out.push_back(p); });
+    } else {
+        // a layer need not be a tree: every token reachable over one or more edges, each once
+        std::unordered_set<CorpusPos> seen{pos};
+        std::vector<CorpusPos> todo{pos};
+        while (!todo.empty()) {
+            const CorpusPos from = todo.back();
+            todo.pop_back();
+            step(from, [&](CorpusPos p) {
+                if (seen.insert(p).second) {
+                    out.push_back(p);
+                    todo.push_back(p);
+                }
+            });
+        }
     }
-    // one hit per pair (a layer may repeat an edge with another label), in corpus order of the first token
-    std::sort(pairs.begin(), pairs.end());
-    const size_t before = pairs.size();
-    pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
-    total -= before - pairs.size();
-    const size_t keep = max_matches == 0 ? pairs.size() : std::min(max_matches, pairs.size());
-    result.matches.reserve(keep);
-    for (size_t i = 0; i < keep; ++i) {
-        Match m;
-        m.positions.push_back(pairs[i].first);
-        m.positions.push_back(pairs[i].second);
-        m.span_ends.push_back(pairs[i].first);
-        m.span_ends.push_back(pairs[i].second);
-        result.matches.push_back(std::move(m));
-    }
-    result.total_count = count_total ? total : result.matches.size();
-    result.total_exact = !capped && (count_total || max_matches == 0 || pairs.size() < max_matches);
-    return result;
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
 }
 
 }  // namespace pando
