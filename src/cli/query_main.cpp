@@ -2150,7 +2150,7 @@ static void emit_dcoll(const Corpus& corpus, const MatchSet& ms,
         return;
     }
     const auto& pa = corpus.attr(coll_attr_of(corpus, cmd));
-    DcollCounter counter(corpus, pa, cmd.relations);
+    DcollCounter counter(corpus, pa, cmd.relations, cmd.dcoll_layer);
     if (!bd.empty()) counter.set_breakdown(&corpus.attr(bd));
     count_dcoll_hits(counter, ms, cmd, name_map, target_name_map);
     const CollCounts cc = counter.finish();
@@ -2711,7 +2711,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                     } else if (targets && c.type == CommandType::DCOLL && corpus.has_deps()
                                && (dcoll_breakdown_name(c).empty() || corpus.has_attr(dcoll_breakdown_name(c)))) {
                         sink_state.dcoll = std::make_unique<DcollCounter>(
-                                corpus, corpus.attr(coll_attr_of(corpus, c)), c.relations);
+                                corpus, corpus.attr(coll_attr_of(corpus, c)), c.relations, c.dcoll_layer);
                         if (!dcoll_breakdown_name(c).empty())
                             sink_state.dcoll->set_breakdown(&corpus.attr(dcoll_breakdown_name(c)));
                         sink_state.sink = std::make_unique<DcollHitSink>(*sink_state.dcoll,

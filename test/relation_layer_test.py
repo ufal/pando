@@ -354,6 +354,48 @@ def main():
     print(f"{'ok  ' if not bad and enumerated == len(dev_queries) else 'FAIL'} deviations of thin layers: "
           f"{len(dev_queries) - bad} of {len(dev_queries)} equal to the generic path, {enumerated} enumerated")
 
+    # dcoll over a layer (`dcoll (via L)`): the relatives of the nodes over the layer's edges, as the reference gives
+    # them (deps from DEPS, eff from the rule); a deprel once per edge with that label, the head and all children
+    # once per node
+    def dcoll(q):
+        r = subprocess.run([a.pando, "--min-freq", "1", d, q], capture_output=True, text=True)
+        out = {}
+        for line in r.stdout.splitlines():
+            f = line.split("\t")
+            if len(f) >= 2 and f[1].isdigit():
+                out[f[0]] = int(f[1])
+        return out if r.returncode == 0 else {"ERROR": r.stderr.strip()[:200]}
+    bad = 0
+    for L in ("deps", "eff"):
+        edges = []   # per sentence, per token: its (1-based head, label) edges in L
+        for s in sentences(a.conllu):
+            edges.append([deps_edges(t) for t in s] if L == "deps" else list(derived_edges(s, True)))
+        for node, rel in [("VERB", "nsubj"), ("VERB", "head"), ("VERB", "children"), ("VERB", "xcomp")]:
+            want = {}
+            for s, es in zip(sentences(a.conllu), edges):
+                for j, e in enumerate(es):
+                    if rel == "head":
+                        if s[j][3] != node:
+                            continue
+                        for h in {h for h, _ in e if h > 0 and h - 1 != j}:
+                            want[s[h - 1][2]] = want.get(s[h - 1][2], 0) + 1
+                    elif rel == "children":
+                        for h in {h for h, _ in e if h > 0}:
+                            if s[h - 1][3] == node:
+                                want[s[j][2]] = want.get(s[j][2], 0) + 1
+                    else:
+                        for h, lab in e:
+                            if h > 0 and lab == rel and s[h - 1][3] == node:
+                                want[s[j][2]] = want.get(s[j][2], 0) + 1
+            got = dcoll(f'[upos="{node}"]; dcoll (via {L}) {rel} by lemma')
+            if got != want or not want:
+                bad += 1
+                print(f"FAIL dcoll (via {L}) {rel} on {node}: {got} (reference {want})")
+    r = subprocess.run([a.pando, d, '[]; dcoll (via nolayer) nsubj by lemma'], capture_output=True, text=True)
+    bad += "no pointer layer 'nolayer'" not in r.stdout + r.stderr
+    failures += bad
+    print(f"{'ok  ' if not bad else 'FAIL'} dcoll (via deps / eff): nsubj, head, children, xcomp against the reference")
+
     # DEPS round trip through the CoNLL-U output
     r = subprocess.run([a.pando, "--limit", "100000", "--format", "conllu", d, "[]"], capture_output=True, text=True)
     out = [l.split("\t") for l in r.stdout.splitlines() if l and not l.startswith("#")]

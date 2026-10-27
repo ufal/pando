@@ -414,6 +414,8 @@ struct GroupCommand {
 
     // dcoll anchor: named token to start from (empty = first_pos)
     std::string dcoll_anchor;
+    // dcoll `(via L)`: the relatives over the relation layer L (`eff`, `deps`) instead of the basic tree
+    std::string dcoll_layer;
 
     // coll: optional named token to centre the left/right window on (empty = span envelope)
     std::string coll_on_label;

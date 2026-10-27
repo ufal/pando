@@ -1745,7 +1745,7 @@ static void emit_coll_result_json(std::ostream& out, const Corpus& corpus, const
 static CollCounts count_dcoll_hits(const Corpus& corpus, const PositionalAttr& pa, const MatchSet& ms,
                                    const GroupCommand& cmd, const NameIndexMap& name_map,
                                    const NameIndexMap* target_name_map) {
-    DcollCounter counter(corpus, pa, cmd.relations);
+    DcollCounter counter(corpus, pa, cmd.relations, cmd.dcoll_layer);
     const std::string bd = dcoll_breakdown_name(cmd);
     if (!bd.empty() && corpus.has_attr(bd)) counter.set_breakdown(&corpus.attr(bd));
     auto emit_one = [&](const Match& m, const Match* tgt) {
@@ -1817,7 +1817,7 @@ static bool sink_coll_json(std::ostream& out, const Corpus& corpus, HitSet& hs, 
     } else {
         const std::string bd = dcoll_breakdown_name(cmd);
         if (!bd.empty() && !corpus.has_attr(bd)) return false;   // emit_dcoll_json reports it
-        dc.emplace(corpus, pa, cmd.relations);
+        dc.emplace(corpus, pa, cmd.relations, cmd.dcoll_layer);
         if (!bd.empty()) dc->set_breakdown(&corpus.attr(bd));
         sink = std::make_unique<DcollHitSink>(*dc, index_of(cmd.dcoll_anchor, -1));
     }

@@ -59,10 +59,13 @@ private:
 /// `dcoll`: dependency relatives of each node token. `relations` as in the
 /// command: empty = all children; "head", "children", "descendants", else a
 /// deprel of the children (several may be given; each adds its own counts).
+/// `layer` (`dcoll (via eff) …`): the relatives over that relation layer
+/// (relation_layer.h; its labels as deprels), not the basic tree; "" or "head" =
+/// the basic tree. Throws when the corpus has no such layer.
 class DcollCounter {
 public:
     DcollCounter(const Corpus& corpus, const PositionalAttr& pa,
-                 const std::vector<std::string>& relations);
+                 const std::vector<std::string>& relations, const std::string& layer = "");
 
     void add_node(CorpusPos node) { nodes_.push_back(node); }
     size_t nodes() const { return nodes_.size(); }
@@ -78,6 +81,9 @@ public:
 private:
     void count(CorpusPos p, uint32_t times = 1);
     CollCounts done() const;
+    CollCounts finish_layer();
+    const RelationLayer* layer_ = nullptr;
+    std::vector<std::string> deprel_names_;   // the deprels asked for, as the layer's labels
     const PositionalAttr* bd_ = nullptr;
     std::unordered_map<uint64_t, size_t> bd_counts_;
     const Corpus& corpus_;

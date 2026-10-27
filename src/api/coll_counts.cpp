@@ -1,7 +1,9 @@
 #include "api/coll_counts.h"
 
 #include <algorithm>
+#include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace pando {
 
@@ -77,8 +79,18 @@ breakdown_by_collocate(const CollCounts& cc) {
 // ── dcoll ───────────────────────────────────────────────────────────────
 
 DcollCounter::DcollCounter(const Corpus& corpus, const PositionalAttr& pa,
-                           const std::vector<std::string>& relations)
+                           const std::vector<std::string>& relations, const std::string& layer)
     : corpus_(corpus), pa_(pa), counts_(pa.lexicon().size(), 0) {
+    if (!layer.empty() && layer != "head") {
+        layer_ = corpus.relation_layer(layer);
+        if (!layer_) {
+            std::string names;
+            for (const auto& r : corpus.relations())
+                if (r.kind == RelationDecl::Kind::Pointer) names += (names.empty() ? "" : ", ") + r.name;
+            throw std::runtime_error("dcoll (via " + layer + "): this corpus has no pointer layer '" + layer + "'" +
+                                     (names.empty() ? std::string() : " (it has: " + names + ")"));
+        }
+    }
     const PositionalAttr* deprel = corpus.has_attr("deprel") ? &corpus.attr("deprel") : nullptr;
     if (relations.empty()) want_all_children_ = true;
     for (const auto& rel : relations) {
@@ -87,6 +99,8 @@ DcollCounter::DcollCounter(const Corpus& corpus, const PositionalAttr& pa,
         else if (rel == "children") want_all_children_ = true;
         else {
             deprel_filter_ = true;
+            if (std::find(deprel_names_.begin(), deprel_names_.end(), rel) == deprel_names_.end())
+                deprel_names_.push_back(rel);
             if (deprel) {
                 LexiconId id = deprel->lexicon().lookup(rel);
                 if (id >= 0 && std::find(deprel_ids_.begin(), deprel_ids_.end(), id) == deprel_ids_.end())
@@ -116,6 +130,7 @@ CollCounts DcollCounter::done() const {
 
 CollCounts DcollCounter::finish() {
     if (!corpus_.has_deps() || nodes_.empty()) return done();
+    if (layer_) return finish_layer();
     const auto& deps = corpus_.deps();
     const CorpusPos n = corpus_.size();
 
@@ -208,6 +223,133 @@ CollCounts DcollCounter::finish() {
                     if (uint32_t k = times_of(h)) count(c, k);
                 return true;
             });
+    return done();
+}
+
+// `dcoll (via L)`: the relatives over a relation layer. A token can have several heads there (a conjunct's subject
+// on each verb), and a head the same dependent twice under different labels: all children and descendants count a
+// relative once per node, a deprel once per edge with that label (as the deprels of the basic tree each add their
+// own counts). With many nodes the children are found from the child side, as on the basic tree: a layer stored
+// as deviations (inherit=head) is the basic tree except at its deviating tokens, so one pass over the basic heads
+// skips those and their own edges are added.
+CollCounts DcollCounter::finish_layer() {
+    const RelationLayer& L = *layer_;
+    auto wanted = [&](std::string_view label) {
+        for (const auto& n : deprel_names_)
+            if (label == n) return true;
+        return false;
+    };
+    if (want_head_)
+        for (CorpusPos node : nodes_) {
+            CorpusPos last = NO_HEAD;
+            L.for_each_head(node, [&](CorpusPos h, std::string_view) {
+                if (h != NO_HEAD && h != node && h != last) count(h);
+                last = h;   // edges come sorted by head
+                return true;
+            });
+        }
+    if (want_descendants_)
+        for (CorpusPos node : nodes_) {
+            std::unordered_set<CorpusPos> seen{node};
+            std::vector<CorpusPos> todo{node};
+            while (!todo.empty()) {
+                const CorpusPos from = todo.back();
+                todo.pop_back();
+                L.for_each_child(from, [&](CorpusPos c, std::string_view) {
+                    if (seen.insert(c).second) {
+                        count(c);
+                        todo.push_back(c);
+                    }
+                    return true;
+                });
+            }
+        }
+    if (!want_all_children_ && !deprel_filter_) return done();
+
+    const CorpusPos n = corpus_.size();
+    if (nodes_.size() * 32 <= static_cast<size_t>(n)) {
+        std::vector<CorpusPos> kids;
+        for (CorpusPos node : nodes_) {
+            kids.clear();
+            L.for_each_child(node, [&](CorpusPos c, std::string_view label) {
+                if (want_all_children_) kids.push_back(c);
+                if (deprel_filter_ && wanted(label)) count(c);
+                return true;
+            });
+            std::sort(kids.begin(), kids.end());
+            kids.erase(std::unique(kids.begin(), kids.end()), kids.end());
+            for (CorpusPos c : kids) count(c);
+        }
+        return done();
+    }
+
+    // from the child side: the nodes as a bitmap (a node of several hits counts that often)
+    std::sort(nodes_.begin(), nodes_.end());
+    std::vector<uint64_t> bits(static_cast<size_t>(n) / 64 + 1, 0);
+    std::unordered_map<CorpusPos, uint32_t> repeated;
+    for (size_t i = 0; i < nodes_.size();) {
+        size_t j = i;
+        while (j < nodes_.size() && nodes_[j] == nodes_[i]) ++j;
+        const CorpusPos p = nodes_[i];
+        if (p >= 0 && p < n) {
+            bits[static_cast<size_t>(p) >> 6] |= uint64_t{1} << (p & 63);
+            if (j - i > 1) repeated[p] = static_cast<uint32_t>(j - i);
+        }
+        i = j;
+    }
+    auto times_of = [&](CorpusPos h) -> uint32_t {
+        if (h < 0 || h >= n) return 0;
+        if (!(bits[static_cast<size_t>(h) >> 6] >> (h & 63) & 1)) return 0;
+        if (repeated.empty()) return 1;
+        auto it = repeated.find(h);
+        return it == repeated.end() ? 1 : it->second;
+    };
+    std::vector<uint64_t> deviates(static_cast<size_t>(n) / 64 + 1, 0);
+    for (size_t i = 0; i < L.deviating(); ++i) {
+        const CorpusPos d = L.deviating_pos(i);
+        deviates[static_cast<size_t>(d) >> 6] |= uint64_t{1} << (d & 63);
+    }
+    auto deviating = [&](CorpusPos c) { return deviates[static_cast<size_t>(c) >> 6] >> (c & 63) & 1; };
+    // the tokens that keep their basic edge
+    const auto& deps = corpus_.deps();
+    const HeadRelView& rel = deps.head_rel_data();
+    auto head_of = [&](CorpusPos c) -> CorpusPos {
+        if (rel) {
+            int16_t d = rel[c];
+            return d ? c + d : NO_HEAD;
+        }
+        return deps.head(c);
+    };
+    const PositionalAttr* deprel = corpus_.has_attr("deprel") ? &corpus_.attr("deprel") : nullptr;
+    if (want_all_children_)
+        for (CorpusPos c = 0; c < n; ++c) {
+            if (deviating(c)) continue;
+            const CorpusPos h = head_of(c);
+            if (h == NO_HEAD) continue;
+            if (uint32_t k = times_of(h)) count(c, k);
+        }
+    if (deprel)
+        for (LexiconId id : deprel_ids_)
+            deprel->for_each_position_id(id, [&](CorpusPos c) {
+                if (deviating(c)) return true;
+                const CorpusPos h = head_of(c);
+                if (h != NO_HEAD)
+                    if (uint32_t k = times_of(h)) count(c, k);
+                return true;
+            });
+    // the deviating tokens' own edges
+    for (size_t i = 0; i < L.deviating(); ++i) {
+        const CorpusPos d = L.deviating_pos(i);
+        CorpusPos last = NO_HEAD;
+        L.for_each_head(d, [&](CorpusPos h, std::string_view label) {
+            const uint32_t k = h == NO_HEAD ? 0 : times_of(h);
+            if (!k) return true;
+            if (want_all_children_ && h != last) count(d, k);
+            if (deprel_filter_ && wanted(label)) count(d, k);
+            last = h;
+            return true;
+        });
+    }
     return done();
 }
 

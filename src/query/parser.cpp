@@ -265,11 +265,11 @@ GroupCommand Parser::parse_command() {
     else if (kw == "stats") cmd.type = CommandType::STATS;
     else if (kw == "dcoll") {
         cmd.type = CommandType::DCOLL;
-        // Optional leading groups: (QueryName), (on hubLabel) — before anchor.relation / relations / by
+        // Optional leading groups: (QueryName), (on hubLabel), (via layer) — before anchor.relation / relations / by
         while (lexer_.peek().type == TokType::LPAREN) {
             lexer_.consume();
             if (lexer_.peek().type != TokType::IDENT)
-                throw std::runtime_error("dcoll: expected query name, `on`, or anchor.relation after `(`");
+                throw std::runtime_error("dcoll: expected query name, `on`, `via` or anchor.relation after `(`");
             std::string open = lexer_.peek().text;
             std::string open_low = open;
             std::transform(open_low.begin(), open_low.end(), open_low.begin(), ::tolower);
@@ -279,6 +279,11 @@ GroupCommand Parser::parse_command() {
                 if (!cmd.dcoll_anchor.empty())
                     throw std::runtime_error("dcoll: duplicate `(on <label>)` / anchor already set");
                 cmd.dcoll_anchor = std::move(lab);
+            } else if (open_low == "via") {
+                // `(via eff)`: the relatives over a relation layer
+                lexer_.consume();
+                if (!cmd.dcoll_layer.empty()) throw std::runtime_error("dcoll: duplicate `(via <layer>)`");
+                cmd.dcoll_layer = lexer_.expect(TokType::IDENT).text;
             } else {
                 std::string qn = lexer_.next().text;
                 if (!cmd.query_name.empty())
