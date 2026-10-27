@@ -1,0 +1,23 @@
+# Queries only for test/gen_test_corpus.py's corpus (attributes and structures the sample lacks).
+# multivalue attribute (tags: 0–3 labels)
+[tags="PER"]
+[tags="PER" & tags="LOC"]
+[upos="NOUN" & tags="ORG"]
+[tags="PER"] [tags="LOC"]
+[upos="VERB"] > [tags="PER"]
+a:[tags="PER"]; count by a.upos
+# u regions (speaker, gender) between text and s
+[upos="NOUN"] within u
+[upos="ADJ"] [upos="NOUN"] within u
+[upos="NOUN"] :: match.u_gender="F"
+[upos="VERB"] > [upos="PRON"] :: match.u_gender="M"
+[upos="VERB" & child [deprel="nsubj"]] :: match.u_gender="F"
+a:[upos="NOUN"]; count by a.u_gender
+[upos="NOUN"] within u having [lemma="book"]
+# nested regions (phrase NP containing AP)
+[upos="ADJ"] within phrase
+[] within phrase_cat="AP"
+[upos="NOUN"] within phrase_cat="NP"
+# long sentences: heads more than 127 positions away (dep.head_rel8 exceptions)
+[upos="VERB"] > [deprel="obl"]
+[upos="VERB"] >> [upos="NUM"]
