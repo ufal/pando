@@ -1,5 +1,6 @@
 #include "query/dialect/dialect.h"
 #include "api/query_json.h"
+#include "api/aligned_pieces.h"
 #include "index/index_publish.h"
 #include "core/json_utils.h"
 #include "core/build_info.h"
@@ -268,6 +269,7 @@ static void emit_hit_json(std::ostringstream& out, const Corpus& corpus, const M
     out << ", \"match_start\": " << match_start << ", \"match_end\": " << match_end;
     out << ", \"context\": {\"left\": " << jstr(ctx.left)
         << ", \"match\": " << jstr(ctx.match) << ", \"right\": " << jstr(ctx.right) << "}";
+    write_aligned_json(out, corpus, m, opts.aligned, opts.aligned_where, opts.aligned_max);
     // named regions (`np:<node …>`): span and id, so a UI can show the whole region
     struct NamedSpan {
         std::string name, struct_name, id; size_t idx; CorpusPos start, end;

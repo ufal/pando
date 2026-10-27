@@ -17,6 +17,8 @@ indexes it as JSONL and declares `relation.tuid=equivalence,attr=tuid`. For each
     (a token with itself included) and of the general joins;
   * `=:s_tuid` over a region attribute (sentences aligned by `s_tuid`; one left unaligned) and `with … a.s_tuid =
     b.s_tuid`: the class join with the pairs of tokens in aligned sentences, as the reference and the general paths;
+  * `--aligned s_tuid` / `--aligned tuid` (with `--aligned-where`): each hit with the sentences aligned with it,
+    the aligned tokens marked, as the reference gives them;
   * `count by` over fields of either token to give the buckets of a brute-force tally, fast and generic.
 Exit status 0 = all as required, 1 = a difference, 2 = a run error.
 """
@@ -241,6 +243,53 @@ def main():
     fast, slow = with_pairs(q, True), with_pairs(q, False)
     check(fast == ref and slow == ref, f"{q}: {len(fast)} pairs (general joins {len(slow)}, reference {len(ref)})")
 
+    # --aligned: each hit with the sentences aligned with it (aligned_pieces.h): over s_tuid the other sentences of
+    # its sentence's class, over tuid the sentences of its tokens' class mates with those marked; --aligned-where
+    sent_of = {}
+    k = 0
+    for i in range(n):
+        if i == 0 or (stuids[i] != stuids[i - 1]) or toks[i][1] != toks[i - 1][1]:
+            k += 1
+        sent_of[i] = k
+    def aligned(q, layer, where=""):
+        extra = ["--aligned", layer] + (["--aligned-where", where] if where else [])
+        out = run(q, True, "--json", "--limit", "1000", *extra)
+        try:
+            return [(h["match_start"], [(x["start"], x["end"], x["marked"]) for x in h["aligned"]])
+                    for h in json.loads(out)["result"]["hits"]]
+        except (ValueError, KeyError):
+            return out[:200]
+    def sentence_span(i):
+        a = i
+        while a > 0 and sent_of[a - 1] == sent_of[i]:
+            a -= 1
+        b = i
+        while b + 1 < n and sent_of[b + 1] == sent_of[i]:
+            b += 1
+        return a, b
+    for layer, where in [("s_tuid", ""), ("tuid", ""), ("s_tuid", "text_lang=nld"), ("tuid", "text_lang=ces|nld")]:
+        langs = where.split("=")[1].split("|") if where else None
+        want = []
+        for i in range(n):
+            if toks[i][0] != "house":
+                continue
+            pieces = {}
+            for j in range(n):
+                if (sent_of[j] == sent_of[i]) or (langs and toks[j][1] not in langs):
+                    continue
+                if layer == "s_tuid" and same_s(i, j):
+                    pieces.setdefault(sentence_span(j), [])
+                if layer == "tuid" and toks[i][2] & toks[j][2]:
+                    pieces.setdefault(sentence_span(j), []).append(j)
+            want.append((i, [(a_, b_, sorted(m)) for (a_, b_), m in sorted(pieces.items())]))
+        got = aligned('[form="house"]', layer, where)
+        check(got == want, f"--aligned {layer} {where}: {sum(len(p) for _, p in want)} aligned sentences for "
+                           f"{len(want)} hits" + ("" if got == want else f" (got {str(got)[:300]})"))
+    r = subprocess.run([a.pando, d, '[form="house"]', "--aligned", "form"], capture_output=True, text=True)
+    check(r.returncode == 0, "--aligned over any token attribute (form) runs")
+    r = subprocess.run([a.pando, d, '[form="house"]', "--aligned", "nosuch"], capture_output=True, text=True)
+    check("not an equivalence layer" in r.stdout + r.stderr, "--aligned nosuch: refused with a message")
+
     # display: a pair across the filler text shows the runs around its tokens with an elision, not the filler
     q = 'a:[form="the"] =:tuid b:[form="het"]'
     pairs = [(i, j) for i in range(n) for j in range(n) if i != j and toks[i][0] == "the" and toks[j][0] == "het"
@@ -274,6 +323,13 @@ def main():
                     break
                 except (ConnectionError, urllib.error.URLError):
                     time.sleep(0.1)
+            body = {"query": '[form="house"]', "limit": 1000, "aligned": "s_tuid", "aligned_where": "text_lang=nld"}
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/query", data=json.dumps(body).encode())
+            ra = json.loads(urllib.request.urlopen(req, timeout=30).read())["result"]
+            cli = json.loads(run('[form="house"]', True, "--json", "--limit", "1000", "--aligned", "s_tuid",
+                                 "--aligned-where", "text_lang=nld"))["result"]["hits"]
+            check([h.get("aligned") for h in ra["hits"]] == [h.get("aligned") for h in cli] and len(cli) > 0,
+                  "server /query \"aligned\": the same aligned sentences as the CLI")
             frags = [h.get("fragment", "") for h in (r or {}).get("hits", [])]
             check(len(frags) == len(pairs) and not any('form="filler"' in f or ">filler<" in f for f in frags)
                   and sum("<gap/>" in f for f in frags) >= len(far),

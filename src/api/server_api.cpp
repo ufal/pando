@@ -717,6 +717,9 @@ ServerResponse ServerApi::query(const std::string& body) {
     opts.debug     = json_extract_bool(body, "debug", false);
     opts.sentence  = json_extract_bool(body, "sentence", false);
     opts.fragment  = json_extract_bool(body, "fragment", false);
+    opts.aligned   = json_extract_str(body, "aligned");
+    opts.aligned_where = json_extract_str(body, "aligned_where");
+    opts.aligned_max = json_extract_num(body, "aligned_max", 0);
     opts.strict_quoted_strings = json_extract_bool(body, "strict_quoted_strings", false);
     // the query's language (pando-cql by default; cwb-cql, pmltq, tiger: query/dialect/dialect.h)
     opts.dialect = json_extract_str(body, "dialect");

@@ -52,6 +52,12 @@ struct QueryOptions {
     size_t sample = 0;
     bool shuffle = false;
     uint32_t seed = 0;
+    /// `aligned` (an equivalence layer: s_tuid, tuid): each hit also gets `"aligned"`, the sentences aligned with
+    /// it (aligned_pieces.h), only those whose `aligned_where` (`text_iso=ces|deu`) holds, at most `aligned_max`
+    /// (0 = all)
+    std::string aligned;
+    std::string aligned_where;
+    size_t aligned_max = 0;
 };
 
 // Run a single query (one statement, no trailing command). Returns (MatchSet, elapsed_ms).

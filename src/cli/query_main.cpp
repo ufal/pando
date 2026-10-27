@@ -6,6 +6,7 @@
 #include "api/coll_counts.h"
 #include "core/json_utils.h"
 #include "core/match_display.h"
+#include "api/aligned_pieces.h"
 #include "query/keyness_select.h"
 #include "query/ast.h"
 #include "query/parser.h"
@@ -64,6 +65,10 @@ static bool use_color() {
 struct Options {
     std::string corpus_dir;
     std::string query;
+    // `--aligned s_tuid [--aligned-where text_iso=ces|deu] [--aligned-max N]`: each hit with the sentences aligned
+    // with it over that equivalence layer (aligned_pieces.h)
+    std::string aligned, aligned_where;
+    size_t aligned_max = 0;
     std::string cql_dialect = "native";  // native | cwb | pmltq | tiger
     bool json    = false;
     // Debug verbosity: 0 = off, 1 = basic (plan, timing), 2+ = more detail in future
@@ -294,6 +299,7 @@ static void emit_json(const Corpus& corpus, const std::string& query_text,
                   << ", \"right\": " << jstr(ctx.right) << "}";
 
         emit_match_tokens_json(jout, m);
+        write_aligned_json(jout, corpus, m, opts.aligned, opts.aligned_where, opts.aligned_max);
 
         jout << "}";
     }
@@ -822,6 +828,17 @@ static void emit_kwic(const Corpus& corpus, const std::string& query_text,
         std::string right = build_right_chars(corpus, m.last_pos(), KWIC_COL_WIDTH);
 
         std::cout << left << span << " " << right << "\n";
+        if (!opts.aligned.empty()) {
+            const bool color = use_color();
+            for (const auto& pc : aligned_pieces(corpus, m, opts.aligned, parse_aligned_where(opts.aligned_where),
+                                                 opts.aligned_max)) {
+                const auto doc_id = lookup_doc_id(corpus, pc.start);
+                std::cout << std::string(KWIC_COL_WIDTH, ' ') << " \u2248 "
+                          << (doc_id.empty() ? std::string() : "[" + std::string(doc_id) + "] ")
+                          << aligned_piece_text(corpus, pc, color ? "\033[1;31m" : "<!", color ? "\033[0m" : "!>")
+                          << "\n";
+            }
+        }
     }
 
     const std::string tl = total_line(ms, stored, end, opts);
@@ -3662,6 +3679,9 @@ static Options parse_args(int argc, char* argv[]) {
         else if (arg == "--limit"  && i + 1 < argc) { opts.limit  = std::stoul(argv[++i]); }
         else if (arg == "--offset" && i + 1 < argc) { opts.offset = std::stoul(argv[++i]); }
         else if (arg == "--context" && i + 1 < argc) { opts.context = std::stoi(argv[++i]); }
+        else if (arg == "--aligned" && i + 1 < argc) { opts.aligned = argv[++i]; }
+        else if (arg == "--aligned-where" && i + 1 < argc) { opts.aligned_where = argv[++i]; }
+        else if (arg == "--aligned-max" && i + 1 < argc) { opts.aligned_max = std::stoul(argv[++i]); }
         else if (arg == "--count-only") { opts.count_only = true; }
         else if (arg == "--dump-matches") { opts.dump_matches = true; }
         else if (arg == "--dump-page") { opts.dump_page = true; }
@@ -3774,6 +3794,11 @@ static Options parse_args(int argc, char* argv[]) {
                   << "  --limit N        Max hits to return (default: 20)\n"
                   << "  --offset N       Skip first N hits (default: 0)\n"
                   << "  --context N      Context width in tokens for JSON output (default: 5)\n"
+                  << "  --aligned L      Show with each hit the sentences aligned with it over the equivalence layer L\n"
+                  << "                    (s_tuid: its sentence's translations; tuid: the sentences of the aligned tokens)\n"
+                  << "  --aligned-where A=V1|V2  Only aligned sentences whose region attribute A has one of the values\n"
+                  << "                    (e.g. text_iso=ces|deu)\n"
+                  << "  --aligned-max N  At most N aligned sentences per hit\n"
                   << "  --attrs A,B,...  Token attributes to show (text: appended with /; JSON: in token objects; default: form only in text, all in JSON)\n"
                   << "  --count-only     Print only total match count (for benchmarking)\n"
                   << "  --interactive    Open stdin REPL (`pando>`): type one CQL command per line (session persists).\n"
