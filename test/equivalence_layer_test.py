@@ -8,7 +8,9 @@ declares `pando-index --relation coref=equivalence,attr=coref` and requires:
   * the declaration measured: scope text (every class inside one text), the class counts;
   * `[A] =:coref [B]`, `!=:coref`, `=:coref` in a chain with a sequence, `:: a =:coref b` / `:: a !=:coref b` and
     `count by` over it to count as a brute-force evaluation over the CoNLL-U (B never A itself);
-  * errors that say what works: `=` without a layer between tokens, `=:head`, `>:coref`, a label on `=:coref`.
+  * errors that say what works: `=` without a layer between tokens, `=:head`, `>:coref`, a label on `=:coref`;
+  * CorefUD input (`--corefud`, corefud_entity.h): `Entity=` brackets give each mention head its entity ids
+    (`coref`, multivalue), declared and measured by pando-index itself (scope doc), queried with `=:coref`.
 Exit status 0 = all as required, 1 = a difference, 2 = a run error.
 """
 
@@ -40,6 +42,7 @@ def main():
     ap.add_argument("--pando", required=True)
     ap.add_argument("--pando-index", required=True)
     ap.add_argument("--conllu", required=True)
+    ap.add_argument("--corefud", help="a CoNLL-U with CorefUD Entity= mentions (test/data/corefud_sample.conllu)")
     a = ap.parse_args()
     d = os.path.join(tempfile.mkdtemp(prefix="pando_equiv_"), "idx")
     for cmd in ([a.pando_index, "--misc-keys", "coref", a.conllu, d], [a.pando_index, "--relation", "coref=equivalence,attr=coref", d]):
@@ -111,6 +114,21 @@ def main():
         check(r.returncode != 0 or needle in msg, f"{q} refused: {msg[:120]}")
         if needle not in msg:
             check(False, f"{q}: message lacks '{needle}'")
+    if a.corefud:
+        d2 = os.path.join(tempfile.mkdtemp(prefix="pando_corefud_"), "idx")
+        p = subprocess.run([a.pando_index, a.corefud, d2], capture_output=True, text=True)
+        info = open(os.path.join(d2, "corpus.info"), encoding="utf-8").read() if p.returncode == 0 else ""
+        line = next((l for l in info.splitlines() if l.startswith("relation.coref=")), "")
+        check("attr=coref" in line and "scope=doc" in line, f"CorefUD declared and measured: {line or p.stderr[-200:]}")
+        check("multivalue=coref" in info, "CorefUD: coref multivalue")
+        # heads: man e1, his e1 (one-token mention), dog e2, It e2, him e1; Mary e3, the second Mary e3, mother e4
+        for q, want in [('[coref="e1"]', 3), ('[coref="e2"]', 2), ('[lemma="man"] =:coref [lemma="he"]', 2),
+                        ('[lemma="dog"] =:coref [lemma="it"]', 1), ('[lemma="Mary"] =:coref []', 2),
+                        ('[lemma="mother"] =:coref []', 0), ('[lemma="old"] =:coref []', 0), ('[] =:coref []', 10)]:
+            r = subprocess.run([a.pando, "--count-only", d2, q], capture_output=True, text=True)
+            got = r.stdout.split()[-1] if r.returncode == 0 and r.stdout.split() else r.stderr.strip()[:200]
+            check(got == str(want), f"CorefUD {q}: {got} (expected {want})")
+
     print("equivalence layers: " + ("as required" if not failures else f"{failures} problem(s)"))
     return 1 if failures else 0
 

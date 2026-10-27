@@ -153,4 +153,110 @@ bool QueryExecutor::relation_holds(CorpusPos a, CorpusPos b, const QueryRelation
     return found != negated;
 }
 
+std::optional<MatchSet> QueryExecutor::execute_layer_decomposed(const TokenQuery& q, size_t max_matches,
+                                                                bool count_total, size_t max_total_cap,
+                                                                size_t sample_size, unsigned num_threads,
+                                                                const std::vector<std::string>* aggregate_by_fields) {
+    // the shape: [A] OP:L[:lab] [B], two plain tokens, OP one of > < !> !<, L a thin pointer layer over the tree
+    if (!count_total || sample_size > 0 || (aggregate_by_fields && !aggregate_by_fields->empty())) return std::nullopt;
+    if (!fastpaths_enabled() || !corpus_.has_deps() || q.tokens.size() != 2 || q.relations.size() != 1)
+        return std::nullopt;
+    const QueryRelation& rel = q.relations[0];
+    const RelationType t = rel.type;
+    const bool negated = t == RelationType::NOT_GOVERNS || t == RelationType::NOT_GOV_BY;
+    if (rel.layer.empty() || rel.layer == "head"
+        || (t != RelationType::GOVERNS && t != RelationType::GOVERNED_BY && !negated))
+        return std::nullopt;
+    const RelationDecl* decl = corpus_.relation(rel.layer);
+    const RelationLayer* layer = corpus_.relation_layer(rel.layer);
+    if (!decl || !layer || decl->inherit != "head" || decl->materialized) return std::nullopt;
+    for (const auto& tok : q.tokens)
+        if (tok.has_repetition() || tok.is_anchor() || tok.is_dep_subtree || !tok.name.empty()) return std::nullopt;
+    if (!q.within.empty() || q.not_within || q.within_having || !q.containing_clauses.empty()
+        || !q.global_region_filters.empty() || !q.global_alignment_filters.empty()
+        || !q.global_function_filters.empty() || !q.position_orders.empty())
+        return std::nullopt;
+    if (!corpus_.has_attr("deprel")) return std::nullopt;
+
+    // which token is the head side and which the dependent: `[A] > [B]` / `[A] !> [B]` A heads B;
+    // `[A] < [B]` / `[A] !< [B]` B heads A (for the negations the head side is the token kept)
+    const bool head_first = t == RelationType::GOVERNS || t == RelationType::NOT_GOVERNS;
+    const ConditionPtr& hc = q.tokens[head_first ? 0 : 1].conditions;
+    const ConditionPtr& dc = q.tokens[head_first ? 1 : 0].conditions;
+    const auto& deprel = corpus_.attr("deprel");
+    const auto& deps = corpus_.deps();
+    auto basic_edge_ok = [&](CorpusPos h, CorpusPos d) {
+        return (rel.label.empty() || deprel.value_at(d) == rel.label) && check_conditions(d, dc)
+               && check_conditions(h, hc);
+    };
+
+    // the basic tree's total, through its fast paths
+    TokenQuery basic = q;
+    basic.relations[0].layer = "head";
+    TokenQuery bq;
+    rewrite_head_layer(basic, bq);
+    const MatchSet b = execute(bq, 1, true, 0, 0, 0, num_threads);
+    if (!b.total_exact) return std::nullopt;
+    int64_t total = static_cast<int64_t>(b.total_count);
+
+    // corrections at the deviating tokens D only
+    const size_t nd = layer->deviating();
+    if (!negated) {
+        // pairs (head, d), d ∈ D: the tree's edge counted there is replaced by d's own edges
+        for (size_t i = 0; i < nd; ++i) {
+            const CorpusPos d = layer->deviating_pos(i);
+            const CorpusPos bh = deps.head(d);
+            if (bh != NO_HEAD && basic_edge_ok(bh, d)) --total;
+            if (!check_conditions(d, dc)) continue;
+            CorpusPos last = NO_HEAD;
+            layer->for_each_head(d, [&](CorpusPos h, std::string_view label) {
+                if (h != NO_HEAD && h != last && (rel.label.empty() || label == rel.label) && check_conditions(h, hc)) {
+                    ++total;
+                    last = h;   // edges come sorted by head: one hit per (head, d) pair
+                }
+                return true;
+            });
+        }
+    } else {
+        // head-side tokens whose dependents change: the tree heads and the layer heads of D
+        std::vector<CorpusPos> touched;
+        for (size_t i = 0; i < nd; ++i) {
+            const CorpusPos d = layer->deviating_pos(i);
+            if (const CorpusPos bh = deps.head(d); bh != NO_HEAD) touched.push_back(bh);
+            layer->for_each_head(d, [&](CorpusPos h, std::string_view) {
+                if (h != NO_HEAD) touched.push_back(h);
+                return true;
+            });
+        }
+        std::sort(touched.begin(), touched.end());
+        touched.erase(std::unique(touched.begin(), touched.end()), touched.end());
+        for (CorpusPos h : touched) {
+            if (!check_conditions(h, hc)) continue;
+            bool basic_has = false, layer_has = false;
+            for (CorpusPos c : deps.children(h))
+                if (basic_edge_ok(h, c)) { basic_has = true; break; }
+            layer->for_each_child(h, [&](CorpusPos c, std::string_view label) {
+                if ((rel.label.empty() || label == rel.label) && check_conditions(c, dc)) {
+                    layer_has = true;
+                    return false;
+                }
+                return true;
+            });
+            total += static_cast<int64_t>(!layer_has) - static_cast<int64_t>(!basic_has);
+        }
+    }
+
+    // the page: the generic expansion stops at it
+    MatchSet result = max_matches == 0 ? MatchSet{} : execute(q, max_matches, false, 0, 0, 0, 1);
+    if (max_matches == 0) result.num_tokens = 2;
+    result.total_count = static_cast<size_t>(std::max<int64_t>(total, 0));
+    result.total_exact = true;
+    if (max_total_cap > 0 && result.total_count > max_total_cap) {
+        result.total_count = max_total_cap;
+        result.total_exact = false;
+    }
+    result.plan_path = "layer_inherit:" + b.plan_path;
+    return result;
+}
+
 }  // namespace pando

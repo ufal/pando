@@ -380,6 +380,31 @@ static bool record_relation(const std::string& dir, const pando::RelationDecl& r
     return !ec;
 }
 
+// Equivalence layers declared without a measurement (span unknown, e.g. `coref` from CorefUD `Entity=`): measure
+// scope and span from the data (equivalence_layer.h) and record them.
+static int measure_declared_equivalences(const std::string& dir, bool quiet) {
+    std::vector<pando::RelationDecl> todo;
+    {
+        pando::Corpus corpus;
+        corpus.open(dir);
+        for (const auto& r : corpus.relations())
+            if (r.kind == pando::RelationDecl::Kind::Equivalence && r.span < 0) {
+                pando::EquivalenceStats st;
+                todo.push_back(pando::measure_equivalence(corpus, r, &st));
+                if (!quiet)
+                    std::cerr << "Relation " << r.name << ": " << todo.back().format() << "\n  " << st.classes
+                              << " classes (" << st.singletons << " of one token, the largest " << st.largest
+                              << "), " << st.members << " memberships\n";
+            }
+    }
+    for (const auto& d : todo)
+        if (!record_relation(dir, d)) {
+            std::cerr << "Error: cannot record relation." << d.name << " in " << dir << "/corpus.info\n";
+            return 1;
+        }
+    return 0;
+}
+
 // Record `upgraded_with=<build> <UTC time>` in corpus.info (replacing an earlier one).
 static void record_upgrade(const std::string& dir) {
     const std::string path = dir + "/corpus.info", tmp = path + ".tmp";
@@ -1017,6 +1042,7 @@ int main(int argc, char* argv[]) {
         builder.finalize();
         if (upgrade_index(output_dir, false, kDefaultDepPairs, kDefaultBitmaps, "none", false, build_head_attrs) != 0)
             return 1;
+        if (measure_declared_equivalences(output_dir, false) != 0) return 1;
         if (pub) return report_publish(*pub, keep);
 
     } catch (const std::exception& e) {

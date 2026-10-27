@@ -309,6 +309,29 @@ def main():
         print("FAIL: --derive deps overwrote the annotated deps layer")
         failures += 1
 
+    # totals over thin layers: the tree's total corrected at the deviating tokens (execute_layer_decomposed) must
+    # equal the generic expansion's (PANDO_FASTPATH=off)
+    def count_env(q, env):
+        r = subprocess.run([a.pando, "--count-only", d, q], capture_output=True, text=True,
+                           env=dict(os.environ, **env))
+        return r.stdout.split()[-1] if r.returncode == 0 and r.stdout.split() else "ERROR " + r.stderr.strip()[:200]
+    bad = 0
+    decomposed = 0
+    for layer in ("deps", "eff", "cprop"):
+        for q in (f'[upos="VERB"] >:{layer}:nsubj []', f'[] >:{layer} []', f'[upos="NOUN"] <:{layer} [upos="VERB"]',
+                  f'[upos="PROPN"] <:{layer}:nsubj []', f'[upos="VERB"] !>:{layer}:nsubj []',
+                  f'[upos="NOUN"] !<:{layer} [upos="VERB"]', f'[] !>:{layer}:"conj:and" []', f'[lemma="love"] >:{layer} []'):
+            on, off = count_env(q, {}), count_env(q, {"PANDO_FASTPATH": "off"})
+            if on != off:
+                bad += 1
+                print(f"FAIL {q}: {on} with the fast paths, {off} without")
+            r = subprocess.run([a.pando, "--timing", "--count-only", d, q], capture_output=True, text=True)
+            decomposed += "layer_inherit" in r.stderr
+    failures += bad
+    print(f"{'ok  ' if not bad and decomposed == 24 else 'FAIL'} totals over thin layers with and without the "
+          f"fast paths: {24 - bad} of 24 equal, {decomposed} through layer_inherit")
+    failures += decomposed != 24
+
     # DEPS round trip through the CoNLL-U output
     r = subprocess.run([a.pando, "--limit", "100000", "--format", "conllu", d, "[]"], capture_output=True, text=True)
     out = [l.split("\t") for l in r.stdout.splitlines() if l and not l.startswith("#")]

@@ -124,7 +124,8 @@ static bool close_last_region_of_type(RegionStack& stack,
 } // namespace
 
 CorpusBuilder::CorpusBuilder(const std::string& output_dir, bool overlay_standoff_only)
-    : builder_(output_dir, overlay_standoff_only), overlay_standoff_only_(overlay_standoff_only) {}
+    : builder_(output_dir, overlay_standoff_only), overlay_standoff_only_(overlay_standoff_only),
+      output_dir_(output_dir) {}
 
 void CorpusBuilder::read_jsonl_overlay(const std::string& path, CorpusPos expected_tokens) {
     if (!overlay_standoff_only_)
@@ -250,6 +251,15 @@ void CorpusBuilder::read_conllu(const std::string& path) {
                 return std::string(val);
             };
 
+            // # global.Entity = eid-etype-head-other: CorefUD's field order (corefud_entity.h)
+            if (starts_with("global.Entity")) {
+                coref_.set_format(parse_id_after_eq());
+                if (!coref_declared_) {
+                    builder_.declare_multivalue("coref");
+                    coref_declared_ = true;
+                }
+                continue;
+            }
             // # newregion X  — open a structural region span
             if (starts_with("newregion")) {
                 size_t j = 9; // "newregion"
@@ -441,6 +451,16 @@ void CorpusBuilder::read_conllu(const std::string& path) {
                 head_id = head_id * 10 + (c - '0');
             }
 
+            if (found >= 9) {   // CorefUD mentions: the heads get their entity ids
+                std::string ids = coref_.on_token(builder_.corpus_size(), field(9));
+                if (!ids.empty()) {
+                    if (!coref_declared_) {
+                        builder_.declare_multivalue("coref");
+                        coref_declared_ = true;
+                    }
+                    attrs["coref"] = std::move(ids);
+                }
+            }
             if (found >= 8) builder_.set_token_deps(field(8));   // enhanced dependencies (relation layer deps)
             builder_.add_token(attrs, head_id);
             in_sentence_ = true;
@@ -1412,6 +1432,12 @@ void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expec
 
 void CorpusBuilder::finalize() {
     builder_.finalize();
+    if (coref_.seen()) {
+        // the equivalence layer over the mention heads; pando-index measures its scope and span after the build
+        std::ofstream info(output_dir_ + "/corpus.info", std::ios::app);
+        info << "relation.coref=equivalence,attr=coref,scope=text,endpoints=token,source=annotated\n";
+        std::cerr << "Coreference (CorefUD Entity): " << coref_.mentions() << " mentions; their heads carry coref\n";
+    }
 }
 
 } // namespace pando

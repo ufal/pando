@@ -17,7 +17,9 @@ RelationDecl measure_equivalence(const Corpus& corpus, RelationDecl decl, Equiva
     const auto& attr = corpus.attr(decl.attr);
     const bool mv = corpus.is_multivalue(decl.attr);
     const StructuralAttr* sents = corpus.has_structure("s") ? &corpus.structure("s") : nullptr;
-    const StructuralAttr* texts = corpus.has_structure("text") ? &corpus.structure("text") : nullptr;
+    // the document region: TEITOK / VRT `text`, else CoNLL-U `# newdoc` (`doc`)
+    const std::string doc_struct = corpus.has_structure("text") ? "text" : corpus.has_structure("doc") ? "doc" : "";
+    const StructuralAttr* texts = doc_struct.empty() ? nullptr : &corpus.structure(doc_struct);
 
     struct Class {
         CorpusPos first = 0, last = 0;
@@ -67,7 +69,7 @@ RelationDecl measure_equivalence(const Corpus& corpus, RelationDecl decl, Equiva
         in_text = in_text && c.one_text;
         span = std::max<int64_t>(span, c.last - c.first);
     }
-    decl.scope = in_s ? "s" : in_text ? "text" : "corpus";
+    decl.scope = in_s ? "s" : in_text ? doc_struct : "corpus";
     decl.span = span;
     if (stats) *stats = st;
     return decl;

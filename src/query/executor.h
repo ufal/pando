@@ -892,6 +892,14 @@ public:
     // Relation layers (executor_layers.cpp): `>:head[:label]` rewritten into the basic tree; another layer
     // (`[A] >:deps [B]`) is traversed edge by edge in the generic expansion (find_layer_related)
     static bool rewrite_head_layer(const TokenQuery& q, TokenQuery& out);
+    // The total of a two-token query over a thin (`inherit=head`) layer as the basic tree's total, corrected at the
+    // layer's deviating tokens only; the page from the generic expansion. nullopt when the query is not of that
+    // shape (or no total is asked, or the fast paths are off).
+    std::optional<MatchSet> execute_layer_decomposed(const TokenQuery& q, size_t max_matches, bool count_total,
+                                                     size_t max_total_cap, size_t sample_size, unsigned num_threads,
+                                                     const std::vector<std::string>* aggregate_by_fields);
+    // PANDO_FASTPATH=on (the default): the fast paths may be used
+    static bool fastpaths_enabled();
 
     // #16: Source | Target: run source and target queries, join on source_query.global_alignment_filters.
     // Returns MatchSet with parallel_matches filled; matches is empty.

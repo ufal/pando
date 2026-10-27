@@ -92,6 +92,8 @@ public:
     void for_each_child(CorpusPos pos, F&& f) const;
 
     size_t deviating() const { return nsrc_; }
+    // the i-th deviating token (i < deviating()), ascending
+    CorpusPos deviating_pos(size_t i) const { return static_cast<CorpusPos>(src_.as<int64_t>()[i]); }
     const std::string& label(int32_t id) const { return labels_[static_cast<size_t>(id)]; }
 
 private:
