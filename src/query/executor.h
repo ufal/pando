@@ -898,6 +898,15 @@ public:
     std::optional<MatchSet> execute_layer_decomposed(const TokenQuery& q, size_t max_matches, bool count_total,
                                                      size_t max_total_cap, size_t sample_size, unsigned num_threads,
                                                      const std::vector<std::string>* aggregate_by_fields);
+    // `a:[A] >:L b:[B] :: a !>:head b` (and the mirrored forms): the edges of a thin layer L that the basic tree
+    // does not have come only from L's deviating tokens, so they are read off its stored edges (page and total).
+    // nullopt when the query is not of that shape (or aggregates, samples, or the fast paths are off).
+    std::optional<MatchSet> execute_layer_deviations(const TokenQuery& q, size_t max_matches, bool count_total,
+                                                     size_t max_total_cap, size_t sample_size,
+                                                     const std::vector<std::string>* aggregate_by_fields) const;
+    // A relation layer of the query (in its chain or a `::` filter) whose declared scope is wider than the corpus's
+    // default_within (scope corpus, or another region): the default does not apply to that query.
+    bool layer_crosses_default_within(const TokenQuery& q) const;
     // PANDO_FASTPATH=on (the default): the fast paths may be used
     static bool fastpaths_enabled();
 

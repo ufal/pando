@@ -128,6 +128,21 @@ std::vector<CorpusPos> QueryExecutor::find_layer_related(CorpusPos pos, const Qu
     return out;
 }
 
+bool QueryExecutor::layer_crosses_default_within(const TokenQuery& q) const {
+    const std::string& dw = corpus_.default_within();
+    if (dw.empty()) return false;
+    auto wider = [&](const std::string& name) {
+        if (name.empty() || name == "head") return false;
+        const RelationDecl* d = corpus_.relation(name);
+        return d && d->scope != "s" && d->scope != dw;
+    };
+    for (const auto& r : q.relations)
+        if (wider(r.layer)) return true;
+    for (const auto& po : q.position_orders)
+        if (po.is_relation && wider(po.relation.layer)) return true;
+    return false;
+}
+
 bool QueryExecutor::relation_holds(CorpusPos a, CorpusPos b, const QueryRelation& qr) const {
     RelationType rel = qr.type;
     const bool negated = rel == RelationType::NOT_GOVERNS || rel == RelationType::NOT_GOV_BY
@@ -256,6 +271,79 @@ std::optional<MatchSet> QueryExecutor::execute_layer_decomposed(const TokenQuery
         result.total_exact = false;
     }
     result.plan_path = "layer_inherit:" + b.plan_path;
+    return result;
+}
+
+std::optional<MatchSet> QueryExecutor::execute_layer_deviations(const TokenQuery& q, size_t max_matches,
+                                                                bool count_total, size_t max_total_cap,
+                                                                size_t sample_size,
+                                                                const std::vector<std::string>* aggregate_by_fields) const {
+    if (sample_size > 0 || (aggregate_by_fields && !aggregate_by_fields->empty()) || !fastpaths_enabled()) return std::nullopt;
+    if (!corpus_.has_deps() || q.tokens.size() != 2 || q.relations.size() != 1 || q.position_orders.size() != 1)
+        return std::nullopt;
+    const QueryRelation& rel = q.relations[0];
+    if (rel.layer.empty() || rel.layer == "head"
+        || (rel.type != RelationType::GOVERNS && rel.type != RelationType::GOVERNED_BY))
+        return std::nullopt;
+    const RelationDecl* decl = corpus_.relation(rel.layer);
+    const RelationLayer* layer = corpus_.relation_layer(rel.layer);
+    if (!decl || !layer || decl->inherit != "head" || decl->materialized) return std::nullopt;
+    for (const auto& tok : q.tokens)
+        if (tok.has_repetition() || tok.is_anchor() || tok.is_dep_subtree || tok.name.empty()) return std::nullopt;
+    if (!q.within.empty() || q.not_within || q.within_having || !q.containing_clauses.empty()
+        || !q.global_region_filters.empty() || !q.global_alignment_filters.empty() || !q.global_function_filters.empty())
+        return std::nullopt;
+    // the filter: no basic-tree edge between the same head and dependent (`:: h !>:head d` or `:: d !<:head h`)
+    const auto& po = q.position_orders[0];
+    const QueryRelation& f = po.relation;
+    if (!po.is_relation || f.layer != "head"
+        || (f.type != RelationType::NOT_GOVERNS && f.type != RelationType::NOT_GOV_BY))
+        return std::nullopt;
+    const size_t head_i = rel.type == RelationType::GOVERNS ? 0 : 1, dep_i = 1 - head_i;
+    const std::string& f_head = f.type == RelationType::NOT_GOVERNS ? po.name1 : po.name2;
+    const std::string& f_dep = f.type == RelationType::NOT_GOVERNS ? po.name2 : po.name1;
+    if (f_head != q.tokens[head_i].name || f_dep != q.tokens[dep_i].name) return std::nullopt;
+    if (!f.label.empty() && !corpus_.has_attr("deprel")) return std::nullopt;
+
+    const ConditionPtr& hc = q.tokens[head_i].conditions;
+    const ConditionPtr& dc = q.tokens[dep_i].conditions;
+    const auto& deps = corpus_.deps();
+    std::vector<std::pair<CorpusPos, CorpusPos>> pairs;   // (first token, second token)
+    for (size_t i = 0; i < layer->deviating(); ++i) {
+        const CorpusPos d = layer->deviating_pos(i);
+        if (!check_conditions(d, dc)) continue;
+        const CorpusPos bh = deps.head(d);
+        // the tree's edge into d, as far as the filter sees it (with its label, if it names one)
+        const bool tree_edge_labelled = f.label.empty() || corpus_.attr("deprel").value_at(d) == f.label;
+        CorpusPos last = NO_HEAD;
+        layer->for_each_head(d, [&](CorpusPos h, std::string_view label) {
+            if (h == NO_HEAD || h == last || (!rel.label.empty() && label != rel.label)) return true;
+            if (h == bh && tree_edge_labelled) return true;   // the tree has this edge
+            if (!check_conditions(h, hc)) return true;
+            last = h;
+            pairs.emplace_back(head_i == 0 ? h : d, head_i == 0 ? d : h);
+            return true;
+        });
+    }
+    std::sort(pairs.begin(), pairs.end());
+    pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
+    MatchSet result;
+    result.num_tokens = 2;
+    result.plan_path = "layer_deviations";
+    const size_t keep = max_matches == 0 ? pairs.size() : std::min(max_matches, pairs.size());
+    result.matches.reserve(keep);
+    for (size_t i = 0; i < keep; ++i) {
+        Match m;
+        m.positions = {pairs[i].first, pairs[i].second};
+        m.span_ends = {pairs[i].first, pairs[i].second};
+        result.matches.push_back(std::move(m));
+    }
+    result.total_count = pairs.size();   // every pair is known: the total comes free
+    result.total_exact = true;
+    if (max_total_cap > 0 && result.total_count > max_total_cap) {
+        result.total_count = max_total_cap;
+        result.total_exact = false;
+    }
     return result;
 }
 

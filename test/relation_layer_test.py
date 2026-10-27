@@ -332,6 +332,28 @@ def main():
           f"fast paths: {24 - bad} of 24 equal, {decomposed} through layer_inherit")
     failures += decomposed != 24
 
+    # edges of a thin layer that the tree lacks, read off the stored deviations (execute_layer_deviations): same
+    # hits and totals as the generic expansion with its per-hit filter
+    def hits_env(q, env):
+        r = subprocess.run([a.pando, "--limit", "100000", d, q], capture_output=True, text=True,
+                           env=dict(os.environ, **env))
+        return sorted(r.stdout.splitlines()[:-1]) if r.returncode == 0 else ["ERROR " + r.stderr.strip()[:200]]
+    bad = 0
+    enumerated = 0
+    dev_queries = [f'a:[] >:{L} b:[] :: a !>:head b' for L in ("deps", "eff", "cprop")] + [
+        'a:[upos="VERB"] >:deps:nsubj b:[] :: a !>:head:nsubj b', 'a:[] <:eff b:[upos="VERB"] :: b !>:head a',
+        'a:[upos="NOUN"] <:deps b:[] :: a !<:head b', 'a:[] >:eff:nsubj b:[] :: a !>:head b']
+    for q in dev_queries:
+        on, off = count_env(q, {}), count_env(q, {"PANDO_FASTPATH": "off"})
+        if on != off or hits_env(q, {}) != hits_env(q, {"PANDO_FASTPATH": "off"}) or on in ("0", "ERROR"):
+            bad += 1
+            print(f"FAIL {q}: {on} with the fast paths, {off} without (or the hits differ)")
+        r = subprocess.run([a.pando, "--timing", "--count-only", d, q], capture_output=True, text=True)
+        enumerated += "layer_deviations" in r.stderr
+    failures += bad + (enumerated != len(dev_queries))
+    print(f"{'ok  ' if not bad and enumerated == len(dev_queries) else 'FAIL'} deviations of thin layers: "
+          f"{len(dev_queries) - bad} of {len(dev_queries)} equal to the generic path, {enumerated} enumerated")
+
     # DEPS round trip through the CoNLL-U output
     r = subprocess.run([a.pando, "--limit", "100000", "--format", "conllu", d, "[]"], capture_output=True, text=True)
     out = [l.split("\t") for l in r.stdout.splitlines() if l and not l.startswith("#")]

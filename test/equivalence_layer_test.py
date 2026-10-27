@@ -9,6 +9,8 @@ declares `pando-index --relation coref=equivalence,attr=coref` and requires:
   * `[A] =:coref [B]`, `!=:coref`, `=:coref` in a chain with a sequence, `:: a =:coref b` / `:: a !=:coref b` and
     `count by` over it to count as a brute-force evaluation over the CoNLL-U (B never A itself);
   * errors that say what works: `=` without a layer between tokens, `=:head`, `>:coref`, a label on `=:coref`;
+  * a corpus with `default_within=text`: a layer whose classes cross texts (scope corpus, as `tuid` across
+    languages) is not cut by the default; one inside a text keeps it;
   * CorefUD input (`--corefud`, corefud_entity.h): `Entity=` brackets give each mention head its entity ids
     (`coref`, multivalue), declared and measured by pando-index itself (scope doc), queried with `=:coref`.
 Exit status 0 = all as required, 1 = a difference, 2 = a run error.
@@ -114,6 +116,17 @@ def main():
         check(r.returncode != 0 or needle in msg, f"{q} refused: {msg[:120]}")
         if needle not in msg:
             check(False, f"{q}: message lacks '{needle}'")
+    # default_within=text (TEITOK corpora): a class layer across texts must not be cut by it
+    with open(os.path.join(d, "corpus.info"), "a", encoding="utf-8") as f:
+        f.write("default_within=text\n")
+    p = subprocess.run([a.pando_index, "--relation", "uposclass=equivalence,attr=upos", d], capture_output=True, text=True)
+    check("scope=corpus" in p.stderr, f"a class layer across texts: {p.stderr.strip().splitlines()[0] if p.stderr else p}")
+    pron = [i for i in range(n) if t[i][2] == "PRON"]
+    check(count('[upos="PRON"] =:uposclass []') == str(len(pron) * (len(pron) - 1)),
+          f"default_within=text leaves =:uposclass across texts: {count('[upos=\"PRON\"] =:uposclass []')} "
+          f"(reference {len(pron) * (len(pron) - 1)})")
+    check(count('[] =:coref []') == str(pairs(ANY, ANY)), "default_within=text with =:coref (scope text): unchanged")
+
     if a.corefud:
         d2 = os.path.join(tempfile.mkdtemp(prefix="pando_corefud_"), "idx")
         p = subprocess.run([a.pando_index, a.corefud, d2], capture_output=True, text=True)

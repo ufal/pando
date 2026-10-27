@@ -8057,9 +8057,10 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
     result.cardinalities = plan.cardinalities;
     result.plan_path = "generic";
 
-    // #9: Use default_within from corpus when query does not specify within
+    // #9: Use default_within from corpus when query does not specify within — unless a relation layer of the
+    // query reaches beyond it (`=:tuid` links texts in different languages)
     std::string effective_within = q.within.empty()
-        ? corpus_.default_within() : q.within;
+        ? (layer_crosses_default_within(q) ? std::string() : corpus_.default_within()) : q.within;
     bool has_within = !effective_within.empty() &&
                       corpus_.has_structure(effective_within);
     const StructuralAttr* within_sa = has_within
@@ -8457,6 +8458,9 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
     if (TokenQuery hq; rewrite_head_layer(query, hq))
         return execute(hq, max_matches, count_total, max_total_cap, sample_size, random_seed, num_threads,
                        aggregate_by_fields, skip_name_validation);
+    if (auto ms = execute_layer_deviations(query, max_matches, count_total, max_total_cap, sample_size,
+                                           aggregate_by_fields))
+        return std::move(*ms);
     if (auto ms = execute_layer_decomposed(query, max_matches, count_total, max_total_cap, sample_size, num_threads,
                                            aggregate_by_fields))
         return std::move(*ms);
