@@ -441,6 +441,7 @@ void CorpusBuilder::read_conllu(const std::string& path) {
                 head_id = head_id * 10 + (c - '0');
             }
 
+            if (found >= 8) builder_.set_token_deps(field(8));   // enhanced dependencies (relation layer deps)
             builder_.add_token(attrs, head_id);
             in_sentence_ = true;
             pending_sentence_comments = false;

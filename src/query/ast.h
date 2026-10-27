@@ -248,6 +248,10 @@ struct QueryToken {
 
 struct QueryRelation {
     RelationType type;
+    // A relation layer (`[A] >:deps [B]`, relation_layer.h); empty = the basic tree. With `label` the edge's label
+    // must equal it (`>:head:nsubj`, `>:deps:"nsubj:pass"`).
+    std::string layer;
+    std::string label;
 };
 
 // ── Global filter (#12): :: match.region_attr op value, or a.attr = b.attr ───

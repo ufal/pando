@@ -153,6 +153,7 @@ add_library(pando_core STATIC
     src/index/structural_attr.cpp
     src/index/dependency_index.cpp
     src/index/relation_decl.cpp
+    src/index/relation_layer.cpp
     src/corpus/corpus.cpp
     src/corpus/builder.cpp
     src/corpus/streaming_builder.cpp
@@ -161,6 +162,7 @@ add_library(pando_core STATIC
     src/query/dialect/tiger/tiger_translate.cpp
     src/query/dialect/dialect.cpp
     src/query/executor.cpp
+    src/query/executor_layers.cpp
     src/query/executor_aggregate.cpp
     src/query/executor_sort.cpp
     src/query/sort_field.cpp
@@ -325,6 +327,11 @@ if(BUILD_TESTING)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/relation_decl_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
                 --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu)
+        # Relation layers (relation_layer.*): enhanced deps as an inherit=head layer, >:deps / >:head:label counted
+        add_test(NAME relation_layer
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/relation_layer_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
+                --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/deps_sample.conllu)
         # A rebuild into the same folder must not keep dependency files derived from the earlier build
         add_test(NAME index_rebuild
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/index_rebuild_test.py

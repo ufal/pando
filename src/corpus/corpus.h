@@ -7,6 +7,7 @@
 #include "index/structural_attr.h"
 #include "index/dependency_index.h"
 #include "index/relation_decl.h"
+#include "index/relation_layer.h"
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -120,6 +121,11 @@ public:
 
     // Relation layers (relation_decl.h): all of them, or one by name (nullptr when the index has none of that name)
     const std::vector<RelationDecl>& relations() const { return info_.relations; }
+    // A relation layer's edges (relation_layer.h); nullptr when the index has no such layer
+    const RelationLayer* relation_layer(const std::string& name) const {
+        auto it = layers_.find(name);
+        return it == layers_.end() ? nullptr : it->second.get();
+    }
     const RelationDecl* relation(const std::string& name) const {
         for (const auto& r : info_.relations)
             if (r.name == name) return &r;
@@ -174,6 +180,7 @@ private:
     std::unordered_map<std::string, std::unique_ptr<StructuralAttr>> structs_;
     DependencyIndex deps_;
     bool has_deps_ = false;
+    std::unordered_map<std::string, std::unique_ptr<RelationLayer>> layers_;   // relation layers (relation_layer.h)
     // loaded on first use; queries run concurrently on one Corpus (pando-server,
     // ServerApi), so the map is guarded (entries are never removed: references stay valid)
     mutable std::unordered_map<std::string, std::unique_ptr<GroupIndex>> group_indexes_;

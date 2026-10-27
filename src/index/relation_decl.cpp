@@ -18,6 +18,8 @@ std::string RelationDecl::format() const {
     o << ",scope=" << scope;
     if (span >= 0) o << ",span=" << span;
     o << ",endpoints=" << endpoints << ",source=" << source;
+    if (!inherit.empty()) o << ",inherit=" << inherit;
+    if (materialized) o << ",materialized";
     return o.str();
 }
 
@@ -50,6 +52,8 @@ std::optional<RelationDecl> parse_relation(const std::string& name, const std::s
             r.span = n;
         } else if (key == "endpoints") r.endpoints = val;
         else if (key == "source") r.source = val;
+        else if (key == "inherit") r.inherit = val;
+        else if (key == "materialized") r.materialized = true;
         else return fail("unknown property " + key);
     }
     if (!kind_seen) return fail("pointer or equivalence missing");

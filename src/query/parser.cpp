@@ -1436,6 +1436,24 @@ bool Parser::try_parse_relation(QueryRelation& rel) {
 
     // Consume the explicit relation operator
     lexer_.consume();
+    // `>:layer` / `>:layer:label`: a relation layer (only directly after an operator, so no clash with token
+    // names `a:[...]` or `::`); a label with a colon is quoted (`>:deps:"nsubj:pass"`)
+    if (lexer_.peek().type == TokType::COLON) {
+        lexer_.consume();
+        Token layer = lexer_.expect(TokType::IDENT);
+        rel.layer = layer.text;
+        if (lexer_.peek().type == TokType::COLON) {
+            lexer_.consume();
+            Token label = lexer_.peek();
+            if (label.type != TokType::IDENT && label.type != TokType::STRING)
+                throw std::runtime_error("Expected a label after '" + rel.layer + ":' (a word, or quoted: \"nsubj:pass\")");
+            lexer_.consume();
+            rel.label = label.text;
+        }
+        if (rel.type != RelationType::GOVERNS && rel.type != RelationType::GOVERNED_BY)
+            throw std::runtime_error("A relation layer (':" + rel.layer + "') goes with > or <: [A] >:" + rel.layer +
+                                     " [B] (B's " + rel.layer + " head is A) or [A] <:" + rel.layer + " [B]");
+    }
     return true;
 }
 

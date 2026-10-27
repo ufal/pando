@@ -8444,6 +8444,16 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
     if (TokenQuery simple; simplify_bare_strings(corpus_, query, simple))
         return execute(simple, max_matches, count_total, max_total_cap, sample_size, random_seed, num_threads,
                        aggregate_by_fields, skip_name_validation);
+    // relation layers: `>:head` is the basic tree; another layer has its own join (executor_layers.cpp)
+    if (TokenQuery hq; rewrite_head_layer(query, hq))
+        return execute(hq, max_matches, count_total, max_total_cap, sample_size, random_seed, num_threads,
+                       aggregate_by_fields, skip_name_validation);
+    for (const auto& r : query.relations)
+        if (!r.layer.empty()) {
+            if ((aggregate_by_fields && !aggregate_by_fields->empty()) || sample_size > 0)
+                throw std::runtime_error(":" + r.layer + " takes no count by or sample yet; the hits and their total work");
+            return execute_layer_relation(query, max_matches, count_total, max_total_cap);
+        }
     // P4.14: `within R having COND` → a precomputed restriction (unless PANDO_HAVING_MASK=off)
     static const bool having_mask = [] {
         const char* v = std::getenv("PANDO_HAVING_MASK");

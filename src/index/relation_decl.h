@@ -33,6 +33,8 @@ struct RelationDecl {
     int64_t span = -1;                // the largest link distance in tokens (measured); -1 = unknown
     std::string endpoints = "token";  // token | a region type
     std::string source = "annotated"; // annotated | derived:<rule>
+    std::string inherit;              // a layer this one deviates from ("head"): only the deviations are stored
+    bool materialized = false;        // stored in full although it inherits (speed over disk)
 
     // "pointer,functional,…" as written after `relation.<name>=`
     std::string format() const;

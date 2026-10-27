@@ -220,6 +220,18 @@ void Corpus::open(const std::string& dir_given, bool preload,
         }
     }
 
+    // Relation layers stored as deviations from the basic tree (relation_layer.h): need the tree and its label
+    layers_.clear();
+    for (const auto& r : info_.relations) {
+        if (r.inherit != "head" || r.materialized || !has_deps_) continue;
+        auto layer = std::make_unique<RelationLayer>();
+        const PositionalAttr* label = attrs_.count("deprel") ? attrs_.at("deprel").get() : nullptr;
+        if (layer->open(dir, r.name, &deps_, label))
+            layers_[r.name] = std::move(layer);
+        else
+            std::cerr << "Warning: relation." << r.name << " declared but its files in " << dir << " are missing or inconsistent\n";
+    }
+
     // P5.6 head attributes (after the dependency index: one without .dat reads its
     // source attribute at p + head_rel[p])
     head_attr_names_.clear();

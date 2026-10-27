@@ -1,5 +1,8 @@
 #pragma once
 
+#include "index/relation_layer.h"
+#include <string_view>
+
 #include "core/types.h"
 #include "core/mmap_file.h"
 #include <string>
@@ -47,6 +50,10 @@ public:
 
     /// Optional per-sentence structural attributes (e.g. `tuid` → `s_tuid` in corpus.info).
     void end_sentence(const std::vector<std::pair<std::string, std::string>>& sent_region_attrs = {});
+
+    /// The next token's enhanced dependencies (CoNLL-U DEPS, `4:nsubj|7:nsubj:xsubj`, `_` = none), called before its
+    /// add_token: stored as the relation layer `deps` (relation_layer.h), as deviations from the basic tree.
+    void set_token_deps(std::string_view deps);
 
     // Add a non-sentence structural region (e.g. "text", "p").
     void add_region(const std::string& type, CorpusPos start, CorpusPos end);
@@ -140,6 +147,13 @@ private:
     std::unordered_map<std::string, std::unique_ptr<AttrState>> attrs_;
     std::vector<std::string> attr_order_;
     std::unordered_set<std::string> attr_set_;
+
+    // Enhanced dependencies (set_token_deps): the sentence's tokens, written per sentence once one carries DEPS
+    std::string pending_deps_;
+    bool pending_deps_set_ = false;
+    std::vector<RelationLayerWriter::Token> sent_deps_;
+    std::unique_ptr<RelationLayerWriter> deps_writer_;
+    void flush_sentence_deps();
 
     // Current sentence
     struct SentToken { int sentence_head_id; };

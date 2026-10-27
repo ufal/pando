@@ -889,6 +889,11 @@ public:
                      const std::vector<std::string>* aggregate_by_fields = nullptr,
                      bool skip_name_validation = false);
 
+    // Relation layers (executor_layers.cpp): `>:head[:label]` rewritten into the basic tree; another layer
+    // (`[A] >:deps [B]`) joined from the dependent side, one hit per pair
+    static bool rewrite_head_layer(const TokenQuery& q, TokenQuery& out);
+    MatchSet execute_layer_relation(const TokenQuery& q, size_t max_matches, bool count_total, size_t max_total_cap) const;
+
     // #16: Source | Target: run source and target queries, join on source_query.global_alignment_filters.
     // Returns MatchSet with parallel_matches filled; matches is empty.
     MatchSet execute_parallel(const TokenQuery& source_query,

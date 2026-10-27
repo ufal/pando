@@ -1,4 +1,5 @@
 #include "corpus/streaming_builder.h"
+#include "index/relation_decl.h"
 #include "core/build_info.h"
 #include "index/postings_writer.h"
 #include <future>
@@ -323,6 +324,12 @@ void StreamingBuilder::add_token(
     if (finalized_)
         throw std::logic_error("add_token called after finalize");
 
+    if (pending_deps_set_) {   // the sentence's tokens for the deps layer (set_token_deps)
+        auto dr = attrs.find("deprel");
+        sent_deps_.push_back({sentence_head_id, dr == attrs.end() ? std::string() : dr->second, pending_deps_});
+        pending_deps_set_ = false;
+    }
+
     for (const auto& [name, value] : attrs)
         ensure_attr(name);
 
@@ -499,8 +506,30 @@ void StreamingBuilder::end_sentence(
         dep_written_ += sent_len;
     }
 
+    flush_sentence_deps();
     sent_buf_.clear();
     sent_start_ = corpus_size_;
+}
+
+void StreamingBuilder::set_token_deps(std::string_view deps) {
+    pending_deps_.assign(deps);
+    pending_deps_set_ = true;
+}
+
+// The sentence's DEPS to the deps layer: the writer starts with the first sentence that has any (only deviations
+// from the basic tree are stored, so sentences before it lose nothing); a sentence whose tokens did not all come with
+// set_token_deps (mixed input) is left to the basic tree.
+void StreamingBuilder::flush_sentence_deps() {
+    if (sent_deps_.empty()) return;
+    const bool complete = sent_deps_.size() == sent_buf_.size();
+    bool any = false;
+    for (const auto& t : sent_deps_)
+        if (!t.deps.empty() && t.deps != "_") { any = true; break; }
+    if (complete && any) {
+        if (!deps_writer_) deps_writer_ = std::make_unique<RelationLayerWriter>(output_dir_, "deps");
+        deps_writer_->add_sentence(sent_start_, sent_deps_);
+    }
+    sent_deps_.clear();
 }
 
 // ── add_region ──────────────────────────────────────────────────────────
@@ -1072,6 +1101,24 @@ void StreamingBuilder::finalize() {
                 info << kv[i];
             }
             info << "\n";
+        }
+        if (deps_writer_) {   // enhanced dependencies (set_token_deps): a layer inheriting from the basic tree
+            deps_writer_->finish();
+            RelationDecl r;
+            r.name = "deps";
+            r.kind = RelationDecl::Kind::Pointer;
+            r.label = "edge";
+            r.scope = "s";
+            r.span = deps_writer_->span();
+            r.endpoints = "token";
+            r.source = "annotated";
+            r.inherit = "head";
+            info << "relation.deps=" << r.format() << "\n";
+            std::cerr << "Relation deps: " << deps_writer_->deviating() << " of " << deps_writer_->tokens()
+                      << " tokens deviate from the basic tree (" << deps_writer_->edges() << " edges stored";
+            if (deps_writer_->skipped_empty())
+                std::cerr << "; " << deps_writer_->skipped_empty() << " edges to empty nodes left out";
+            std::cerr << ")\n";
         }
         if (!token_group_struct_.empty()) {
             std::vector<std::string> tg(token_group_struct_.begin(), token_group_struct_.end());
