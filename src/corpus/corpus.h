@@ -6,6 +6,7 @@
 #include "index/positional_attr.h"
 #include "index/structural_attr.h"
 #include "index/dependency_index.h"
+#include "index/relation_decl.h"
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -40,6 +41,10 @@ struct CorpusInfo {
     // the positional attributes, not nameable in queries; the executor reads
     // [P] > [C] through them.
     std::vector<std::string> head_attrs;
+
+    // Relation layers (`relation.<name>=pointer,functional,…`; relation_decl.h): their declared and measured
+    // properties. The basic tree is `head`, measured by `pando-index --upgrade`.
+    std::vector<RelationDecl> relations;
 
     // Build identity of the pando-index that built the index / last ran --upgrade
     // (build_string(); empty for indexes from before this was recorded).
@@ -112,6 +117,14 @@ public:
     // Key=Val pipe fields (UD-style `feats`; `|` joins pairs, not MV senses)
     bool is_kv_pipe(const std::string& name) const;
     const std::vector<std::string>& kv_pipe_attrs() const { return info_.kv_pipe_attrs; }
+
+    // Relation layers (relation_decl.h): all of them, or one by name (nullptr when the index has none of that name)
+    const std::vector<RelationDecl>& relations() const { return info_.relations; }
+    const RelationDecl* relation(const std::string& name) const {
+        for (const auto& r : info_.relations)
+            if (r.name == name) return &r;
+        return nullptr;
+    }
 
     // REQ-TOKEN-GROUPS: token-group structs are non-contiguous standoff annotations
     // and must be rejected by operators that assume contiguous regions.

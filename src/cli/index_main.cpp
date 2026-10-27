@@ -5,6 +5,7 @@
 #include "index/fold_index.h"
 #include "index/head_attr.h"
 #include "index/dep_pair_index.h"
+#include "index/relation_decl.h"
 #include "index/bitmap_index.h"
 #include "corpus/corpus.h"
 #include "core/build_info.h"
@@ -355,6 +356,27 @@ static int upgrade_packed_dat(const pando::Corpus& corpus, const std::string& sp
     return 0;
 }
 
+// Record `relation.<name>=…` in corpus.info (replacing an earlier line for that relation).
+static bool record_relation(const std::string& dir, const pando::RelationDecl& r) {
+    const std::string path = dir + "/corpus.info", tmp = path + ".tmp", key = "relation." + r.name + "=";
+    std::ifstream in(path);
+    if (!in) return false;
+    std::vector<std::string> lines;
+    for (std::string line; std::getline(in, line);)
+        if (line.rfind(key, 0) != 0) lines.push_back(line);
+    in.close();
+    lines.push_back(key + r.format());
+    {
+        std::ofstream out(tmp);
+        if (!out) return false;
+        for (const auto& l : lines) out << l << "\n";
+        if (!out) return false;
+    }
+    std::error_code ec;
+    fs::rename(tmp, path, ec);
+    return !ec;
+}
+
 // Record `upgraded_with=<build> <UTC time>` in corpus.info (replacing an earlier one).
 static void record_upgrade(const std::string& dir) {
     const std::string path = dir + "/corpus.info", tmp = path + ".tmp";
@@ -453,6 +475,22 @@ static int upgrade_index(const std::string& dir, bool quiet = false,
                         return 1;
                     }
                     if (!quiet) std::cerr << "Removed " << dir << f << " (dep.head_rel8 verified)\n";
+                }
+            }
+            // relation.head: the basic tree as a relation layer (relation_decl.h), measured from the heads
+            // as they are now (dep.head_rel8 may just have been rewritten)
+            {
+                pando::DependencyIndex now;
+                now.open(dir, sentences);
+                std::vector<std::string> problems;
+                const pando::RelationDecl rel = pando::measure_head_relation(now, sentences, &problems);
+                if (!record_relation(dir, rel)) {
+                    std::cerr << "Error: cannot record relation.head in " << dir << "/corpus.info\n";
+                    return 1;
+                }
+                if (!quiet) {
+                    std::cerr << "Relation head: " << rel.format() << "\n";
+                    for (const auto& pr : problems) std::cerr << "  not a tree: " << pr << "\n";
                 }
             }
         } catch (const std::exception& e) {

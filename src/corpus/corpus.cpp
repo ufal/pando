@@ -7,6 +7,7 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <iostream>
 #include <unordered_set>
 
 namespace pando {
@@ -75,6 +76,13 @@ static CorpusInfo read_info(const std::string& path) {
             std::string tok;
             while (std::getline(ss, tok, ','))
                 if (!tok.empty()) info.kv_pipe_attrs.push_back(tok);
+        } else if (key.rfind("relation.", 0) == 0) {
+            // a relation layer (relation_decl.h); one that does not parse is left out with a warning
+            std::string err;
+            if (auto r = parse_relation(key.substr(9), val, &err))
+                info.relations.push_back(std::move(*r));
+            else
+                std::cerr << "Warning: " << path << ": " << err << "\n";
         } else if (key == "indexed_with") {
             info.indexed_with = val;
         } else if (key == "upgraded_with") {

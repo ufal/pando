@@ -152,6 +152,7 @@ add_library(pando_core STATIC
     src/index/positional_attr.cpp
     src/index/structural_attr.cpp
     src/index/dependency_index.cpp
+    src/index/relation_decl.cpp
     src/corpus/corpus.cpp
     src/corpus/builder.cpp
     src/corpus/streaming_builder.cpp
@@ -319,6 +320,11 @@ if(BUILD_TESTING)
                 --queries-extra ${CMAKE_CURRENT_SOURCE_DIR}/test/fastpath_queries_gen.txt
                 ${PANDO_DIFF_GEN_MODES})
         set_tests_properties(fastpath_diff_gen PROPERTIES FIXTURES_REQUIRED gen_corpus)
+        # Relation declarations (relation_decl.*): relation.head= measured by pando-index, a non-tree described as such
+        add_test(NAME relation_decl
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/relation_decl_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
+                --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu)
         # A rebuild into the same folder must not keep dependency files derived from the earlier build
         add_test(NAME index_rebuild
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/index_rebuild_test.py
