@@ -76,6 +76,9 @@ public:
                                     std::string* err);
     /// P4.3b: write `<dir>/dep.head_rel8{,.exc}` from this index's head offsets.
     bool write_head_rel8(const std::string& dir, std::string* err) const;
+    /// False when dep.head_rel8 is open and gives another head than dep.head for some token
+    /// (a head_rel8 left from an earlier build of the same folder).
+    bool head_rel8_matches_head() const;
     /// P4.3b: `dep.head_rel8` present and complete (same token count).
     static bool have_head_rel8(const std::string& dir, size_t tokens);
 

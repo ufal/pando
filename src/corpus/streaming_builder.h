@@ -160,8 +160,19 @@ private:
 
     // Sentence region file (streamed)
     FILE* sent_rgn_file_ = nullptr;
-    // One entry per sentence region (parallel to s.rgn), for named attrs like tuid
-    std::vector<std::vector<std::pair<std::string, std::string>>> sentence_region_attr_rows_;
+    // Named sentence attrs (e.g. tuid → s_tuid.val / .val.idx), streamed per sentence as the
+    // sentences come (a corpus of 75M sentences kept them in memory: ~40 GB). One value per
+    // sentence region (parallel to s.rgn); "_" where a sentence lacks the attr.
+    struct SentAttrStream {
+        FILE* val = nullptr;
+        FILE* idx = nullptr;
+        int64_t offset = 0;   // bytes written to .val
+        size_t rows = 0;      // sentences written
+    };
+    std::unordered_map<std::string, SentAttrStream> sent_attr_streams_;
+    std::unordered_set<std::string> sent_attr_keys_;  // the keys, in the order corpus.info lists them
+    size_t sent_rows_ = 0;
+    void write_sent_attr(SentAttrStream& st, const std::string& value);
 
     // Other structural regions (buffered — typically few)
     std::unordered_map<std::string, std::vector<Region>> regions_;

@@ -349,3 +349,32 @@ a:[upos="VERB" & text_langcode!="en"] > b:[upos="NOUN"]; count by a.lemma
 [upos="DET"] []{0,2} [upos="NOUN"] within s having [lemma="the"]
 [upos="NOUN"] within s having [lemma="zzzneverthere"]
 [upos="NOUN"] within s having [lemma="the"] :: match.text_lang="English"
+
+# DEP-CHILD-FASTPATH (2026-10-26, plan path dep_child): child / not child / count(child [C]) OP n inside one token
+[upos="VERB" & child [deprel="nsubj"]]
+[upos="VERB" & child [deprel="nsubj"] & child [deprel="obj"]]
+[upos="VERB" & not child [deprel="nsubj"]]
+[upos="VERB" & child [deprel="nsubj"] & not child [deprel="obj"]]
+[upos="NOUN" & child [upos="ADJ"]]
+[upos="NOUN" & child [upos="ADJ"]] within s
+[upos="NOUN" & child [upos="DET" & lemma="the"]]
+[upos="NOUN|PROPN" & child [deprel="amod"]]
+[upos="NOUN" & count(child [upos="ADJ"]) >= 2]
+[upos="NOUN" & count(child [upos="ADJ"]) = 1]
+[upos="NOUN" & count(child [upos="ADJ"]) = 0]
+[upos="NOUN" & count(child [upos="DET"]) != 1]
+[upos="VERB" & count(child [deprel="obj"]) < 2 & child [deprel="nsubj"]]
+[upos="VERB" & child [upos="NOUN|PROPN|PRON" & deprel="nsubj.*"] & count(child [upos="NOUN|PROPN|PRON" & deprel=".*obj.*"]) >= 2]
+[lemma="book" & child [upos="DET"]]
+[upos="NOUN" & child [upos="ADJ"]] [upos="PUNCT"]
+a:[upos="NOUN" & child [upos="ADJ"]]; count by a.lemma
+# D1 density rule (2026-10-26): a sparse AND resolved from its rare side, not the bitmap kernel
+[lemma="book"] > [deprel="amod"]
+[deprel="amod" & lemma="good"]
+[upos="NOUN" & lemma="house"] [upos="PUNCT"]
+# KV attribute (feats, kv_pipe): keys
+[feats/Number="Plur"]
+[upos="NOUN" & feats/Number="Sing"]
+[feats/Case="Nom" & upos="NOUN"] [upos="VERB"]
+[upos="VERB" & feats/Tense="Past"] > [feats/Number="Plur"]
+a:[upos="NOUN"]; count by a.feats/Number

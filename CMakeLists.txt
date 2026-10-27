@@ -297,6 +297,33 @@ if(BUILD_TESTING)
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
                 --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu
                 --queries ${CMAKE_CURRENT_SOURCE_DIR}/test/fastpath_queries.txt)
+        # The same on a generated corpus of 600k tokens (test/gen_test_corpus.py): crosses bitmap
+        # chunks, dependency windows and partitions, long sentences, multivalue / kv_pipe attributes,
+        # u and nested regions (extra queries in fastpath_queries_gen.txt). Only the modes whose
+        # behaviour depends on corpus size (the sample covers all 13); -DPANDO_DIFF_ALL_MODES=ON for all.
+        option(PANDO_DIFF_ALL_MODES "fastpath_diff_gen: all modes, not only the size-dependent ones" OFF)
+        if(PANDO_DIFF_ALL_MODES)
+            set(PANDO_DIFF_GEN_MODES "")
+        else()
+            set(PANDO_DIFF_GEN_MODES --modes on,off,mt,bmforce,packed)
+        endif()
+        add_test(NAME gen_test_corpus
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/gen_test_corpus.py
+                ${CMAKE_CURRENT_BINARY_DIR}/gen_test_corpus.jsonl)
+        set_tests_properties(gen_test_corpus PROPERTIES FIXTURES_SETUP gen_corpus)
+        add_test(NAME fastpath_diff_gen
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/fastpath_diff.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
+                --jsonl ${CMAKE_CURRENT_BINARY_DIR}/gen_test_corpus.jsonl
+                --queries ${CMAKE_CURRENT_SOURCE_DIR}/test/fastpath_queries.txt
+                --queries-extra ${CMAKE_CURRENT_SOURCE_DIR}/test/fastpath_queries_gen.txt
+                ${PANDO_DIFF_GEN_MODES})
+        set_tests_properties(fastpath_diff_gen PROPERTIES FIXTURES_REQUIRED gen_corpus)
+        # A rebuild into the same folder must not keep dependency files derived from the earlier build
+        add_test(NAME index_rebuild
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/index_rebuild_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
+                --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu)
         # Persistent names: alignment with a token named by an earlier statement
         add_test(NAME persistent_names
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/persistent_names_test.py

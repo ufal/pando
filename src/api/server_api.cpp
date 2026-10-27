@@ -159,7 +159,7 @@ ServerConfig parse_server_options(const std::string& json_in, ServerConfig cfg) 
     if (has("preload")) cfg.preload = json_extract_bool(opts, "preload", false);
     if (has("total_workers"))
         cfg.jobs.workers = static_cast<unsigned>(std::max<size_t>(1, json_extract_num(opts, "total_workers", 2)));
-    if (has("result_cache")) cfg.jobs.max_entries = std::max<size_t>(1, json_extract_num(opts, "result_cache", 512));
+    if (has("result_cache")) cfg.jobs.max_entries = json_extract_num(opts, "result_cache", 512);   // 0 = keep none
     if (has("result_ttl")) cfg.jobs.ttl = std::chrono::seconds(json_extract_num(opts, "result_ttl", 3600));
     if (has("abandon_after")) cfg.jobs.abandon = std::chrono::seconds(json_extract_num(opts, "abandon_after", 120));
     if (has("query_timeout_ms")) cfg.query_timeout_ms = json_extract_num(opts, "query_timeout_ms", 0);

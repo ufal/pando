@@ -209,6 +209,10 @@ StreamingBuilder::~StreamingBuilder() {
     if (dep_euler_out_file_) fclose(dep_euler_out_file_);
     if (sent_rgn_file_)      fclose(sent_rgn_file_);
     if (group_table_file_)   fclose(group_table_file_);
+    for (auto& [key, st] : sent_attr_streams_) {
+        if (st.val) fclose(st.val);
+        if (st.idx) fclose(st.idx);
+    }
 }
 
 // ── Attribute management ────────────────────────────────────────────────
@@ -356,6 +360,15 @@ void StreamingBuilder::add_token(
 
 // ── end_sentence ────────────────────────────────────────────────────────
 
+// One sentence's value of a named sentence attr: as write_strings() writes .val (each value
+// followed by NUL) and .val.idx (int64 start offsets, closed by the total in finalize()).
+void StreamingBuilder::write_sent_attr(SentAttrStream& st, const std::string& value) {
+    fwrite(&st.offset, sizeof(int64_t), 1, st.idx);
+    fwrite(value.c_str(), 1, value.size() + 1, st.val);
+    st.offset += static_cast<int64_t>(value.size()) + 1;
+    ++st.rows;
+}
+
 void StreamingBuilder::end_sentence(
         const std::vector<std::pair<std::string, std::string>>& sent_region_attrs) {
     if (sent_buf_.empty()) return;
@@ -366,7 +379,27 @@ void StreamingBuilder::end_sentence(
     // Write sentence region
     Region rgn{sent_start_, sent_end};
     fwrite(&rgn, sizeof(Region), 1, sent_rgn_file_);
-    sentence_region_attr_rows_.push_back(sent_region_attrs);
+    for (const auto& [key, value] : sent_region_attrs) {
+        sent_attr_keys_.insert(key);
+        auto it = sent_attr_streams_.find(key);
+        if (it == sent_attr_streams_.end()) {
+            SentAttrStream st;
+            std::string attr_base = output_dir_ + "/s_" + key;
+            st.val = fopen((attr_base + ".val").c_str(), "wb");
+            st.idx = fopen((attr_base + ".val.idx").c_str(), "wb");
+            if (!st.val || !st.idx)
+                throw std::runtime_error("Cannot create " + attr_base + ".val");
+            it = sent_attr_streams_.emplace(key, st).first;
+            while (it->second.rows < sent_rows_)   // earlier sentences lack it
+                write_sent_attr(it->second, "_");
+        }
+        if (it->second.rows == sent_rows_)   // the first value of a key in a sentence counts
+            write_sent_attr(it->second, value);
+    }
+    for (auto& [key, st] : sent_attr_streams_)
+        if (st.rows == sent_rows_)
+            write_sent_attr(st, "_");
+    ++sent_rows_;
 
     // Check if any token has dependency info
     bool any_deps = false;
@@ -834,34 +867,19 @@ void StreamingBuilder::finalize() {
                 long sz = ftell(probe);
                 fclose(probe);
                 size_t n_sents = (sz > 0) ? static_cast<size_t>(sz) / sizeof(Region) : 0;
-                if (n_sents != sentence_region_attr_rows_.size())
-                    throw std::runtime_error("s.rgn / sentence_region_attr_rows_ size mismatch");
+                if (n_sents != sent_rows_)
+                    throw std::runtime_error("s.rgn / sentence attribute rows size mismatch");
             }
         }
-        if (!sentence_region_attr_rows_.empty()) {
-            std::unordered_set<std::string> sent_attr_keys;
-            for (const auto& row : sentence_region_attr_rows_)
-                for (const auto& kv : row)
-                    sent_attr_keys.insert(kv.first);
-            for (const auto& key : sent_attr_keys) {
-                std::vector<std::string> values;
-                values.reserve(sentence_region_attr_rows_.size());
-                for (const auto& row : sentence_region_attr_rows_) {
-                    std::string val = "_";
-                    for (const auto& kv : row)
-                        if (kv.first == key) {
-                            val = kv.second;
-                            break;
-                        }
-                    values.push_back(std::move(val));
-                }
-                std::string attr_base = output_dir_ + "/s_" + key;
-                std::vector<int64_t> offsets;
-                write_strings(attr_base + ".val", values, offsets);
-                write_vec(attr_base + ".val.idx", offsets);
-                region_attrs_list.push_back("s_" + key);
-            }
+        // the streamed .val files (end_sentence) get their closing offset
+        for (auto& [key, st] : sent_attr_streams_) {
+            fwrite(&st.offset, sizeof(int64_t), 1, st.idx);
+            fclose(st.val);
+            fclose(st.idx);
+            st.val = st.idx = nullptr;
         }
+        for (const auto& key : sent_attr_keys_)
+            region_attrs_list.push_back("s_" + key);
     }
 
     // SM-ROAD-2: Sort nested-type regions by (start, -end) so that

@@ -37,12 +37,16 @@ public:
     // When false (default), store feats as a single combined string.
     void set_split_feats(bool v) { split_feats_ = v; }
 
+    // CoNLL-U MISC keys indexed as positional attributes of their own (each a full-length column);
+    // empty: none. Default: tuid, Translit, Vform, LTranslt, Root, CorrectForm, Gloss.
+    void set_misc_keys(std::vector<std::string> keys) { misc_keys_ = std::move(keys); }
+
     StreamingBuilder& builder() { return builder_; }
 
 private:
     void parse_feats(const std::string& feats_str,
                      std::unordered_map<std::string, std::string>& attrs);
-    /// CoNLL-U MISC column: only whitelisted keys (tuid, Translit, Vform, LTranslt, Root, CorrectForm, Gloss).
+    /// CoNLL-U MISC column: only the keys in misc_keys_.
     void parse_misc(const std::string& misc_str,
                     std::unordered_map<std::string, std::string>& attrs);
 
@@ -51,6 +55,7 @@ private:
 
     StreamingBuilder builder_;
     bool split_feats_ = false;
+    std::vector<std::string> misc_keys_ = {"tuid", "Translit", "Vform", "LTranslt", "Root", "CorrectForm", "Gloss"};
     bool overlay_standoff_only_ = false;
 
     // Region tracking for CoNLL-U input (3b/4c):

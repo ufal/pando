@@ -71,7 +71,8 @@ PANDO_API const char* pando_server_build_json(void);
  *   options_json: NULL or a JSON object, all keys optional:
  *     "preload": bool           read all index pages at open (default false: lazy mmap)
  *     "total_workers": N        concurrent background counts (default 2)
- *     "result_cache": N         cached query results (default 512)
+ *     "result_cache": N         cached query results: finished totals reused for the same query
+ *                               (default 512; 0 = none, every total counted again: for benchmarks)
  *     "result_ttl": SEC         drop an unused finished result after SEC (default 3600)
  *     "abandon_after": SEC      cancel a count nobody polled for SEC (default 120; 0 = never)
  *     "query_timeout_ms": MS    default /query time limit (0 = none; per request "timeout_ms")

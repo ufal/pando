@@ -406,6 +406,7 @@ static int upgrade_index(const std::string& dir, bool quiet = false,
             std::cerr << dir << "/dep.head_rel up to date\n";
         }
     }
+    bool heads_rewritten = false;   // an existing dep.head_rel8 replaced: rebuild what was derived from it
     // P4.3b: dep.head_rel8 (1 byte per token + exceptions), which readers prefer;
     // --compact-deps then drops dep.head and dep.head_rel (2 bytes per token each)
     if ((fs::exists(dir + "/dep.head") || fs::exists(dir + "/dep.head_rel8")) && fs::exists(dir + "/s.rgn")) {
@@ -418,12 +419,20 @@ static int upgrade_index(const std::string& dir, bool quiet = false,
             std::error_code ec;
             const bool stale = fs::exists(dir + "/dep.head")
                 && fs::last_write_time(dir + "/dep.head_rel8", ec) < fs::last_write_time(dir + "/dep.head", ec);
-            if (!pando::DependencyIndex::have_head_rel8(dir, n) || stale) {
+            // the content too: file times do not survive every copy, and a rebuild into the same
+            // folder left the old head_rel8 (iswoc, 2026-10-26: 3% of the heads from an earlier tree)
+            const bool have8 = pando::DependencyIndex::have_head_rel8(dir, n);
+            const bool differs = have8 && !stale && !before.head_rel8_matches_head();
+            if (differs && !quiet)
+                std::cerr << dir << "/dep.head_rel8 differs from dep.head: rewritten, with the head attributes "
+                             "and edge postings derived from it\n";
+            if (!have8 || stale || differs) {
                 std::string err;
                 if (!before.write_head_rel8(dir, &err)) {
                     std::cerr << "Error: " << err << "\n";
                     return 1;
                 }
+                heads_rewritten = have8;
                 if (!quiet) std::cerr << "Wrote " << dir << "/dep.head_rel8 (" << secs() << " s)\n";
             } else if (!quiet) {
                 std::cerr << dir << "/dep.head_rel8 up to date\n";
@@ -489,7 +498,7 @@ static int upgrade_index(const std::string& dir, bool quiet = false,
                 names = split_list(head_attrs);
             }
             for (const auto& a : names) {
-                if (pando::HeadAttr::up_to_date(src, a)) {
+                if (!heads_rewritten && pando::HeadAttr::up_to_date(src, a)) {
                     if (!quiet) std::cerr << "Head attribute " << pando::HeadAttr::name_for(a) << " up to date\n";
                     continue;
                 }
@@ -554,7 +563,7 @@ static int upgrade_index(const std::string& dir, bool quiet = false,
                     continue;
                 }
                 pando::DepPairIndex probe;
-                if (probe.open(corpus, h, c)) {
+                if (!heads_rewritten && probe.open(corpus, h, c)) {
                     if (!quiet)
                         std::cerr << "Edge postings " << pando::DepPairIndex::base_path(dir, h, c)
                                   << ".rev up to date\n";
@@ -677,6 +686,7 @@ int main(int argc, char* argv[]) {
                              packed_dat, drop_dat);
     }
     bool split_feats = false;
+    std::optional<std::vector<std::string>> misc_keys;   // --misc-keys
     bool format_vertical = false;
     bool format_jsonl = false;
     bool overlay_index = false;
@@ -690,6 +700,17 @@ int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--split-feats") split_feats = true;
+        else if ((a == "--misc-keys" && i + 1 < argc) || a.rfind("--misc-keys=", 0) == 0) {
+            std::string v = a == "--misc-keys" ? argv[++i] : a.substr(12);
+            misc_keys.emplace();
+            if (v != "none")
+                for (size_t from = 0; from <= v.size();) {
+                    size_t comma = v.find(',', from);
+                    if (comma == std::string::npos) comma = v.size();
+                    if (comma > from) misc_keys->push_back(v.substr(from, comma - from));
+                    from = comma + 1;
+                }
+        }
         else if (a == "--overlay-index") overlay_index = true;
         else if (a == "--head-attrs" && i + 1 < argc) build_head_attrs = argv[++i];
         else if (a.rfind("--head-attrs=", 0) == 0) build_head_attrs = a.substr(13);
@@ -720,6 +741,8 @@ int main(int argc, char* argv[]) {
                   << "  For each region attribute (e.g. text_langcode.val), the indexer also writes\n"
                   << "  .lex / .rev / .rev.idx (value → region ids) for fast :: metadata filters.\n\n"
                   << "  --split-feats     Split FEATS into feats#Feature columns (default: combined)\n"
+                  << "  --misc-keys none|K1,K2  MISC keys indexed as attributes of their own (default:\n"
+                  << "                    tuid,Translit,Vform,LTranslt,Root,CorrectForm,Gloss; none: no MISC)\n"
                   << "  --head-attrs auto|none|A[,B...]  head attributes (default auto: upos, deprel,\n"
                   << "                    lemma when there are dependencies; see --upgrade)\n"
                   << "  --format vertical Read CWB-style vertical (one token/line, <s> </s>);\n"
@@ -807,6 +830,7 @@ int main(int argc, char* argv[]) {
 
         pando::CorpusBuilder builder(output_dir);
         builder.set_split_feats(split_feats);
+        if (misc_keys) builder.set_misc_keys(*misc_keys);
 
         auto t0 = std::chrono::steady_clock::now();
         int64_t prev_tokens = 0;

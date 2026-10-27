@@ -156,20 +156,11 @@ void CorpusBuilder::close_doc_region_if_open() {
 
 void CorpusBuilder::parse_misc(const std::string& misc_str,
         std::unordered_map<std::string, std::string>& attrs) {
-    if (misc_str.empty() || misc_str == "_") return;
-    // Only index a fixed set: some corpora encode open-ended key=value MISC that would
-    // explode the attribute namespace if imported wholesale.
-    auto misc_key_allowed = [](std::string_view key) -> bool {
-        static constexpr std::string_view allowed[] = {
-            "tuid",
-            "Translit",
-            "Vform",
-            "LTranslt",
-            "Root",
-            "CorrectForm",
-            "Gloss",
-        };
-        for (std::string_view a : allowed) {
+    if (misc_str.empty() || misc_str == "_" || misc_keys_.empty()) return;
+    // Only index a fixed set (set_misc_keys): some corpora encode open-ended key=value MISC that
+    // would explode the attribute namespace if imported wholesale.
+    auto misc_key_allowed = [this](std::string_view key) -> bool {
+        for (const auto& a : misc_keys_) {
             if (key == a) return true;
         }
         return false;

@@ -3435,6 +3435,34 @@ std::vector<CorpusPos> QueryExecutor::resolve_leaf(
     }
     const auto& pa = corpus_.attr(name);
 
+    // A multivalue attribute: a value is one of the token's components (`tags="PER"` holds for
+    // "LOC|PER"), from the .mv.rev component index as the seed paths take it (RG-5f); `!=`: no
+    // component equal. Without this the whole stored string was compared (partitioned
+    // aggregations of `[tags="PER"]` lost the tokens with several components).
+    if (corpus_.is_multivalue(name) && pa.has_mv() && !ac.case_insensitive && !ac.diacritics_insensitive
+        && (ac.op == CompOp::EQ || ac.op == CompOp::NEQ) && !ac.id_set_resolved) {
+        const CorpusPos lo = windowed() ? operand_window_.lo : 0;
+        const CorpusPos hi = windowed() ? std::min(operand_window_.hi, corpus_.size()) : corpus_.size();
+        std::vector<CorpusPos> in;
+        const LexiconId mv_id = pa.mv_lookup(ac.value);
+        if (mv_id != UNKNOWN_LEX)
+            pa.for_each_position_mv(mv_id, [&](CorpusPos p) {
+                if (p >= lo && p < hi) in.push_back(p);
+                return true;
+            });
+        std::sort(in.begin(), in.end());
+        in.erase(std::unique(in.begin(), in.end()), in.end());
+        if (ac.op == CompOp::EQ) return in;
+        std::vector<CorpusPos> out;
+        out.reserve(static_cast<size_t>(hi - lo) - in.size());
+        size_t j = 0;
+        for (CorpusPos p = lo; p < hi; ++p) {
+            if (j < in.size() && in[j] == p) { ++j; continue; }
+            out.push_back(p);
+        }
+        return out;
+    }
+
     // Fold-aware EQ resolution (fold index file, else in-memory fold map)
     if ((ac.case_insensitive || ac.diacritics_insensitive) && ac.op == CompOp::EQ) {
         const std::vector<LexiconId> ids = ac.id_set_resolved
@@ -5102,12 +5130,16 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                 bool dense = false;
                 std::unique_ptr<BmExpr> e = compile_bm(c, &dense);
                 in_compile_bm = false;
-                if (e && dense) {
+                const CorpusPos N = windowed() ? std::min(operand_window_.hi, corpus_.size()) : corpus_.size();
+                const CorpusPos W0 = windowed() ? operand_window_.lo : 0;
+                const size_t nch = static_cast<size_t>((N + BitmapIndex::kChunk - 1) >> BitmapIndex::kChunkShift);
+                // A sparse result (fewer hits than chunks: `[deprel="amod" & head#lemma="R"]`)
+                // is resolved from its rare side instead: the kernel would load every chunk of
+                // the dense side (ParlaMint D1: 118 ms against 1.3 ms).
+                const size_t chunks = nch - static_cast<size_t>(W0 >> BitmapIndex::kChunkShift);
+                if (e && dense && (bitmap_mode() == BitmapMode::Force || e->estimate >= chunks)) {
                     std::vector<CorpusPos> pos;
                     pos.reserve(std::min(est, e->estimate));
-                    const CorpusPos N = windowed() ? std::min(operand_window_.hi, corpus_.size()) : corpus_.size();
-                    const CorpusPos W0 = windowed() ? operand_window_.lo : 0;
-                    const size_t nch = static_cast<size_t>((N + BitmapIndex::kChunk - 1) >> BitmapIndex::kChunkShift);
                     for (size_t ch = static_cast<size_t>(W0 >> BitmapIndex::kChunkShift); ch < nch; ++ch) {
                         if ((ch & 0xFF) == 0) check_cancelled();
                         const BmChunk v = e->load(ch);
@@ -5518,6 +5550,202 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
         int min_rep = q.tokens[0].min_repeat;
         int max_rep = q.tokens[0].max_repeat;
         const ConditionPtr& tok_cond = q.tokens[0].conditions;
+
+        // ── DEP-CHILD-FASTPATH: `[A & child [C1] & not child [C2] & count(child [C3]) >= n …]`
+        // (C unnamed, each side one posting list): A's postings in windows, every child
+        // condition a SlidingBitset of the heads of its tokens (as dep_not), a count a
+        // counter per head, instead of collecting the children of every A token (D7 on
+        // ParlaMint, 1.55B tokens: 76 s).
+        if (fastpath_mode() == FastPathMode::On && sample_size == 0 && !agg_ptr
+            && min_rep == 1 && max_rep == 1 && token_anchor_constraints.empty()
+            && !q.within_having && !q.not_within && q.containing_clauses.empty()
+            && q.position_orders.empty() && q.global_alignment_filters.empty()
+            && q.global_function_filters.empty() && q.global_region_filters.empty()
+            && tok_cond && !tok_cond->is_leaf && corpus_.has_deps() && corpus_.has_structure("s")) {
+            const std::string eff_within = q.within.empty() ? corpus_.default_within() : q.within;
+            struct ChildOp {
+                SeqMergeOperand op;
+                bool negated = false;
+                bool count = false;            // count(child [C]) `cop` `cval`
+                CompOp cop = CompOp::GTE;
+                int64_t cval = 0;
+            };
+            std::vector<ConditionPtr> plain;
+            std::vector<ChildOp> kids;
+            // one token is always inside its sentence; other `within` regions are left
+            // to the generic path
+            bool ok = eff_within.empty() || eff_within == "s";
+            std::function<void(const ConditionPtr&)> split = [&](const ConditionPtr& c) {
+                if (!ok || !c) return;
+                if (!c->is_leaf && !c->is_structural && !c->is_count && c->bool_op == BoolOp::AND) {
+                    split(c->left);
+                    split(c->right);
+                    return;
+                }
+                if (c->is_structural) {
+                    if (c->struct_rel != StructRelType::CHILD || !c->nested_name.empty()) {
+                        ok = false;
+                        return;
+                    }
+                    SeqMergeOperand o = merge_operand(c->nested_conditions);
+                    if (o.kind != SeqMergeTok::EqRev) {
+                        ok = false;
+                        return;
+                    }
+                    kids.push_back({std::move(o), c->struct_negated});
+                    return;
+                }
+                if (c->is_count) {
+                    if (c->count_rel != StructRelType::CHILD || !c->count_filter) {
+                        ok = false;
+                        return;
+                    }
+                    SeqMergeOperand o = merge_operand(c->count_filter);
+                    if (o.kind != SeqMergeTok::EqRev) {
+                        ok = false;
+                        return;
+                    }
+                    kids.push_back({std::move(o), false, true, c->count_op, c->count_value});
+                    return;
+                }
+                plain.push_back(c);
+            };
+            split(tok_cond);
+            SeqMergeOperand gov;
+            if (ok && !kids.empty() && !plain.empty()) {
+                ConditionPtr pc = plain[0];
+                for (size_t k = 1; k < plain.size(); ++k)
+                    pc = ConditionNode::make_branch(BoolOp::AND, pc, plain[k]);
+                gov = merge_operand(pc);
+                ok = gov.kind == SeqMergeTok::EqRev;
+            } else {
+                ok = false;
+            }
+            // A rare governor side is left to the generic path (seed from it, check its
+            // children), which beats scanning a much longer child list (as dep_not).
+            if (ok)
+                for (const auto& k : kids)
+                    if (gov.span.count * kDepBitsetMaxSkew < k.op.span.count) ok = false;
+            // P4.1: this worker's position range (region filters are excluded above)
+            RegionPosMask rm;
+            if (ok) {
+                rm = build_start_mask();
+                if (rm.ready() && !rm.range_only) ok = false;
+            }
+            if (ok) {
+                result.plan_path = "dep_child";
+                mark_ranged(rm);
+                RevSpan G = gov.span;
+                if (rm.status == RegionMaskStatus::Unsatisfiable) G = rev_slice(G, 0, 0);
+                else if (rm.range_only) {
+                    const size_t a = gallop_rev(G, 0, rm.iv.front().s);
+                    G = rev_slice(G, a, gallop_rev(G, a, rm.iv.back().e + 1));
+                }
+                if (G.empty()) {
+                    result.total_exact = true;
+                    return result;
+                }
+                const auto& deps = corpus_.deps();
+                const StructuralAttr& sents = corpus_.structure("s");
+                const Region* sent_r = sents.region_data();
+                const HeadRelView& hrel = deps.head_rel_data();
+                const int16_t* hloc = deps.head_local_data();
+                const CorpusPos corpus_end = corpus_.size();
+                int64_t sent_hint = -1;
+                auto head_of = [&](CorpusPos p) -> CorpusPos {
+                    if (hrel) {
+                        const int16_t d = hrel[p];
+                        return d ? p + d : NO_HEAD;
+                    }
+                    const int16_t l = hloc[p];
+                    if (l < 0) return NO_HEAD;
+                    const int64_t si = sents.find_region_from(p, sent_hint);
+                    if (si < 0) return NO_HEAD;
+                    sent_hint = si;
+                    const CorpusPos h = sent_r[si].start + l;
+                    return h < corpus_end ? h : NO_HEAD;
+                };
+                // one 32 KB window per child condition: the heads of its tokens near the
+                // governors of the current chunk
+                std::vector<std::unique_ptr<SlidingBitset>> bits;
+                std::vector<size_t> from(kids.size(), 0);
+                for (size_t k = 0; k < kids.size(); ++k) bits.push_back(std::make_unique<SlidingBitset>());
+                // a count: children per head of the window (a head has < 2^15 children), and the
+                // slots set, to clear them for the next window
+                std::vector<std::vector<uint16_t>> counts(kids.size());
+                std::vector<std::vector<uint32_t>> touched(kids.size());
+                for (size_t k = 0; k < kids.size(); ++k)
+                    if (kids[k].count) counts[k].assign(static_cast<size_t>(SlidingBitset::kWindow), 0);
+                auto count_ok = [](int64_t v, CompOp op, int64_t want) {
+                    switch (op) {
+                        case CompOp::EQ: return v == want;
+                        case CompOp::NEQ: return v != want;
+                        case CompOp::LT: return v < want;
+                        case CompOp::GT: return v > want;
+                        case CompOp::LTE: return v <= want;
+                        case CompOp::GTE: return v >= want;
+                        default: return false;
+                    }
+                };
+                const bool can_fast_count = count_total && max_matches > 0;
+                bool counting = false, stop = false;
+                size_t cnt = 0, i = 0;
+                const size_t gn = G.count;
+                while (i < gn && !stop) {
+                    const CorpusPos base = G.at(i);
+                    const CorpusPos chunk_end = base + SlidingBitset::kWindow;
+                    for (size_t k = 0; k < kids.size(); ++k) {
+                        const RevSpan& C = kids[k].op.span;
+                        SlidingBitset& b = *bits[k];
+                        b.reset(base);
+                        std::vector<uint16_t>& ct = counts[k];
+                        for (uint32_t t : touched[k]) ct[t] = 0;
+                        touched[k].clear();
+                        from[k] = gallop_rev(C, from[k], base - kMaxHeadDistance);
+                        const CorpusPos cend = chunk_end + kMaxHeadDistance;
+                        for (size_t x = from[k]; x < C.count; ++x) {
+                            const CorpusPos c = C.at(x);
+                            if (c >= cend) break;
+                            const CorpusPos h = head_of(c);
+                            if (h < base || h >= chunk_end) continue;   // NO_HEAD (-1) < base
+                            if (!kids[k].count) {
+                                b.set(h);
+                            } else {
+                                const auto slot = static_cast<uint32_t>(h - base);
+                                if (ct[slot]++ == 0) touched[k].push_back(slot);
+                            }
+                        }
+                    }
+                    for (; i < gn; ++i) {
+                        const CorpusPos g = G.at(i);
+                        if (g >= chunk_end) break;
+                        bool keep = true;
+                        for (size_t k = 0; k < kids.size() && keep; ++k)
+                            keep = kids[k].count
+                                ? count_ok(counts[k][static_cast<size_t>(g - base)], kids[k].cop, kids[k].cval)
+                                : bits[k]->test(g) != kids[k].negated;
+                        if (!keep) continue;
+                        if (counting) {
+                            ++cnt;
+                            continue;
+                        }
+                        if (max_matches > 0 && result.matches.size() >= max_matches) {
+                            if (!count_total) { stop = true; break; }
+                            counting = can_fast_count;
+                            if (counting) { ++cnt; continue; }
+                        }
+                        add_match(std::vector<CorpusPos>{g, g});
+                        if (reached_limit() || reached_total_cap()) { stop = true; break; }
+                    }
+                    progress_tick(chunk_end, result.total_count + cnt, true);
+                    if (counting && max_total_cap > 0 && result.total_count + cnt >= max_total_cap) break;
+                }
+                result.total_count += cnt;
+                if (max_total_cap > 0 && result.total_count > max_total_cap)
+                    result.total_count = max_total_cap;
+                return finish_query();
+            }
+        }
 
         // ── P3.2: `&` / `|` / `!=` over bitmap attributes (`[upos!="PUNCT"]`,
         // `[upos="NOUN" & deprel="nsubj"]`): per-chunk AND / OR / NOT + popcount
@@ -9200,89 +9428,11 @@ done:
 void QueryExecutor::apply_region_filters(const TokenQuery& query, const NameIndexMap& name_map, MatchSet& result) const {
     if (query.global_region_filters.empty()) return;
 
+    // the same test as the per-hit post-filter (P1.12): one implementation of `::` region filters
     std::vector<Match> kept;
     kept.reserve(result.matches.size());
-    for (const auto& m : result.matches) {
-        bool pass = true;
-
-        for (const auto& gf : query.global_region_filters) {
-            if (gf.positions) {                      // P4.14
-                if (!intervals_contain(*gf.positions, m.first_pos())) { pass = false; break; }
-                continue;
-            }
-            std::string struct_name;
-            std::string attr_name;
-            const StructuralAttr* sa_ptr = nullptr;
-            std::optional<std::string> rkey;
-
-            size_t us = gf.region_attr.find('_');
-            if (us != std::string::npos && us + 1 < gf.region_attr.size()) {
-                struct_name = gf.region_attr.substr(0, us);
-                attr_name = gf.region_attr.substr(us + 1);
-                if (!corpus_.has_structure(struct_name)) { pass = false; break; }
-                sa_ptr = &corpus_.structure(struct_name);
-                rkey = resolve_region_attr_key(*sa_ptr, struct_name, attr_name);
-            } else if (!gf.anchor_name.empty()) {
-                auto nr = m.named_regions.find(gf.anchor_name);
-                if (nr != m.named_regions.end() && corpus_.has_structure(nr->second.struct_name)) {
-                    struct_name = nr->second.struct_name;
-                    attr_name = gf.region_attr;
-                    sa_ptr = &corpus_.structure(struct_name);
-                    rkey = resolve_region_attr_key(*sa_ptr, struct_name, attr_name);
-                } else {
-                    CorpusPos pos = m.first_pos();
-                    CorpusPos ap = resolve_name(m, name_map, gf.anchor_name);
-                    if (ap != NO_HEAD) pos = ap;
-                    // If anchor name is a token label, infer its containing structure by probing.
-                    for (const auto& sn : corpus_.structure_names()) {
-                        const auto& probe_sa = corpus_.structure(sn);
-                        auto probe_key = resolve_region_attr_key(probe_sa, sn, gf.region_attr);
-                        if (!probe_key) continue;
-                        if (probe_sa.find_region(pos) >= 0) {
-                            struct_name = sn;
-                            attr_name = gf.region_attr;
-                            sa_ptr = &probe_sa;
-                            rkey = std::move(probe_key);
-                            break;
-                        }
-                    }
-                }
-            } else {
-                pass = false;
-                break;
-            }
-            if (!sa_ptr || !rkey) { pass = false; break; }
-            const auto& sa = *sa_ptr;
-
-            int64_t rgn = -1;
-            if (!gf.anchor_name.empty()) {
-                auto nr = m.named_regions.find(gf.anchor_name);
-                if (nr != m.named_regions.end()) {
-                    if (nr->second.struct_name != struct_name) { pass = false; break; }
-                    rgn = static_cast<int64_t>(nr->second.region_idx);
-                }
-            }
-            if (rgn < 0) {
-                CorpusPos pos = m.first_pos();
-                if (!gf.anchor_name.empty()) {
-                    CorpusPos ap = resolve_name(m, name_map, gf.anchor_name);
-                    if (ap != NO_HEAD) pos = ap;
-                }
-                rgn = sa.find_region(pos);
-                if (rgn < 0) { pass = false; break; }
-            }
-            const std::string composite = struct_name + "_" + *rkey;
-            const bool is_mv = corpus_.is_multivalue(composite);
-            if (gf.op == CompOp::EQ && !gf.regex && sa.has_region_value_reverse(*rkey) && !is_mv) {
-                if (sa.region_matches_attr_eq_rev(*rkey, static_cast<size_t>(rgn), gf.value))
-                    continue;
-            }
-            std::string_view rval = sa.region_value(*rkey, static_cast<size_t>(rgn));
-            if (!region_filter_value_ok(gf.op, gf.value, gf.regex, gf.regex_full, rval, is_mv)) { pass = false; break; }
-        }
-
-        if (pass) kept.push_back(m);
-    }
+    for (const auto& m : result.matches)
+        if (match_passes_inline_region_filters(m, query, name_map)) kept.push_back(m);
 
     const size_t before = result.matches.size();
     result.matches = std::move(kept);
@@ -9876,6 +10026,29 @@ bool QueryExecutor::match_passes_inline_region_filters(const Match& m, const Tok
                 rgn = static_cast<int64_t>(nr->second.region_idx);
             }
         }
+        const std::string composite = struct_name + "_" + *rkey;
+        const bool is_mv = corpus_.is_multivalue(composite);
+        // nested / overlapping structures: a position may be in several regions, and the filter
+        // is on all of them, as on a multivalue value (`:: phrase_cat="NP"`: inside ANY NP, as the
+        // region masks of the fast paths; `!=`: inside none); a named region stays that one region
+        if (rgn < 0 && (corpus_.is_nested(struct_name) || corpus_.is_overlapping(struct_name))) {
+            CorpusPos pos = m.first_pos();
+            if (!gf.anchor_name.empty()) {
+                CorpusPos ap = resolve_name(m, name_map, gf.anchor_name);
+                if (ap != NO_HEAD) pos = ap;
+            }
+            bool seen = false, any = false, all = true;
+            sa.for_each_region_at(pos, [&](size_t i) {
+                seen = true;
+                const bool ok = region_filter_value_ok(gf.op, gf.value, gf.regex, gf.regex_full,
+                                                       sa.region_value(*rkey, i), is_mv);
+                any = any || ok;
+                all = all && ok;
+                return gf.op == CompOp::NEQ ? all : !any;
+            });
+            if (!seen || !(gf.op == CompOp::NEQ ? all : any)) return false;
+            continue;
+        }
         if (rgn < 0) {
             CorpusPos pos = m.first_pos();
             if (!gf.anchor_name.empty()) {
@@ -9885,8 +10058,6 @@ bool QueryExecutor::match_passes_inline_region_filters(const Match& m, const Tok
             rgn = sa.find_region(pos);
             if (rgn < 0) return false;
         }
-        const std::string composite = struct_name + "_" + *rkey;
-        const bool is_mv = corpus_.is_multivalue(composite);
         if (gf.op == CompOp::EQ && !gf.regex && sa.has_region_value_reverse(*rkey) && !is_mv) {
             if (sa.region_matches_attr_eq_rev(*rkey, static_cast<size_t>(rgn), gf.value))
                 continue;

@@ -228,9 +228,10 @@ def check_query(opts, query, max_full):
     return totals, info, problems
 
 
-def build_sample_index(pando_index, conllu):
+def build_sample_index(pando_index, conllu, jsonl=False):
     d = tempfile.mkdtemp(prefix="pando_fpdiff_")
-    p = subprocess.run([pando_index, conllu, d], capture_output=True, text=True)
+    fmt = ["--format", "jsonl"] if jsonl else []
+    p = subprocess.run([pando_index, *fmt, conllu, d], capture_output=True, text=True)
     if p.returncode != 0:
         print(p.stdout, p.stderr, file=sys.stderr)
         raise SystemExit(2)
@@ -275,6 +276,10 @@ def main():
     ap.add_argument("--pando", required=True)
     ap.add_argument("--corpus", help="indexed corpus directory")
     ap.add_argument("--conllu", help="build a temporary index from this CoNLL-U file instead")
+    ap.add_argument("--jsonl", help="build a temporary index from this JSONL v2 file instead "
+                    "(e.g. test/gen_test_corpus.py's corpus)")
+    ap.add_argument("--queries-extra", action="append", default=[],
+                    help="more query files (as --queries), e.g. for attributes only some corpora have")
     ap.add_argument("--pando-index", help="pando-index binary (with --conllu)")
     ap.add_argument("--queries", required=True)
     ap.add_argument("--max-full", type=int, default=1_500_000,
@@ -294,15 +299,16 @@ def main():
     REF = "off" if "off" in MODES else MODES[0]
 
     tmp = None
-    if opts.conllu:
+    if opts.conllu or opts.jsonl:
         if not opts.pando_index:
-            ap.error("--conllu needs --pando-index")
-        tmp = opts.corpus = build_sample_index(opts.pando_index, opts.conllu)
+            ap.error("--conllu / --jsonl need --pando-index")
+        tmp = opts.corpus = build_sample_index(opts.pando_index, opts.conllu or opts.jsonl, jsonl=bool(opts.jsonl))
     if not opts.corpus:
         ap.error("need --corpus or --conllu")
 
     queries = []
-    with open(opts.queries, encoding="utf-8") as f:
+    for qfile in [opts.queries] + opts.queries_extra:
+      with open(qfile, encoding="utf-8") as f:
         for line in f:
             line = line.rstrip("\n")
             if not line.strip() or line.lstrip().startswith("#"):

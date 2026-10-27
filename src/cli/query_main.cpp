@@ -134,10 +134,19 @@ struct QueryTiming {
 static void emit_json(const Corpus& corpus, const std::string& query_text,
                       const MatchSet& ms, const Options& opts,
                       double elapsed_ms) {
+    // The whole answer goes into one buffer, written to stdout once at the end (at every
+    // return): thousands of small writes through the stdio-synchronised std::cout (an fwrite
+    // and a lock each) made a page of 100 hits several times slower than pando-server's JSON.
+    std::ostringstream outbuf;
+    struct FlushAtEnd { std::ostringstream& b; ~FlushAtEnd() { std::cout << b.str(); } } flush_at_end{outbuf};
+    std::ostream& jout = outbuf;
+    // The attributes shown per token, resolved once (not looked up by name for every token).
+    std::vector<std::pair<std::string, const PositionalAttr*>> tok_attrs;
+    for (const auto& attr_name : opts.attrs.empty() ? corpus.attr_names() : opts.attrs)
+        if (corpus.has_attr(attr_name) && !Corpus::is_internal_attr_name(attr_name))
+            tok_attrs.emplace_back(jstr(attr_name), &corpus.attr(attr_name));
     auto emit_match_tokens_json = [&](std::ostream& out, const Match& m) {
         out << ", \"tokens\": [";
-        const auto& attr_names = opts.attrs.empty()
-            ? corpus.attr_names() : opts.attrs;
         bool first_tok = true;
         for (size_t t = 0; t < m.positions.size(); ++t) {
             if (m.positions[t] == NO_HEAD) continue;
@@ -146,11 +155,10 @@ static void emit_json(const Corpus& corpus, const std::string& query_text,
                 if (!first_tok) out << ", ";
                 first_tok = false;
                 out << "{\"pos\": " << p;
-                for (const auto& attr_name : attr_names) {
-                    if (!corpus.has_attr(attr_name) || Corpus::is_internal_attr_name(attr_name)) continue;
-                    auto val = corpus.attr(attr_name).value_at(p);
+                for (const auto& [name_json, attr] : tok_attrs) {
+                    auto val = attr->value_at(p);
                     if (val == "_") continue;
-                    out << ", " << jstr(attr_name) << ": " << jstr(val);
+                    out << ", " << name_json << ": " << jstr(val);
                 }
                 out << "}";
             }
@@ -195,16 +203,16 @@ static void emit_json(const Corpus& corpus, const std::string& query_text,
         size_t gend   = std::min(gstart + opts.limit, total_groups);
         size_t returned_pairs = 0;
         for (size_t g = gstart; g < gend; ++g) returned_pairs += groups[g].size();
-        std::cout << "{\n  \"ok\": true,\n  \"backend\": \"pando\",\n  \"operation\": \"query\",\n";
-        std::cout << "  \"result\": {\n    \"parallel\": true,\n";
-        std::cout << "    \"query\": {\"language\": \"pando-cql\", \"text\": "
+        jout << "{\n  \"ok\": true,\n  \"backend\": \"pando\",\n  \"operation\": \"query\",\n";
+        jout << "  \"result\": {\n    \"parallel\": true,\n";
+        jout << "    \"query\": {\"language\": \"pando-cql\", \"text\": "
                   << jstr(query_text) << "},\n";
-        std::cout << "    \"page\": {\"start\": " << gstart << ", \"size\": " << opts.limit
+        jout << "    \"page\": {\"start\": " << gstart << ", \"size\": " << opts.limit
                   << ", \"returned\": " << (gend - gstart) << ", \"total\": " << total_groups
                   << ", \"returned_pairs\": " << returned_pairs
                   << ", \"total_pairs\": " << ms.total_count
                   << ", \"total_exact\": " << (ms.total_exact ? "true" : "false") << "},\n";
-        std::cout << "    \"pairs\": [\n";
+        jout << "    \"pairs\": [\n";
         bool first_pair = true;
         for (size_t g = gstart; g < gend; ++g) {
             for (size_t idx : groups[g]) {
@@ -219,9 +227,9 @@ static void emit_json(const Corpus& corpus, const std::string& query_text,
             int ctx_w_t = match_is_full_sentence_span(corpus, t) ? 0 : opts.context;
             auto ctx_s = build_context(corpus, s, ctx_w_s);
             auto ctx_t = build_context(corpus, t, ctx_w_t);
-            if (!first_pair) std::cout << ",\n";
+            if (!first_pair) jout << ",\n";
             first_pair = false;
-            std::cout << "      {\"aligned\": true, \"alignment\": {\"kind\": \"with\", "
+            jout << "      {\"aligned\": true, \"alignment\": {\"kind\": \"with\", "
                       << "\"pair_index\": " << idx << "}, "
                       << "\"source\": {\"doc_id\": " << (doc_s.empty() ? "null" : jstr(doc_s))
                       << ", \"text_id\": " << (doc_s.empty() ? "null" : jstr(doc_s))
@@ -229,8 +237,8 @@ static void emit_json(const Corpus& corpus, const std::string& query_text,
                       << ", \"context\": {\"left\": " << jstr(ctx_s.left)
                       << ", \"match\": " << jstr(ctx_s.match)
                       << ", \"right\": " << jstr(ctx_s.right) << "}";
-            emit_match_tokens_json(std::cout, s);
-            std::cout << ", \"aligned_to\": {\"side\": \"target\", \"text_id\": "
+            emit_match_tokens_json(jout, s);
+            jout << ", \"aligned_to\": {\"side\": \"target\", \"text_id\": "
                       << (doc_t.empty() ? "null" : jstr(doc_t)) << "}"
                       << "}, \"target\": {\"doc_id\": " << (doc_t.empty() ? "null" : jstr(doc_t))
                       << ", \"text_id\": " << (doc_t.empty() ? "null" : jstr(doc_t))
@@ -238,12 +246,12 @@ static void emit_json(const Corpus& corpus, const std::string& query_text,
                       << ", \"context\": {\"left\": " << jstr(ctx_t.left)
                       << ", \"match\": " << jstr(ctx_t.match)
                       << ", \"right\": " << jstr(ctx_t.right) << "}";
-            emit_match_tokens_json(std::cout, t);
-            std::cout << ", \"aligned_to\": {\"side\": \"source\", \"text_id\": "
+            emit_match_tokens_json(jout, t);
+            jout << ", \"aligned_to\": {\"side\": \"source\", \"text_id\": "
                       << (doc_s.empty() ? "null" : jstr(doc_s)) << "}" << "}}";
             }
         }
-        std::cout << "\n    ]\n  }\n}\n";
+        jout << "\n    ]\n  }\n}\n";
         return;
     }
 
@@ -252,21 +260,21 @@ static void emit_json(const Corpus& corpus, const std::string& query_text,
     size_t end   = std::min(start + opts.limit, stored);
     size_t returned = end - start;
 
-    std::cout << "{\n";
-    std::cout << "  \"ok\": true,\n";
-    std::cout << "  \"backend\": \"pando\",\n";
-    std::cout << "  \"operation\": \"query\",\n";
-    std::cout << "  \"result\": {\n";
-    std::cout << "    \"query\": {\"language\": \"pando-cql\", \"text\": "
+    jout << "{\n";
+    jout << "  \"ok\": true,\n";
+    jout << "  \"backend\": \"pando\",\n";
+    jout << "  \"operation\": \"query\",\n";
+    jout << "  \"result\": {\n";
+    jout << "    \"query\": {\"language\": \"pando-cql\", \"text\": "
               << jstr(query_text) << "},\n";
-    std::cout << "    \"page\": {\"start\": " << start
+    jout << "    \"page\": {\"start\": " << start
               << ", \"size\": " << opts.limit
               << ", \"returned\": " << returned
               << ", \"total\": " << ms.total_count
               << ", \"total_exact\": " << (ms.total_exact ? "true" : "false")
               << "},\n";
 
-    std::cout << "    \"hits\": [\n";
+    jout << "    \"hits\": [\n";
     for (size_t i = start; i < end; ++i) {
         const auto& m = ms.matches[i];
         CorpusPos match_start = m.first_pos();
@@ -274,62 +282,62 @@ static void emit_json(const Corpus& corpus, const std::string& query_text,
         auto doc_id = lookup_doc_id(corpus, match_start);
         auto ctx = build_context(corpus, m, opts.context);
 
-        if (i > start) std::cout << ",\n";
-        std::cout << "      {";
-        std::cout << "\"doc_id\": " << (doc_id.empty() ? "null" : jstr(doc_id));
-        std::cout << ", \"match_start\": " << match_start;
-        std::cout << ", \"match_end\": " << match_end;
-        std::cout << ", \"context\": {"
+        if (i > start) jout << ",\n";
+        jout << "      {";
+        jout << "\"doc_id\": " << (doc_id.empty() ? "null" : jstr(doc_id));
+        jout << ", \"match_start\": " << match_start;
+        jout << ", \"match_end\": " << match_end;
+        jout << ", \"context\": {"
                   << "\"left\": " << jstr(ctx.left)
                   << ", \"match\": " << jstr(ctx.match)
                   << ", \"right\": " << jstr(ctx.right) << "}";
 
-        emit_match_tokens_json(std::cout, m);
+        emit_match_tokens_json(jout, m);
 
-        std::cout << "}";
+        jout << "}";
     }
-    std::cout << "\n    ]";
+    jout << "\n    ]";
 
     if (opts.debug_level > 0) {
-        std::cout << ",\n    \"debug\": {\n";
-        std::cout << "      \"corpus_size\": " << corpus.size() << ",\n";
-        std::cout << "      \"has_deps\": " << (corpus.has_deps() ? "true" : "false") << ",\n";
-        std::cout << "      \"elapsed_ms\": " << elapsed_ms << ",\n";
-        std::cout << "      \"seed_token\": " << ms.seed_token << ",\n";
-        std::cout << "      \"plan_path\": \"" << ms.plan_path << "\",\n";
-        std::cout << "      \"cardinalities\": [";
+        jout << ",\n    \"debug\": {\n";
+        jout << "      \"corpus_size\": " << corpus.size() << ",\n";
+        jout << "      \"has_deps\": " << (corpus.has_deps() ? "true" : "false") << ",\n";
+        jout << "      \"elapsed_ms\": " << elapsed_ms << ",\n";
+        jout << "      \"seed_token\": " << ms.seed_token << ",\n";
+        jout << "      \"plan_path\": \"" << ms.plan_path << "\",\n";
+        jout << "      \"cardinalities\": [";
         for (size_t i = 0; i < ms.cardinalities.size(); ++i) {
-            if (i > 0) std::cout << ", ";
-            std::cout << ms.cardinalities[i];
+            if (i > 0) jout << ", ";
+            jout << ms.cardinalities[i];
         }
-        std::cout << "],\n";
+        jout << "],\n";
 
-        std::cout << "      \"attributes\": [";
+        jout << "      \"attributes\": [";
         const auto& names = corpus.attr_names();
         for (size_t i = 0; i < names.size(); ++i) {
-            if (i > 0) std::cout << ", ";
-            std::cout << jstr(names[i]);
+            if (i > 0) jout << ", ";
+            jout << jstr(names[i]);
         }
-        std::cout << "],\n";
+        jout << "],\n";
 
-        std::cout << "      \"structures\": [";
+        jout << "      \"structures\": [";
         bool first_s = true;
         for (const auto& sn : {"s", "text"}) {
             if (corpus.has_structure(sn)) {
-                if (!first_s) std::cout << ", ";
+                if (!first_s) jout << ", ";
                 const auto& sa = corpus.structure(sn);
-                std::cout << "{\"name\": " << jstr(sn)
+                jout << "{\"name\": " << jstr(sn)
                           << ", \"regions\": " << sa.region_count()
                           << ", \"has_values\": "
                           << (sa.has_values() ? "true" : "false") << "}";
                 first_s = false;
             }
         }
-        std::cout << "]\n";
-        std::cout << "    }";
+        jout << "]\n";
+        jout << "    }";
     }
 
-    std::cout << "\n  }\n}\n";
+    jout << "\n  }\n}\n";
 }
 
 // ── KWIC text output (default) ──────────────────────────────────────────
@@ -2539,6 +2547,13 @@ static void run_query(const Corpus& corpus, const std::string& input,
                     // so keep full pair sets and page by source-hit groups at render time.
                     max_m = stmt.is_parallel ? 0 : (opts.offset + opts.limit);
                     count_t = opts.total;
+                    // --limit 0: no hits on the page, so none to fetch; max_m 0 would mean "every
+                    // hit" and materialise millions of matches just to count them. Keep one and
+                    // count the rest, as --count-only and the server's limit-0 total do.
+                    if (opts.limit == 0 && !stmt.is_parallel) {
+                        max_m = 1;
+                        count_t = true;
+                    }
                     max_total_cap = (opts.total && opts.max_total > 0) ? opts.max_total : 0;
                 }
             }

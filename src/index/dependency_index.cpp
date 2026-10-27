@@ -66,12 +66,38 @@ void DependencyIndex::open(const std::string& dir,
     cache_gen_ = next_cache_gen();  // invalidates every thread's cache entry for this index
 }
 
+// The head from dep.head (sentence-local), the source the relative forms are derived from.
+static CorpusPos local_head(const MmapFile& head_file, const StructuralAttr& sentences, CorpusPos pos,
+                            int64_t& hint) {
+    const int16_t local = head_file.as<int16_t>()[pos];
+    if (local == -1) return NO_HEAD;
+    const int64_t ri = sentences.find_region_from(pos, hint);
+    if (ri < 0) return NO_HEAD;
+    hint = ri;
+    return sentences.get(static_cast<size_t>(ri)).start + static_cast<CorpusPos>(local);
+}
+
+bool DependencyIndex::head_rel8_matches_head() const {
+    if (!head_rel_.r8 || !head_file_.valid()) return true;
+    int64_t hint = -1;
+    for (size_t p = 0; p < n_; ++p) {
+        const int16_t d = head_rel_[static_cast<CorpusPos>(p)];
+        const CorpusPos h8 = d ? static_cast<CorpusPos>(p) + d : NO_HEAD;
+        if (h8 != local_head(head_file_, *sentences_, static_cast<CorpusPos>(p), hint)) return false;
+    }
+    return true;
+}
+
 bool DependencyIndex::write_head_rel8(const std::string& dir, std::string* err) const {
     std::vector<int8_t> r(n_, 0);
     std::vector<HeadRelException> exc;
     int64_t hint = -1;
+    // from dep.head when there is one: an existing dep.head_rel8 (which head_from() prefers)
+    // may be the stale file being replaced
+    const bool from_local = head_file_.valid();
     for (size_t p = 0; p < n_; ++p) {
-        const CorpusPos h = head_from(static_cast<CorpusPos>(p), hint);
+        const CorpusPos h = from_local ? local_head(head_file_, *sentences_, static_cast<CorpusPos>(p), hint)
+                                       : head_from(static_cast<CorpusPos>(p), hint);
         if (h == NO_HEAD) continue;
         const int64_t d = h - static_cast<CorpusPos>(p);
         if (d == 0) continue;
