@@ -155,6 +155,7 @@ add_library(pando_core STATIC
     src/index/relation_decl.cpp
     src/index/relation_layer.cpp
     src/corpus/derive_deps.cpp
+    src/corpus/equivalence_layer.cpp
     src/corpus/corpus.cpp
     src/corpus/builder.cpp
     src/corpus/streaming_builder.cpp
@@ -333,6 +334,11 @@ if(BUILD_TESTING)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/relation_layer_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
                 --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/deps_sample.conllu)
+        # Equivalence layers (equivalence_layer.*): =:coref over an attribute's classes, declared with --relation
+        add_test(NAME equivalence_layer
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/equivalence_layer_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
+                --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/coref_sample.conllu)
         # A rebuild into the same folder must not keep dependency files derived from the earlier build
         add_test(NAME index_rebuild
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/index_rebuild_test.py

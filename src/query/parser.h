@@ -50,7 +50,8 @@ private:
 
     // Try to parse a relation operator between tokens.
     // Returns true and fills `rel` if a relation is found.
-    bool try_parse_relation(QueryRelation& rel);
+    // in_filter: after `::`, where `!=` without a layer compares positions (`:: a != b`)
+    bool try_parse_relation(QueryRelation& rel, bool in_filter = false);
 
     // Parse the within clause: "within s", "within s_tuid='X'", "within s having [cond]"
     void parse_within_clause(TokenQuery& tq);

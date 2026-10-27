@@ -1002,6 +1002,8 @@ private:
     // find_related (a negated type is traversed as its positive form), distinct positions in corpus order.
     std::vector<CorpusPos> find_layer_related(CorpusPos pos, const QueryRelation& qr, RelationType rel,
                                               bool reversed) const;
+    // The other members of pos's classes in an equivalence layer (`=:X`), in corpus order.
+    std::vector<CorpusPos> find_class_mates(CorpusPos pos, const RelationDecl& decl) const;
 
     // `:: a >:X b` and the other relation filters: does the relation hold from `a` to `b` (`head` is the basic tree,
     // its label the dependent's deprel; a negated operator holds when the positive one does not)

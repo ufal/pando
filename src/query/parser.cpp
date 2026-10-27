@@ -1405,7 +1405,7 @@ ConditionPtr Parser::parse_primary_condition() {
     return ConditionNode::make_leaf(std::move(ac));
 }
 
-bool Parser::try_parse_relation(QueryRelation& rel) {
+bool Parser::try_parse_relation(QueryRelation& rel, bool in_filter) {
     rel = QueryRelation{};   // callers reuse one variable along a chain: no layer or label carried over
     Token t = lexer_.peek();
     switch (t.type) {
@@ -1415,6 +1415,8 @@ bool Parser::try_parse_relation(QueryRelation& rel) {
         case TokType::LTLT:    rel.type = RelationType::TRANS_GOV_BY;  break;
         case TokType::BANG_GT: rel.type = RelationType::NOT_GOVERNS;   break;
         case TokType::BANG_LT: rel.type = RelationType::NOT_GOV_BY;    break;
+        case TokType::EQ:      rel.type = RelationType::EQUIV;         break;   // =:X, layer required (below)
+        case TokType::NEQ:     rel.type = RelationType::NOT_EQUIV;     break;
 
         case TokType::LBRACKET:
         case TokType::STRING:
@@ -1451,10 +1453,14 @@ bool Parser::try_parse_relation(QueryRelation& rel) {
             lexer_.consume();
             rel.label = label.text;
         }
+        if (!rel.label.empty() && (rel.type == RelationType::EQUIV || rel.type == RelationType::NOT_EQUIV))
+            throw std::runtime_error("An equivalence layer has no labels: =:" + rel.layer);
         if (!rel.label.empty() && (rel.type == RelationType::TRANS_GOVERNS || rel.type == RelationType::TRANS_GOV_BY))
             throw std::runtime_error("A label goes with a single edge (>:" + rel.layer + ":" + rel.label + ", <:, !>:, !<:); >>:" +
                                      rel.layer + " and <<:" + rel.layer + " follow edges of any label");
     }
+    if (rel.layer.empty() && !in_filter && (rel.type == RelationType::EQUIV || rel.type == RelationType::NOT_EQUIV))
+        throw std::runtime_error("Between tokens, = and != name an equivalence layer: [A] =:tuid [B], [A] !=:coref [B]");
     return true;
 }
 
@@ -1717,6 +1723,12 @@ void Parser::parse_global_filters(TokenQuery& tq) {
             // "a.attr = b.attr" (alignment), or shorthand "text_lang = \"Dutch\"" (same as
             // match.text_lang — struct_attr must contain '_').
             Token next = lexer_.peek();
+            // `:: a =:coref b`: `=` then `:` is an equivalence relation, not a comparison
+            const bool eq_layer = next.type == TokType::EQ && [&] {
+                Lexer ahead = lexer_;
+                ahead.next();
+                return ahead.peek().type == TokType::COLON;
+            }();
             if ((next.type == TokType::EQ || next.type == TokType::NEQ ||
                  next.type == TokType::LT || next.type == TokType::GT ||
                  next.type == TokType::LTE || next.type == TokType::GTE)
@@ -1736,7 +1748,7 @@ void Parser::parse_global_filters(TokenQuery& tq) {
                 }
                 read_region_filter_value(gf);
                 tq.global_region_filters.push_back(std::move(gf));
-            } else if (next.type == TokType::EQ) {
+            } else if (next.type == TokType::EQ && !eq_layer) {
                 lexer_.consume();
                 if (lexer_.peek().type == TokType::IDENT && lexer_.peek().text == "dep_subtree")
                     throw std::runtime_error("Write `" + t.text + ":dep_subtree(…)` to bind a subtree "
@@ -1744,14 +1756,13 @@ void Parser::parse_global_filters(TokenQuery& tq) {
                 throw std::runtime_error("Expected `" + t.text + ".attr`, a function or a "
                                          "struct_attr before `=` in global filter");
             } else if (next.type == TokType::LT || next.type == TokType::GT || next.type == TokType::NEQ
-                       || next.type == TokType::BANG_GT || next.type == TokType::BANG_LT
+                       || eq_layer || next.type == TokType::BANG_GT || next.type == TokType::BANG_LT
                        || next.type == TokType::GTGT || next.type == TokType::LTLT) {
                 // Positional ordering: :: a < b or :: a > b, and :: a != b (two different tokens)
                 // (no '_' in first name — not struct_attr); with a layer a relation: :: a >:head b, :: a !>:deps b
                 CompOp op = next.type == TokType::LT ? CompOp::LT : next.type == TokType::GT ? CompOp::GT : CompOp::NEQ;
                 QueryRelation rel;
-                if (next.type == TokType::NEQ) lexer_.consume();
-                else try_parse_relation(rel);   // consumes the operator, and a `:layer[:label]` after it
+                try_parse_relation(rel, true);   // consumes the operator, and a `:layer[:label]` after it
                 const bool plain_order = next.type == TokType::LT || next.type == TokType::GT || next.type == TokType::NEQ;
                 if (rel.layer.empty() && !plain_order)
                     throw std::runtime_error("A relation between named tokens after :: names its layer: :: " + t.text +

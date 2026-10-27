@@ -18,7 +18,9 @@
 #include <functional>
 #include <memory>
 #include "corpus/derive_deps.h"
+#include "corpus/equivalence_layer.h"
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -657,6 +659,46 @@ int main(int argc, char* argv[]) {
         std::cout << "pando-index " << pando::build_string() << "\n";
         return 0;
     }
+    if (argc == 4 && std::string(argv[1]) == "--relation") {
+        // `pando-index --relation NAME=equivalence,attr=ATTR <corpus_dir>`: declare an equivalence layer whose
+        // classes are an attribute's values (equivalence_layer.h); scope and span are measured
+        const std::string spec = argv[2], dir = argv[3];
+        const size_t eq = spec.find('=');
+        std::string err;
+        auto decl = eq == std::string::npos ? std::nullopt
+                                            : pando::parse_relation(spec.substr(0, eq), spec.substr(eq + 1), &err);
+        if (!decl) {
+            std::cerr << "Error: " << (err.empty() ? "--relation NAME=equivalence,attr=ATTR" : err) << "\n";
+            return 1;
+        }
+        if (decl->kind != pando::RelationDecl::Kind::Equivalence) {
+            std::cerr << "Error: --relation declares equivalence layers; pointer layers come from the data (DEPS) "
+                         "or --derive\n";
+            return 1;
+        }
+        try {
+            pando::Corpus corpus;
+            corpus.open(dir);
+            if (const pando::RelationDecl* old = corpus.relation(decl->name);
+                old && old->kind != pando::RelationDecl::Kind::Equivalence) {
+                std::cerr << "Error: " << dir << " has a pointer relation '" << decl->name << "'\n";
+                return 1;
+            }
+            pando::EquivalenceStats st;
+            const pando::RelationDecl d = pando::measure_equivalence(corpus, *decl, &st);
+            if (!record_relation(dir, d)) {
+                std::cerr << "Error: cannot record relation." << d.name << " in " << dir << "/corpus.info\n";
+                return 1;
+            }
+            std::cerr << "Relation " << d.name << ": " << d.format() << "\n"
+                      << "  " << st.classes << " classes (" << st.singletons << " of one token, the largest "
+                      << st.largest << "), " << st.members << " memberships\n";
+            return 0;
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << "\n";
+            return 1;
+        }
+    }
     if ((argc == 4 || argc == 6) && std::string(argv[1]) == "--derive") {
         // `pando-index --derive NAME <corpus_dir> [--rule R]`: a derived pointer layer from the basic tree
         // (derive_deps.h): `eff` (effective heads, the default rule), or `deps` for a corpus without DEPS
@@ -838,6 +880,9 @@ int main(int argc, char* argv[]) {
                   << "                    ROOT/current at it (servers hot-swap; nothing is rewritten in place)\n"
                   << "  --keep N          with --publish: versions kept (default 3; the current and the\n"
                   << "                    previous one always)\n"
+                  << "\n  pando-index --relation NAME=equivalence,attr=ATTR <corpus_dir>\n"
+                  << "                    an equivalence layer: tokens with the same ATTR value form a class\n"
+                  << "                    (tuid, coref, …); scope and span measured; query with [A] =:NAME [B]\n"
                   << "\n  pando-index --derive NAME <corpus_dir> [--rule effective-head|conj-propagation]\n"
                   << "                    a pointer layer NAME derived from the basic tree, queried with >:NAME:\n"
                   << "                    effective-head (default; e.g. eff): conjuncts get their first conjunct's\n"

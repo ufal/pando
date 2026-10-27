@@ -2603,7 +2603,8 @@ QueryPlan QueryExecutor::plan_query(const TokenQuery& query) const {
     // (dependent tokens without such a head) whenever that side was rarer.
     std::vector<char> negated(n, 0);
     for (size_t r = 0; r < query.relations.size() && r + 1 < n; ++r) {
-        if (query.relations[r].type == RelationType::NOT_GOVERNS) negated[r + 1] = 1;
+        if (query.relations[r].type == RelationType::NOT_GOVERNS
+            || query.relations[r].type == RelationType::NOT_EQUIV) negated[r + 1] = 1;
         else if (query.relations[r].type == RelationType::NOT_GOV_BY) negated[r] = 1;
     }
     auto better = [&](size_t cand, size_t cur) {
@@ -3043,6 +3044,8 @@ std::vector<CorpusPos> QueryExecutor::find_related(
             case RelationType::TRANS_GOV_BY:   eff = RelationType::TRANS_GOVERNS; break;
             case RelationType::NOT_GOVERNS:    eff = RelationType::NOT_GOV_BY; break;
             case RelationType::NOT_GOV_BY:     eff = RelationType::NOT_GOVERNS; break;
+            case RelationType::EQUIV:
+            case RelationType::NOT_EQUIV:      break;   // symmetric
         }
     }
 
@@ -3077,6 +3080,9 @@ std::vector<CorpusPos> QueryExecutor::find_related(
         case RelationType::NOT_GOV_BY:
             // Negative relations handled as post-filters in execute()
             break;
+        case RelationType::EQUIV:
+        case RelationType::NOT_EQUIV:
+            throw std::runtime_error("=: and !=: name an equivalence layer: [A] =:tuid [B]");
     }
     return out;
 }
@@ -8883,7 +8889,7 @@ void QueryExecutor::expand_seed(const TokenQuery& query,
             int to_min = query.tokens[step.to].min_repeat;
             int to_max = query.tokens[step.to].max_repeat;
             bool is_negative = (rel == RelationType::NOT_GOVERNS ||
-                                rel == RelationType::NOT_GOV_BY);
+                                rel == RelationType::NOT_GOV_BY || rel == RelationType::NOT_EQUIV);
 
             std::vector<std::vector<CorpusPos>> new_partial;
 
@@ -8915,9 +8921,9 @@ void QueryExecutor::expand_seed(const TokenQuery& query,
 
             if (is_negative) {
                 // Negative relation: keep partial only if NO target matches
-                RelationType pos_rel = (rel == RelationType::NOT_GOVERNS)
-                                       ? RelationType::GOVERNS
-                                       : RelationType::GOVERNED_BY;
+                RelationType pos_rel = rel == RelationType::NOT_GOVERNS ? RelationType::GOVERNS
+                                       : rel == RelationType::NOT_EQUIV ? RelationType::EQUIV
+                                                                        : RelationType::GOVERNED_BY;
                 for (const auto& pm : partial) {
                     CorpusPos from_pos = pm[step.from];
                     if (from_pos == NO_HEAD) continue;

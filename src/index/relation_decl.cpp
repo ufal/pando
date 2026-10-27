@@ -14,6 +14,7 @@ std::string RelationDecl::format() const {
     if (functional) o << ",functional";
     if (tree) o << ",tree";
     if (acyclic) o << ",acyclic";
+    if (!attr.empty()) o << ",attr=" << attr;
     if (!label.empty()) o << ",label=" << label;
     o << ",scope=" << scope;
     if (span >= 0) o << ",span=" << span;
@@ -44,6 +45,7 @@ std::optional<RelationDecl> parse_relation(const std::string& name, const std::s
         else if (key == "tree") r.tree = true;
         else if (key == "acyclic") r.acyclic = true;
         else if (key == "label") r.label = val;
+        else if (key == "attr") r.attr = val;
         else if (key == "scope") r.scope = val;
         else if (key == "span") {
             char* end = nullptr;
@@ -58,6 +60,8 @@ std::optional<RelationDecl> parse_relation(const std::string& name, const std::s
     }
     if (!kind_seen) return fail("pointer or equivalence missing");
     if (r.tree) r.functional = r.acyclic = true;   // a tree is both
+    if (r.kind == RelationDecl::Kind::Equivalence && r.attr.empty())
+        return fail("an equivalence names the attribute of its classes (attr=…)");
     return r;
 }
 

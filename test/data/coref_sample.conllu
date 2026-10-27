@@ -1,0 +1,41 @@
+# newregion text
+# newregion s
+# sent_id = c1
+# text = Anna met Bert in Prague.
+1	Anna	Anna	PROPN	_	_	2	nsubj	_	coref=e1
+2	met	meet	VERB	_	_	0	root	_	_
+3	Bert	Bert	PROPN	_	_	2	obj	_	coref=e2
+4	in	in	ADP	_	_	5	case	_	_
+5	Prague	Prague	PROPN	_	_	2	obl	_	coref=e3|SpaceAfter=No
+6	.	.	PUNCT	_	_	2	punct	_	_
+
+# newregion s
+# sent_id = c2
+# text = She liked him and the city.
+1	She	she	PRON	_	_	2	nsubj	_	coref=e1
+2	liked	like	VERB	_	_	0	root	_	_
+3	him	he	PRON	_	_	2	obj	_	coref=e2
+4	and	and	CCONJ	_	_	6	cc	_	_
+5	the	the	DET	_	_	6	det	_	_
+6	city	city	NOUN	_	_	3	conj	_	coref=e3|SpaceAfter=No
+7	.	.	PUNCT	_	_	2	punct	_	_
+
+# newregion s
+# sent_id = c3
+# text = Anna stayed.
+1	Anna	Anna	PROPN	_	_	2	nsubj	_	coref=e1
+2	stayed	stay	VERB	_	_	0	root	_	SpaceAfter=No
+3	.	.	PUNCT	_	_	2	punct	_	_
+
+# newregion text
+# newregion s
+# sent_id = c4
+# text = A dog barked and it ran.
+1	A	a	DET	_	_	2	det	_	_
+2	dog	dog	NOUN	_	_	3	nsubj	_	coref=e4
+3	barked	bark	VERB	_	_	0	root	_	_
+4	and	and	CCONJ	_	_	6	cc	_	_
+5	it	it	PRON	_	_	6	nsubj	_	coref=e4
+6	ran	run	VERB	_	_	3	conj	_	coref=e5|SpaceAfter=No
+7	.	.	PUNCT	_	_	3	punct	_	_
+
