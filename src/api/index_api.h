@@ -50,6 +50,12 @@ public:
     // Set default within-structure (e.g. "text"); written to corpus.info.
     void set_default_within(const std::string& structure);
 
+    // Declare how a structure's regions lie (as the JSONL header's "nested" / "overlapping" / "zerowidth"): regions
+    // inside others of the same type, regions crossing each other, regions of no token. Call before finalize().
+    void declare_nested(const std::string& structure);
+    void declare_overlapping(const std::string& structure);
+    void declare_zerowidth(const std::string& structure);
+
     // Declare a multivalue attribute (a token attribute, or a region attribute as `s_tuid`): its values hold
     // several values joined by '|' (convert another separator before adding). Call before finalize().
     void declare_multivalue(const std::string& name);

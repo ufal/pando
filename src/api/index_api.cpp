@@ -26,6 +26,18 @@ void PandoIndexBuilder::set_default_within(const std::string& structure) {
     builder_.set_default_within(structure);
 }
 
+void PandoIndexBuilder::declare_nested(const std::string& structure) {
+    builder_.declare_nested(structure);
+}
+
+void PandoIndexBuilder::declare_overlapping(const std::string& structure) {
+    builder_.declare_overlapping(structure);
+}
+
+void PandoIndexBuilder::declare_zerowidth(const std::string& structure) {
+    builder_.declare_zerowidth(structure);
+}
+
 void PandoIndexBuilder::declare_multivalue(const std::string& name) {
     builder_.declare_multivalue(name);
 }

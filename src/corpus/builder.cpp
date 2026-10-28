@@ -739,51 +739,164 @@ void CorpusBuilder::read_vertical(const std::string& path) {
 
 namespace {
 
-static std::string json_get_string(const std::string& line,
-                                   const std::string& key) {
-    std::string pattern = "\"" + key + "\"";
-    size_t kpos = line.find(pattern);
-    if (kpos == std::string::npos) return {};
-    size_t colon = line.find(':', kpos + pattern.size());
-    if (colon == std::string::npos) return {};
-    size_t q1 = line.find('"', colon + 1);
-    if (q1 == std::string::npos) return {};
-    size_t q2 = line.find('"', q1 + 1);
-    if (q2 == std::string::npos) return {};
-    return line.substr(q1 + 1, q2 - q1 - 1);
+// JSON strings with their escapes (\" \\ \/ \b \f \n \r \t \uXXXX, surrogate pairs): a value may hold quotes, braces
+// and commas (a token `"`, a sentence text quoting someone), so every scan below steps over whole strings.
+
+// the closing quote of the string opening at q1 (npos if unterminated)
+static size_t json_string_end(const std::string& s, size_t q1) {
+    for (size_t i = q1 + 1; i < s.size(); ++i) {
+        if (s[i] == '\\') ++i;
+        else if (s[i] == '"') return i;
+    }
+    return std::string::npos;
 }
 
+static void json_append_utf8(std::string& out, uint32_t cp) {
+    if (cp < 0x80) out += static_cast<char>(cp);
+    else if (cp < 0x800) {
+        out += static_cast<char>(0xC0 | (cp >> 6));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        out += static_cast<char>(0xE0 | (cp >> 12));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    } else {
+        out += static_cast<char>(0xF0 | (cp >> 18));
+        out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    }
+}
+
+// the string between quotes q1 and q2, unescaped
+static std::string json_unescape(const std::string& s, size_t q1, size_t q2) {
+    std::string out;
+    out.reserve(q2 - q1);
+    auto hex4 = [&](size_t at, uint32_t& v) {
+        if (at + 4 > q2) return false;
+        v = 0;
+        for (size_t k = at; k < at + 4; ++k) {
+            const char c = s[k];
+            v <<= 4;
+            if (c >= '0' && c <= '9') v |= static_cast<uint32_t>(c - '0');
+            else if (c >= 'a' && c <= 'f') v |= static_cast<uint32_t>(c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F') v |= static_cast<uint32_t>(c - 'A' + 10);
+            else return false;
+        }
+        return true;
+    };
+    for (size_t i = q1 + 1; i < q2; ++i) {
+        if (s[i] != '\\' || i + 1 >= q2) {
+            out += s[i];
+            continue;
+        }
+        const char e = s[++i];
+        switch (e) {
+            case 'b': out += '\b'; break;
+            case 'f': out += '\f'; break;
+            case 'n': out += '\n'; break;
+            case 'r': out += '\r'; break;
+            case 't': out += '\t'; break;
+            case 'u': {
+                uint32_t cp = 0, lo = 0;
+                if (!hex4(i + 1, cp)) { out += "\\u"; break; }
+                i += 4;
+                if (cp >= 0xD800 && cp < 0xDC00 && i + 6 < q2 && s[i + 1] == '\\' && s[i + 2] == 'u' && hex4(i + 3, lo) &&
+                    lo >= 0xDC00 && lo < 0xE000) {
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                    i += 6;
+                }
+                json_append_utf8(out, cp);
+                break;
+            }
+            default: out += e;   // \" \\ \/
+        }
+    }
+    return out;
+}
+
+static size_t json_skip_ws(const std::string& s, size_t p) {
+    while (p < s.size() && (s[p] == ' ' || s[p] == '\t')) ++p;
+    return p;
+}
+
+// one past the value starting at p (a string, an object or array with whatever strings they hold, a scalar)
+static size_t json_value_end(const std::string& s, size_t p) {
+    if (p >= s.size()) return p;
+    if (s[p] == '"') {
+        const size_t q = json_string_end(s, p);
+        return q == std::string::npos ? s.size() : q + 1;
+    }
+    if (s[p] == '{' || s[p] == '[') {
+        int depth = 0;
+        for (size_t i = p; i < s.size(); ++i) {
+            if (s[i] == '"') {
+                i = json_string_end(s, i);
+                if (i == std::string::npos) return s.size();
+            } else if (s[i] == '{' || s[i] == '[') ++depth;
+            else if ((s[i] == '}' || s[i] == ']') && --depth == 0) return i + 1;
+        }
+        return s.size();
+    }
+    while (p < s.size() && s[p] != ',' && s[p] != '}' && s[p] != ']') ++p;
+    return p;
+}
+
+// Walk the members of the object opening at `brace`: f(key, value start) for each, returning false to stop.
+template <typename F>
+static void json_for_each_member(const std::string& s, size_t brace, F&& f) {
+    size_t p = brace + 1;
+    while (true) {
+        p = json_skip_ws(s, p);
+        while (p < s.size() && (s[p] == ',' || s[p] == ' ' || s[p] == '\t')) ++p;
+        if (p >= s.size() || s[p] != '"') return;
+        const size_t kq2 = json_string_end(s, p);
+        if (kq2 == std::string::npos) return;
+        std::string key = json_unescape(s, p, kq2);
+        p = json_skip_ws(s, kq2 + 1);
+        if (p >= s.size() || s[p] != ':') return;
+        p = json_skip_ws(s, p + 1);
+        if (!f(key, p)) return;
+        p = json_value_end(s, p);
+    }
+}
+
+// start of the value of the line's top-level member `key` (npos if absent)
+static size_t json_find_member(const std::string& line, const std::string& key) {
+    const size_t brace = line.find('{');
+    if (brace == std::string::npos) return std::string::npos;
+    size_t at = std::string::npos;
+    json_for_each_member(line, brace, [&](const std::string& k, size_t v) {
+        if (k != key) return true;
+        at = v;
+        return false;
+    });
+    return at;
+}
+
+static std::string json_get_string(const std::string& line,
+                                   const std::string& key) {
+    const size_t v = json_find_member(line, key);
+    if (v == std::string::npos || v >= line.size() || line[v] != '"') return {};
+    const size_t q2 = json_string_end(line, v);
+    if (q2 == std::string::npos) return {};
+    return json_unescape(line, v, q2);
+}
+
+// the string members of the object `key` ("attrs": {"id": "s1", ...}); other members are skipped
 static void json_get_attrs_object(const std::string& line,
                                   const std::string& key,
                                   std::vector<std::pair<std::string, std::string>>& out) {
-    std::string pattern = "\"" + key + "\"";
-    size_t kpos = line.find(pattern);
-    if (kpos == std::string::npos) return;
-    size_t colon = line.find(':', kpos + pattern.size());
-    if (colon == std::string::npos) return;
-    size_t brace1 = line.find('{', colon + 1);
-    if (brace1 == std::string::npos) return;
-    size_t brace2 = line.find('}', brace1 + 1);
-    if (brace2 == std::string::npos) return;
-    std::string obj = line.substr(brace1 + 1, brace2 - brace1 - 1);
-
-    size_t pos = 0;
-    while (pos < obj.size()) {
-        size_t kq1 = obj.find('"', pos);
-        if (kq1 == std::string::npos) break;
-        size_t kq2 = obj.find('"', kq1 + 1);
-        if (kq2 == std::string::npos) break;
-        std::string k = obj.substr(kq1 + 1, kq2 - kq1 - 1);
-        size_t colon2 = obj.find(':', kq2 + 1);
-        if (colon2 == std::string::npos) break;
-        size_t vq1 = obj.find('"', colon2 + 1);
-        if (vq1 == std::string::npos) break;
-        size_t vq2 = obj.find('"', vq1 + 1);
-        if (vq2 == std::string::npos) break;
-        std::string v = obj.substr(vq1 + 1, vq2 - vq1 - 1);
-        out.push_back({k, v});
-        pos = vq2 + 1;
-    }
+    const size_t v = json_find_member(line, key);
+    if (v == std::string::npos || v >= line.size() || line[v] != '{') return;
+    json_for_each_member(line, v, [&](const std::string& k, size_t p) {
+        if (p < line.size() && line[p] == '"') {
+            const size_t q2 = json_string_end(line, p);
+            if (q2 == std::string::npos) return false;
+            out.push_back({k, json_unescape(line, p, q2)});
+        }
+        return true;
+    });
 }
 
 } // namespace
@@ -791,43 +904,34 @@ static void json_get_attrs_object(const std::string& line,
 // ── JSONL v2 helpers ────────────────────────────────────────────────────
 
 // Extract a JSON array of strings:  "key": ["a","b","c"]
-static std::vector<std::string> json_get_string_array(const std::string& line,
-                                                       const std::string& key) {
+// the strings of the array starting at p
+static std::vector<std::string> json_strings_of_array(const std::string& s, size_t p) {
     std::vector<std::string> out;
-    std::string pattern = "\"" + key + "\"";
-    size_t kpos = line.find(pattern);
-    if (kpos == std::string::npos) return out;
-    size_t colon = line.find(':', kpos + pattern.size());
-    if (colon == std::string::npos) return out;
-    size_t br1 = line.find('[', colon + 1);
-    if (br1 == std::string::npos) return out;
-    size_t br2 = line.find(']', br1 + 1);
-    if (br2 == std::string::npos) return out;
-    std::string arr = line.substr(br1 + 1, br2 - br1 - 1);
-    size_t pos = 0;
-    while (pos < arr.size()) {
-        size_t q1 = arr.find('"', pos);
-        if (q1 == std::string::npos) break;
-        size_t q2 = arr.find('"', q1 + 1);
+    if (p >= s.size() || s[p] != '[') return out;
+    const size_t end = json_value_end(s, p);
+    for (size_t i = p + 1; i < end; ++i) {
+        if (s[i] != '"') continue;
+        const size_t q2 = json_string_end(s, i);
         if (q2 == std::string::npos) break;
-        out.push_back(arr.substr(q1 + 1, q2 - q1 - 1));
-        pos = q2 + 1;
+        out.push_back(json_unescape(s, i, q2));
+        i = q2;
     }
     return out;
+}
+
+static std::vector<std::string> json_get_string_array(const std::string& line,
+                                                       const std::string& key) {
+    const size_t v = json_find_member(line, key);
+    if (v == std::string::npos) return {};
+    return json_strings_of_array(line, v);
 }
 
 // "spans": [[10,12],[40,40]] — disjoint token spans for one token_group region (JSONL v2).
 static std::vector<std::pair<CorpusPos, CorpusPos>> json_get_spans_array(
     const std::string& line, const std::string& key) {
     std::vector<std::pair<CorpusPos, CorpusPos>> out;
-    std::string pattern = "\"" + key + "\"";
-    size_t kpos = line.find(pattern);
-    if (kpos == std::string::npos) return out;
-    size_t colon = line.find(':', kpos + pattern.size());
-    if (colon == std::string::npos) return out;
-    size_t p = colon + 1;
-    while (p < line.size() && (line[p] == ' ' || line[p] == '\t')) ++p;
-    if (p >= line.size() || line[p] != '[') return out;
+    size_t p = json_find_member(line, key);
+    if (p == std::string::npos || p >= line.size() || line[p] != '[') return out;
     ++p;
     while (p < line.size()) {
         while (p < line.size() && (line[p] == ' ' || line[p] == '\t' || line[p] == ',')) ++p;
@@ -861,54 +965,17 @@ static std::vector<std::pair<CorpusPos, CorpusPos>> json_get_spans_array(
 static std::unordered_map<std::string, std::vector<std::string>> json_get_object_string_arrays(
     const std::string& line, const std::string& key) {
     std::unordered_map<std::string, std::vector<std::string>> out;
-    std::string pattern = "\"" + key + "\"";
-    size_t kpos = line.find(pattern);
-    if (kpos == std::string::npos) return out;
-    size_t colon = line.find(':', kpos + pattern.size());
-    if (colon == std::string::npos) return out;
-    size_t p = colon + 1;
-    while (p < line.size() && (line[p] == ' ' || line[p] == '\t')) ++p;
-    if (p >= line.size() || line[p] != '{') return out;
-    ++p;
-    while (p < line.size()) {
-        while (p < line.size() && (line[p] == ' ' || line[p] == '\t' || line[p] == ',')) ++p;
-        if (p < line.size() && line[p] == '}') break;
-        size_t q1 = line.find('"', p);
-        if (q1 == std::string::npos) break;
-        size_t q2 = line.find('"', q1 + 1);
-        if (q2 == std::string::npos) break;
-        std::string k = line.substr(q1 + 1, q2 - q1 - 1);
-        size_t c2 = line.find(':', q2 + 1);
-        if (c2 == std::string::npos) break;
-        size_t br1 = line.find('[', c2 + 1);
-        if (br1 == std::string::npos) break;
-        size_t br2 = line.find(']', br1 + 1);
-        if (br2 == std::string::npos) break;
-        std::string arr = line.substr(br1 + 1, br2 - br1 - 1);
-        std::vector<std::string> vals;
-        size_t ap = 0;
-        while (ap < arr.size()) {
-            size_t sq1 = arr.find('"', ap);
-            if (sq1 == std::string::npos) break;
-            size_t sq2 = arr.find('"', sq1 + 1);
-            if (sq2 == std::string::npos) break;
-            vals.push_back(arr.substr(sq1 + 1, sq2 - sq1 - 1));
-            ap = sq2 + 1;
-        }
-        out[std::move(k)] = std::move(vals);
-        p = br2 + 1;
-    }
+    const size_t v = json_find_member(line, key);
+    if (v == std::string::npos || v >= line.size() || line[v] != '{') return out;
+    json_for_each_member(line, v, [&](const std::string& k, size_t p) {
+        if (p < line.size() && line[p] == '[') out[k] = json_strings_of_array(line, p);
+        return true;
+    });
     return out;
 }
 
 static bool json_get_bool(const std::string& line, const std::string& key, bool dflt) {
-    std::string pattern = "\"" + key + "\"";
-    size_t kpos = line.find(pattern);
-    if (kpos == std::string::npos) return dflt;
-    size_t colon = line.find(':', kpos + pattern.size());
-    if (colon == std::string::npos) return dflt;
-    size_t p = colon + 1;
-    while (p < line.size() && (line[p] == ' ' || line[p] == '\t')) ++p;
+    const size_t p = json_find_member(line, key);
     if (p < line.size() && line[p] == 't') return true;
     if (p < line.size() && line[p] == 'f') return false;
     return dflt;
@@ -917,46 +984,16 @@ static bool json_get_bool(const std::string& line, const std::string& key, bool 
 // Extract all top-level "key": "value" pairs from a JSON line (string values only).
 static void json_get_all_string_pairs(const std::string& line,
                                        std::vector<std::pair<std::string, std::string>>& out) {
-    size_t pos = 0;
-    while (pos < line.size()) {
-        // Find a quoted key
-        size_t kq1 = line.find('"', pos);
-        if (kq1 == std::string::npos) break;
-        size_t kq2 = line.find('"', kq1 + 1);
-        if (kq2 == std::string::npos) break;
-        std::string k = line.substr(kq1 + 1, kq2 - kq1 - 1);
-        // Find colon
-        size_t colon = line.find(':', kq2 + 1);
-        if (colon == std::string::npos) break;
-        // Skip whitespace after colon
-        size_t p = colon + 1;
-        while (p < line.size() && (line[p] == ' ' || line[p] == '\t')) ++p;
-        if (p >= line.size()) break;
-        if (line[p] == '"') {
-            // String value
-            size_t vq1 = p;
-            size_t vq2 = line.find('"', vq1 + 1);
-            if (vq2 == std::string::npos) break;
-            out.push_back({k, line.substr(vq1 + 1, vq2 - vq1 - 1)});
-            pos = vq2 + 1;
-        } else if (line[p] == '{' || line[p] == '[') {
-            // Skip nested objects/arrays — find matching close
-            char open = line[p], close = (open == '{') ? '}' : ']';
-            int depth = 1;
-            size_t q = p + 1;
-            while (q < line.size() && depth > 0) {
-                if (line[q] == open) ++depth;
-                else if (line[q] == close) --depth;
-                ++q;
-            }
-            pos = q;
-        } else {
-            // Number, bool, null — skip to next comma or brace
-            size_t q = p;
-            while (q < line.size() && line[q] != ',' && line[q] != '}') ++q;
-            pos = q;
+    const size_t brace = line.find('{');
+    if (brace == std::string::npos) return;
+    json_for_each_member(line, brace, [&](const std::string& k, size_t p) {
+        if (p < line.size() && line[p] == '"') {
+            const size_t q2 = json_string_end(line, p);
+            if (q2 == std::string::npos) return false;
+            out.push_back({k, json_unescape(line, p, q2)});
         }
-    }
+        return true;
+    });
 }
 
 // ── JSONL reader ────────────────────────────────────────────────────────
@@ -1010,13 +1047,8 @@ void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expec
     std::unordered_map<std::string, JsonRegion> open_regions;
 
     auto get_num_field = [](const std::string& ln, const std::string& key) -> long long {
-        std::string pattern = "\"" + key + "\"";
-        size_t kpos = ln.find(pattern);
-        if (kpos == std::string::npos) return 0;
-        size_t colon = ln.find(':', kpos + pattern.size());
-        if (colon == std::string::npos) return 0;
-        size_t p = colon + 1;
-        while (p < ln.size() && (ln[p] == ' ' || ln[p] == '\t')) ++p;
+        const size_t p = json_find_member(ln, key);
+        if (p == std::string::npos) return 0;
         size_t q = p;
         while (q < ln.size() && (ln[q] >= '0' && ln[q] <= '9')) ++q;
         if (q == p) return 0;
@@ -1103,13 +1135,8 @@ void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expec
     };
 
     auto get_num_from_line = [](const std::string& ln, const std::string& key) -> CorpusPos {
-        std::string pattern = "\"" + key + "\"";
-        size_t kpos = ln.find(pattern);
-        if (kpos == std::string::npos) return -1;
-        size_t colon = ln.find(':', kpos + pattern.size());
-        if (colon == std::string::npos) return -1;
-        size_t p = colon + 1;
-        while (p < ln.size() && (ln[p] == ' ' || ln[p] == '\t')) ++p;
+        const size_t p = json_find_member(ln, key);
+        if (p == std::string::npos) return -1;
         size_t q = p;
         while (q < ln.size() && (ln[q] >= '0' && ln[q] <= '9')) ++q;
         if (q == p) return -1;
@@ -1407,8 +1434,8 @@ void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expec
             // an edge of a pointer layer declared in the header: corpus positions (0-based, as region start_pos)
             const long long src = get_num_field(line, "source"), tgt = get_num_field(line, "target");
             const std::string layer = json_get_string(line, "layer");
-            if (layer.empty() || line.find("\"source\"") == std::string::npos ||
-                line.find("\"target\"") == std::string::npos)
+            if (layer.empty() || json_find_member(line, "source") == std::string::npos ||
+                json_find_member(line, "target") == std::string::npos)
                 throw std::runtime_error("JSONL relation event needs \"layer\", \"source\" and \"target\": " + line);
             builder_.add_relation_edge(layer, static_cast<CorpusPos>(src), static_cast<CorpusPos>(tgt),
                                        json_get_string(line, "label"));
