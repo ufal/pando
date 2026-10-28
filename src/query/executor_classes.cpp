@@ -47,9 +47,9 @@ std::optional<MatchSet> QueryExecutor::execute_class_join(const TokenQuery& q, s
 }
 
 // `a:[A] with b:[B] :: a.X = b.X` (one token on either side, the same token or region attribute X): the pairs whose X
-// values (their components, for a multivalue X) meet, which are X's classes, a token with itself included as
-// `with` has it. The class join gives them as source | target pairs; nullopt for any other shape (the general
-// joins of execute_parallel take it).
+// values (their components, for a multivalue X) meet, which are X's classes, without a token paired with itself
+// (`with` never pairs a unit with itself, since 2026-10-28). The class join gives them as source | target pairs;
+// nullopt for any other shape (the general joins of execute_parallel take it).
 std::optional<MatchSet> QueryExecutor::execute_parallel_class_join(const TokenQuery& source, const TokenQuery& target,
                                                                    const std::vector<GlobalAlignmentFilter>& align,
                                                                    size_t max_matches) const {
@@ -75,7 +75,8 @@ std::optional<MatchSet> QueryExecutor::execute_parallel_class_join(const TokenQu
     }
     for (const auto& tok : q.tokens)
         if (tok.has_repetition() || tok.is_anchor() || tok.is_dep_subtree) return std::nullopt;
-    auto ms = class_join(q, attr, true, max_matches == 0 ? SIZE_MAX : max_matches, 0, nullptr);
+    // `with` leaves the pair of a token with itself out, as `=:` does (parallel_pair_is_self in executor.cpp)
+    auto ms = class_join(q, attr, false, max_matches == 0 ? SIZE_MAX : max_matches, 0, nullptr);
     if (!ms) return std::nullopt;
     MatchSet out;
     out.parallel = true;

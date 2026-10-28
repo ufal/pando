@@ -1594,6 +1594,14 @@ struct ParallelPairHash {
 // MV-002: Source|Target join for a single `:: a.attr = b.attr` filter.
 // Uses hash join when both sides are scalar; otherwise inverted index on
 // component strings (same semantics as global_alignment_attrs_match).
+// `with` never pairs a unit with itself (2026-10-28): a token target that is the source match's own token(s),
+// or a region target (b:<s …>) that contains the whole source match (with :: a.s_tuid = b.s_tuid that is always
+// the source's own sentence). `=:L` (the class join) leaves the token itself out the same way.
+static bool parallel_pair_is_self(const Match& s, const Match& t, bool target_is_region) {
+    if (target_is_region) return t.first_pos() <= s.first_pos() && s.last_pos() <= t.last_pos();
+    return s.positions == t.positions && s.span_ends == t.span_ends;
+}
+
 static bool parallel_alignment_overlap_join_single(
         const Corpus& corpus,
         const std::string& an1,
@@ -1607,7 +1615,8 @@ static bool parallel_alignment_overlap_join_single(
         std::vector<std::pair<Match, Match>>& out,
         size_t& total_count,
         size_t max_matches,
-        bool count_total) {
+        bool count_total,
+        bool target_is_region) {
     const auto& pa1 = corpus.attr(an1);
     const auto& pa2 = corpus.attr(an2);
     // a value with several ids (declared multivalue, or `a|b`) is joined on its ids
@@ -1615,6 +1624,7 @@ static bool parallel_alignment_overlap_join_single(
     bool mv2 = corpus.is_multivalue(an2) || alignment_attr_composite(corpus, an2);
 
     auto emit_pair = [&](size_t i, size_t j) -> bool {
+        if (parallel_pair_is_self(src[i], tgt[j], target_is_region)) return true;
         out.emplace_back(src[i], tgt[j]);
         ++total_count;
         if (max_matches > 0 && total_count >= max_matches && !count_total) return false;
@@ -9285,6 +9295,9 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
     result.num_tokens = source_query.tokens.size() + target_query.tokens.size();
     result.parallel = true;
 
+    // a region target (b:<s …>): "itself" is the region holding the source match (parallel_pair_is_self)
+    const bool target_is_region = target_query.tokens.size() == 1 && target_query.tokens[0].is_anchor();
+
     // nothing links the two sides: every combination (a cross product), almost always a forgotten condition
     if (merged_alignment.empty() && source_query.global_function_filters.empty()
         && target_query.global_function_filters.empty())
@@ -9388,7 +9401,7 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
                     corpus_, an1, an2, af, source_set.matches, target_set.matches,
                     src_names, tgt_names, include_empty_alignment_values_,
                     result.parallel_matches, result.total_count,
-                    max_matches, count_total);
+                    max_matches, count_total, target_is_region);
             result.total_exact = true;
             sort_parallel_pairs(result);
             return result;
@@ -9410,7 +9423,7 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
                     corpus_, an1, an2, af, source_set.matches, target_set.matches,
                     src_names, tgt_names, include_empty_alignment_values_,
                     result.parallel_matches, result.total_count,
-                    max_matches, count_total);
+                    max_matches, count_total, target_is_region);
             result.total_exact = true;
             sort_parallel_pairs(result);
             return result;
@@ -9456,6 +9469,7 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
                     hit.erase(std::unique(hit.begin(), hit.end()), hit.end());
                 }
                 for (size_t i : hit) {
+                    if (parallel_pair_is_self(source_set.matches[i], target_set.matches[j], target_is_region)) continue;
                     result.parallel_matches.emplace_back(source_set.matches[i], target_set.matches[j]);
                     result.total_count++;
                     if (max_matches > 0 && result.total_count >= max_matches && !count_total)
@@ -9484,7 +9498,7 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
                     break;
                 }
             }
-            if (aligned) {
+            if (aligned && !parallel_pair_is_self(s, t, target_is_region)) {
                 result.parallel_matches.emplace_back(s, t);
                 result.total_count++;
                 if (max_matches > 0 && result.total_count >= max_matches && !count_total)

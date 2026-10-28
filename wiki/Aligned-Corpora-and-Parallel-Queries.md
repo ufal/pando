@@ -144,6 +144,12 @@ When selecting for aligned sentences only, we do not want to select any token. T
 a:[form="property"] with b:<s text_lang="Dutch"> :: a.s_tuid = b.s_tuid
 ```
 
+`with` never pairs a unit with itself: a target token that is the source match's own token, or a target region
+(`b:<s …>`) that contains the source match, is left out. So the query above lists the Dutch sentences aligned with
+the hit's sentence, not that sentence itself, and `a:[…] with b:[…] :: a.s_tuid = b.s_tuid` gives the same pairs
+as `a:[…] =:s_tuid b:[…]`. A `with` whose two sides nothing links (no `::` condition between them) gives every
+combination of them, with a warning.
+
 **JSON:** parallel results use **source/target** spans (`parallel` in JSON output) alongside or instead of a single KWIC row.
 
 - `pando --json` / `--api` pages by **source hit** (`page.total` = source hits, `total_pairs` = pairs).

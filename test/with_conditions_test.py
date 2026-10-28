@@ -5,7 +5,8 @@
 
 A self-authored corpus aligned by sentence only (s_tuid on <s>, no token tuid), English and Dutch. Requires:
   * `:: a.tuid = b.tuid` (an attribute the corpus does not have): an error naming what it is aligned by, not 0 hits;
-  * `with` with nothing linking its sides: the cross product, with a warning (stderr; "warnings" in the API JSON);
+  * `with` with nothing linking its sides: the cross product (without the token paired with itself), with a
+    warning (stderr; "warnings" in the API JSON);
   * with a condition (`a.s_tuid = b.s_tuid`, `distance(a,b)`), or as `=:s_tuid`: no warning.
 Exit status 0 = all as required, 1 = a difference, 2 = a run error.
 """
@@ -61,8 +62,9 @@ def main():
     check("no attribute 'tuid'" in msg and "aligned by s_tuid" in msg, f"unknown attribute: an error with a hint ({msg[-160:]})")
 
     r = run('a:[form="cat"] with b:[]', "--count-only")
-    check(r.stdout.strip().splitlines()[-1] == "12" and "Warning:" in r.stderr and "linking" in r.stderr,
-          f"nothing linking the sides: the cross product (12), with a warning ({r.stdout.strip()}; {r.stderr.strip()[:60]})")
+    check(r.stdout.strip().splitlines()[-1] == "11" and "Warning:" in r.stderr and "linking" in r.stderr,
+          f"nothing linking the sides: the cross product (11: not with itself), with a warning ({r.stdout.strip()}; "
+          f"{r.stderr.strip()[:60]})")
 
     r = run('a:[form="cat"] with b:[]', "--api")
     try:
@@ -76,7 +78,11 @@ def main():
         r = run(q, "--count-only")
         check(r.returncode == 0 and "Warning" not in r.stderr, f"{q}: {r.stdout.strip()}, no warning")
     r = run('a:[form="cat"] with b:[] :: a.s_tuid = b.s_tuid', "--count-only")
-    check(r.stdout.strip() == "6", f"with :: a.s_tuid = b.s_tuid: 6 (the 6 tokens of the two u1 sentences; {r.stdout.strip()})")
+    check(r.stdout.strip() == "5", f"with :: a.s_tuid = b.s_tuid: 5 (the 6 tokens of the two u1 sentences, not "
+                                    f"'cat' itself; {r.stdout.strip()})")
+    r = run('a:[form="cat"] with b:<s> :: a.s_tuid = b.s_tuid', "--count-only")
+    check(r.stdout.strip() == "1", f"with b:<s> :: a.s_tuid = b.s_tuid: 1 (the Dutch sentence, not the English one "
+                                    f"'cat' stands in; {r.stdout.strip()})")
     print("with conditions: " + ("as required" if not failures else f"{failures} problem(s)"))
     return 1 if failures else 0
 

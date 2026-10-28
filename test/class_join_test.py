@@ -15,7 +15,7 @@ without the declarations has them as well). For each query it requires:
   * a pair whose tokens lie far apart (across an unaligned 120-token text) to be shown as runs with an elision,
     in the KWIC line, the JSON context and (with --server) the XML fragment, never with what lies between;
   * `a:[A] with b:[B] :: a.tuid = b.tuid` to take the class join as well, with the pairs of a brute-force reference
-    (a token with itself included) and of the general joins;
+    (a token never with itself, as `with` has it since 2026-10-28) and of the general joins;
   * `=:s_tuid` over a region attribute (sentences aligned by `s_tuid`; one left unaligned) and `with … a.s_tuid =
     b.s_tuid`: the class join with the pairs of tokens in aligned sentences, as the reference and the general paths;
   * `[A] within L [having [C]]` and `not within` with L = s_tuid / tuid: the hits in a class (with a C token), or
@@ -212,8 +212,8 @@ def main():
         r = subprocess.run([a.pando, "--timing", d, cq], capture_output=True, text=True)
         check("path=class_join" in r.stdout + r.stderr, f"{cq}: plan class_join")
 
-    # `a:[A] with b:[B] :: a.tuid = b.tuid` goes through the class join too: the pairs (a token with itself
-    # included, as `with` has it) as the general joins give them, a `::` filter on the source after `with` included
+    # `a:[A] with b:[B] :: a.tuid = b.tuid` goes through the class join too: the pairs (a token never with itself,
+    # as `with` has it) as the general joins give them, a `::` filter on the source after `with` included
     def with_pairs(q, fast):
         out = run(q, fast, "--json", "--limit", "100000")
         try:
@@ -230,7 +230,8 @@ def main():
         ('a:[form="dog"] :: a.text_lang="eng" with b:[] :: b.text_lang="nld" & a.tuid = b.tuid',
          AND(FORM("dog"), LANG("eng")), LANG("nld")),
     ]:
-        ref = sorted((i, j) for i in range(n) for j in range(n) if fa(i) and fb(j) and toks[i][2] & toks[j][2])
+        ref = sorted((i, j) for i in range(n) for j in range(n)
+                     if i != j and fa(i) and fb(j) and toks[i][2] & toks[j][2])
         fast, slow = with_pairs(q, True), with_pairs(q, False)
         r = subprocess.run([a.pando, "--timing", "--count-only", d, q], capture_output=True, text=True)
         check(fast == ref, f"{q}: {len(fast) if isinstance(fast, list) else fast} pairs (reference {len(ref)})")

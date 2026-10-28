@@ -79,15 +79,17 @@ def ref_pairs_tok(toks, src_pred, tgt_pred):
     by_tu = {}
     for j in ref_tokens(toks, tgt_pred):
         by_tu.setdefault(toks[j]["tuid"], []).append(j)
-    return {(i, j) for i in ref_tokens(toks, src_pred) for j in by_tu.get(toks[i]["tuid"], [])}
+    # `with` never pairs a token with itself
+    return {(i, j) for i in ref_tokens(toks, src_pred) for j in by_tu.get(toks[i]["tuid"], []) if j != i}
 
 
 def ref_pairs_sent(toks, sentences, src_pred, lang):
     by_tu = {}
     for (start, end, lg, tu) in sentences:
         if lg == lang:
-            by_tu.setdefault(tu, []).append(start)
-    return {(i, s) for i in ref_tokens(toks, src_pred) for s in by_tu.get(toks[i]["tuid"], [])}
+            by_tu.setdefault(tu, []).append((start, end))
+    # `with` never pairs a token with the sentence it stands in
+    return {(i, s) for i in ref_tokens(toks, src_pred) for s, e in by_tu.get(toks[i]["tuid"], []) if not s <= i <= e}
 
 
 def cli_pairs(pando, index, q):
