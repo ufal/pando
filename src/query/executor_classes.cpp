@@ -105,7 +105,7 @@ bool equiv_query_gives_pairs(const Corpus& corpus, const TokenQuery& q) {
     for (const auto& tok : q.tokens)
         if (tok.is_anchor()) return false;
     const RelationDecl* decl = corpus.relation(rel.layer);
-    return decl && decl->kind == RelationDecl::Kind::Equivalence && decl->scope != "s" && decl->scope != "text";
+    return decl && decl->kind == RelationDecl::Kind::Equivalence && (decl->scope == "corpus" || decl->scope == "external");
 }
 
 void matches_as_pairs(MatchSet& ms) {

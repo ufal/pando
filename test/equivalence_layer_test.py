@@ -163,6 +163,12 @@ def main():
         r = subprocess.run([a.pando, "--count-only", d2, q], capture_output=True, text=True)
         got = r.stdout.split()[-1] if r.returncode == 0 and r.stdout.split() else r.stderr.strip()[:200]
         check(got == str(want), f"coref {q}: {got} (expected {want})")
+    # a layer within a document (scope doc, text, s) keeps `=:` one hit of two tokens; only one crossing texts
+    # (scope corpus: tuid, s_tuid) answers as pairs
+    r = subprocess.run([a.pando, "--api", d2, '[lemma="man"] =:coref [lemma="he"]'], capture_output=True, text=True)
+    js = json.loads(r.stdout) if r.returncode == 0 else {}
+    check(len(js.get("result", {}).get("hits", [])) == 2 and "pairs" not in js.get("result", {}),
+          "coref (scope doc) =: gives hits, not pairs")
 
     print("equivalence layers: " + ("as required" if not failures else f"{failures} problem(s)"))
     return 1 if failures else 0
