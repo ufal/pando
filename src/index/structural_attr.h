@@ -5,6 +5,7 @@
 #include "core/types.h"
 #include "core/mmap_file.h"
 #include "index/lexicon.h"
+#include "core/object_cache.h"
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -191,6 +192,11 @@ private:
     };
     // shared_ptr: StructuralAttr stays movable; copies share the (identical) cache
     mutable std::shared_ptr<RegionLexCache> region_lex_cache_ = std::make_shared<RegionLexCache>();
+    ObjectCache derived_cache_;
+
+public:
+    /// Values derived from these regions once (e.g. the alignment classes of a region attribute)
+    const ObjectCache& cache() const { return derived_cache_; }
 };
 
 /// TEITOK CQP uses composite names like \c s_id (region \c s, attribute \c id). The indexer

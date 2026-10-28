@@ -3,6 +3,7 @@
 #include "core/types.h"
 #include "core/mmap_file.h"
 #include "index/lexicon.h"
+#include "core/object_cache.h"
 #include "index/packed_postings.h"
 #include "index/packed_dat.h"
 #include "index/dependency_index.h"
@@ -218,6 +219,9 @@ public:
     const Lexicon& lexicon() const { return lexicon_; }
     CorpusPos corpus_size() const { return corpus_size_; }
 
+    /// Values derived from this attribute once (e.g. its alignment classes, equivalence_classes.h)
+    const ObjectCache& cache() const { return derived_cache_; }
+
     // RG-5f: Multivalue component reverse index support.
     // Call open_mv() after open() for attrs declared as multivalue.
     void open_mv(const std::string& base_path, bool preload = false);
@@ -264,6 +268,7 @@ public:
 
 private:
     std::string base_path_;
+    ObjectCache derived_cache_;
     Lexicon  lexicon_;
     MmapFile corpus_;      // .dat  — int8/int16/int32 per position (absent when derived_)
     PackedDat pdat_;         // P4.3 `.dat.pk` (when served)

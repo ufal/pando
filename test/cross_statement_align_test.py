@@ -10,9 +10,10 @@ of the second statement with the ones computed here from the vertical file:
   * a region attribute (`s_tuid`) compares components (`t3|t4` aligns with `t3`),
     missing values (`_`) never align; with few source values (looked up one by one)
     and with many (one pass over the distinct values);
-  * a token attribute (`upos`, `lemma`, the token-level `tuid`) compares whole values
-    (it is not declared multivalue: `t3|t4` does not align with `t3`), missing values
-    never align;
+  * a token attribute (`upos`, `lemma`) compares whole values (it is not declared
+    multivalue), missing values never align; alignment ids (the token-level `tuid`, like
+    `s_tuid`) compare their ids, `t3|t4` aligning with `t3` (TEITOK writes several ids so;
+    equivalence_classes.h);
   * several filters at once, a target without other conditions, a source with no hits.
 
   test/cross_statement_align_test.py --pando build/pando --pando-index build/pando-index
@@ -76,7 +77,7 @@ def expected(toks, src, tgt, filters):
             continue
         ok = True
         for attr, kind in filters:
-            if kind == "region":   # components; missing values never align
+            if kind == "region" or attr == "tuid":   # components (alignment ids); missing values never align
                 vals = set().union(*(components(s[attr]) for s in sel)) if sel else set()
                 ok = ok and bool(components(t[attr]) & vals)
             else:                  # a token attribute: whole values; missing never align

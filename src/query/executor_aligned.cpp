@@ -93,10 +93,20 @@ std::optional<MatchSet> QueryExecutor::execute_aligned(const TokenQuery& q, size
     if (sample_size > 0 || (aggregate_by_fields && !aggregate_by_fields->empty()))
         throw std::runtime_error("within an aligned corpus (…: …) gives hits; sampling or counting them by a field "
                                  "is done on the hits");
-    // the alignment segments: the sentence alignment's classes
+    // the alignment segments (Manatee's ALIGNSTRUCT): the classes of the sentence alignment, `s_tuid`, else
+    // `seg_tuid`, else another region's `*_tuid` below the document
     EquivalenceClasses classes;
-    if (!classes.open(corpus_, "s_tuid") || !classes.regions())
-        throw std::runtime_error("within an aligned corpus (…: …) needs the sentence alignment s_tuid");
+    std::vector<std::string> names{"s_tuid", "seg_tuid"};
+    for (const auto& r : corpus_.region_attr_names())
+        if (is_alignment_id_attr(r) && r.rfind("text_", 0) != 0 && r.rfind("doc_", 0) != 0) names.push_back(r);
+    bool found = false;
+    for (const auto& n : names)
+        if (classes.open(corpus_, n) && classes.regions()) {
+            found = true;
+            break;
+        }
+    if (!found)
+        throw std::runtime_error("within an aligned corpus (…: …) needs a sentence alignment (s_tuid, seg_tuid, …)");
 
     // A: outside each aligned corpus named
     TokenQuery a = q;
@@ -126,9 +136,14 @@ std::optional<MatchSet> QueryExecutor::execute_aligned(const TokenQuery& q, size
                 m.span_ends = {rg.start};
                 if (!match_passes_inline_region_filters(m, own_lang, no_names)) r.emplace_back(rg.start, rg.end);
             });
+        // as disjoint ranges (nested sentences merged into the outer one)
         std::sort(r.begin(), r.end());
-        r.erase(std::unique(r.begin(), r.end()), r.end());
-        segments.push_back(std::move(r));
+        Ranges merged;
+        for (const auto& [rs, re] : r) {
+            if (!merged.empty() && rs <= merged.back().second) merged.back().second = std::max(merged.back().second, re);
+            else merged.emplace_back(rs, re);
+        }
+        segments.push_back(std::move(merged));
     }
 
     MatchSet result;

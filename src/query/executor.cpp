@@ -1,4 +1,5 @@
 #include "query/executor.h"
+#include "corpus/equivalence_classes.h"
 #include "core/geo.h"
 #include "core/regex_engine.h"
 #include "query/bitmap_expr.h"
@@ -6,6 +7,7 @@
 #include "index/head_attr.h"
 #include <tuple>
 #include <algorithm>
+#include <cstring>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -1402,12 +1404,43 @@ static bool mv_fwd_contains_sorted(const PositionalAttr& pa, CorpusPos pos,
 
 // MV-002: non-empty intersection of component sets (string keys), using forward
 // index when available else pipe-split / scalar value_at.
+// Alignment ids (`:: a.tuid = b.tuid`): a value may hold several, joined by '|' (for `tuid` / `*_tuid` also by a
+// space, as TEITOK writes a sentence merging two), declared multivalue or not; two values align when they share one
+// (as the classes of equivalence_classes.h, which the class join reads).
+static bool has_alignment_separator(std::string_view v, const std::string& attr) {
+    const char* seps = id_separators(attr);
+    for (char c : v)
+        for (const char* q = seps; *q; ++q)
+            if (c == *q) return true;
+    return false;
+}
+
+static void split_alignment_ids(std::string_view v, const std::string& attr, std::unordered_set<std::string>& out) {
+    const char* seps = id_separators(attr);
+    size_t a = 0;
+    while (a <= v.size()) {
+        size_t b = a;
+        while (b < v.size() && std::strchr(seps, v[b]) == nullptr) ++b;
+        if (b > a && v.substr(a, b - a) != "_") out.insert(std::string(v.substr(a, b - a)));
+        a = b + 1;
+    }
+}
+
+// some values of the attribute hold several ids (equivalence_classes.h, kept with the attribute)
+static bool alignment_attr_composite(const Corpus& corpus, const std::string& attr) {
+    if (corpus.is_multivalue(attr)) return false;   // declared: its own components
+    EquivalenceClasses classes;
+    return classes.open(corpus, attr) && classes.composite();
+}
+
 static void collect_mv_component_strings(const PositionalAttr& pa, CorpusPos pos,
                                          bool is_mv_declared,
-                                         std::unordered_set<std::string>& out) {
+                                         std::unordered_set<std::string>& out,
+                                         const std::string& attr_name = "") {
     if (!is_mv_declared) {
         std::string_view v = pa.value_at(pos);
-        if (!v.empty() && v != "_") out.insert(std::string(v));
+        if (has_alignment_separator(v, attr_name)) split_alignment_ids(v, attr_name, out);
+        else if (!v.empty() && v != "_") out.insert(std::string(v));
         return;
     }
     if (pa.has_mv_fwd()) {
@@ -1511,25 +1544,15 @@ static bool alignment_values_match(const Corpus& corpus,
     if (!include_empty_alignment_values
         && (alignment_value_is_missing(*v1) || alignment_value_is_missing(*v2)))
         return false;
-    bool mv1 = corpus.is_multivalue(an1);
-    bool mv2 = corpus.is_multivalue(an2);
+    const bool mv1 = corpus.is_multivalue(an1) || has_alignment_separator(*v1, an1);
+    const bool mv2 = corpus.is_multivalue(an2) || has_alignment_separator(*v2, an2);
     if (!mv1 && !mv2)
         return *v1 == *v2;
 
     std::unordered_set<std::string> s1, s2;
-    auto split_components = [](std::string_view v, std::unordered_set<std::string>& out) {
-        size_t start = 0;
-        while (start <= v.size()) {
-            size_t p = v.find('|', start);
-            size_t end = (p == std::string_view::npos) ? v.size() : p;
-            if (end > start) out.insert(std::string(v.substr(start, end - start)));
-            if (p == std::string_view::npos) break;
-            start = p + 1;
-        }
-    };
-    if (mv1 || v1->find('|') != std::string_view::npos) split_components(*v1, s1);
+    if (mv1) split_alignment_ids(*v1, an1, s1);
     else s1.insert(std::string(*v1));
-    if (mv2 || v2->find('|') != std::string_view::npos) split_components(*v2, s2);
+    if (mv2) split_alignment_ids(*v2, an2, s2);
     else s2.insert(std::string(*v2));
     if (!include_empty_alignment_values && (s1.empty() || s2.empty()))
         return false;
@@ -1543,21 +1566,14 @@ static void collect_alignment_component_strings(const Corpus& corpus,
                                                 CorpusPos pos,
                                                 std::unordered_set<std::string>& out) {
     if (corpus.has_attr(attr)) {
-        collect_mv_component_strings(corpus.attr(attr), pos, corpus.is_multivalue(attr), out);
+        collect_mv_component_strings(corpus.attr(attr), pos, corpus.is_multivalue(attr), out, attr);
         return;
     }
     auto val = alignment_attr_value_at(corpus, attr, pos);
     if (!val || val->empty() || *val == "_")
         return;
-    if (corpus.is_multivalue(attr) || val->find('|') != std::string_view::npos) {
-        size_t start = 0;
-        while (start <= val->size()) {
-            size_t p = val->find('|', start);
-            size_t end = (p == std::string_view::npos) ? val->size() : p;
-            if (end > start) out.insert(std::string(val->substr(start, end - start)));
-            if (p == std::string_view::npos) break;
-            start = p + 1;
-        }
+    if (corpus.is_multivalue(attr) || has_alignment_separator(*val, attr)) {
+        split_alignment_ids(*val, attr, out);
     } else {
         out.insert(std::string(*val));
     }
@@ -1588,8 +1604,9 @@ static bool parallel_alignment_overlap_join_single(
         bool count_total) {
     const auto& pa1 = corpus.attr(an1);
     const auto& pa2 = corpus.attr(an2);
-    bool mv1 = corpus.is_multivalue(an1);
-    bool mv2 = corpus.is_multivalue(an2);
+    // a value with several ids (declared multivalue, or `a|b`) is joined on its ids
+    bool mv1 = corpus.is_multivalue(an1) || alignment_attr_composite(corpus, an1);
+    bool mv2 = corpus.is_multivalue(an2) || alignment_attr_composite(corpus, an2);
 
     auto emit_pair = [&](size_t i, size_t j) -> bool {
         out.emplace_back(src[i], tgt[j]);
@@ -1631,7 +1648,7 @@ static bool parallel_alignment_overlap_join_single(
         CorpusPos p1 = resolve_name(src[i], src_names, af.name1);
         if (p1 == NO_HEAD) continue;
         std::unordered_set<std::string> comps;
-        collect_mv_component_strings(pa1, p1, mv1, comps);
+        collect_mv_component_strings(pa1, p1, corpus.is_multivalue(an1), comps, an1);
         if (!include_empty_alignment_values && comps.empty()) continue;
         for (const auto& c : comps) src_by_comp[c].push_back(i);
     }
@@ -1641,7 +1658,7 @@ static bool parallel_alignment_overlap_join_single(
         CorpusPos p2 = resolve_name(tgt[j], tgt_names, af.name2);
         if (p2 == NO_HEAD) continue;
         std::unordered_set<std::string> comps;
-        collect_mv_component_strings(pa2, p2, mv2, comps);
+        collect_mv_component_strings(pa2, p2, corpus.is_multivalue(an2), comps, an2);
         if (!include_empty_alignment_values && comps.empty()) continue;
         for (const auto& c : comps) {
             auto it = src_by_comp.find(c);
@@ -1669,7 +1686,8 @@ static bool global_alignment_attrs_match(const Corpus& corpus,
     bool mv1 = corpus.is_multivalue(an1);
     bool mv2 = corpus.is_multivalue(an2);
     if (pos1 && pos2 && !mv1 && !mv2) {
-        return corpus.attr(an1).value_at(p1) == corpus.attr(an2).value_at(p2);
+        const std::string_view v1 = corpus.attr(an1).value_at(p1), v2 = corpus.attr(an2).value_at(p2);
+        if (!has_alignment_separator(v1, an1) && !has_alignment_separator(v2, an2)) return v1 == v2;
     }
     std::unordered_set<std::string> s1, s2;
     collect_alignment_component_strings(corpus, an1, p1, s1);
@@ -2154,23 +2172,14 @@ size_t QueryExecutor::bind_external_alignment(TokenQuery& query, const LabelLook
     collect_token_and_region_labels(query, &token_labels, &region_labels);
     auto local = [&](const std::string& n) { return token_labels.count(n) || region_labels.count(n); };
 
-    auto split_into = [](std::string_view v, std::unordered_set<std::string>& out) {
-        size_t start = 0;
-        while (start <= v.size()) {
-            const size_t p = v.find('|', start);
-            const size_t end = p == std::string_view::npos ? v.size() : p;
-            if (end > start) out.insert(std::string(v.substr(start, end - start)));
-            if (p == std::string_view::npos) break;
-            start = p + 1;
-        }
-    };
     const bool with_empty = include_empty_alignment_values_;
-    // does a value on the local side share a component with the earlier values?
-    auto hits = [&](std::string_view v, const std::unordered_set<std::string>& vals) {
+    // does a value of the local attribute `an` share an id with the earlier values? (several ids in one value:
+    // `a|b`, for alignment ids also `a b`)
+    auto hits = [&](std::string_view v, const std::unordered_set<std::string>& vals, const std::string& an) {
         if (!with_empty && alignment_value_is_missing(v)) return false;
-        if (v.find('|') == std::string_view::npos) return vals.count(std::string(v)) > 0;
+        if (!has_alignment_separator(v, an)) return vals.count(std::string(v)) > 0;
         std::unordered_set<std::string> comps;
-        split_into(v, comps);
+        split_alignment_ids(v, an, comps);
         for (const auto& c : comps)
             if (vals.count(c)) return true;
         return false;
@@ -2208,7 +2217,7 @@ size_t QueryExecutor::bind_external_alignment(TokenQuery& query, const LabelLook
             auto v = resolve_alignment_operand_value(corpus_, m, b->nm, ext, ext_an);
             if (!v) continue;
             if (!with_empty && alignment_value_is_missing(*v)) continue;
-            if (corpus_.is_multivalue(ext_an) || v->find('|') != std::string_view::npos) split_into(*v, vals);
+            if (corpus_.is_multivalue(ext_an) || has_alignment_separator(*v, ext_an)) split_alignment_ids(*v, ext_an, vals);
             else vals.insert(std::string(*v));
         }
 
@@ -2216,7 +2225,7 @@ size_t QueryExecutor::bind_external_alignment(TokenQuery& query, const LabelLook
         // one of the earlier statement's, as an id-set condition like `[upos="VERB" |
         // upos="AUX"]` that the planner estimates from the index and checks by id, rather
         // than a list of every position in the corpus that carries one of the values.
-        if (corpus_.has_attr(loc_an) && !corpus_.is_multivalue(loc_an)) {
+        if (corpus_.has_attr(loc_an) && !corpus_.is_multivalue(loc_an) && !alignment_attr_composite(corpus_, loc_an)) {
             const PositionalAttr& pa = corpus_.attr(loc_an);
             AttrCondition ac;
             ac.attr = loc_attr;
@@ -2268,7 +2277,7 @@ size_t QueryExecutor::bind_external_alignment(TokenQuery& query, const LabelLook
                     for (LexiconId id = 0; id < K; ++id) {
                         if ((id & 0xFFFF) == 0) check_cancelled();
                         const std::string_view v = sa.region_attr_lex_get(key, id);
-                        if (hits(v, vals)) add_regions_of(std::string(v));
+                        if (hits(v, vals, loc_an)) add_regions_of(std::string(v));
                     }
                 } else if (K > 0) {
                     for (const auto& v : vals) add_regions_of(v);
@@ -2278,7 +2287,7 @@ size_t QueryExecutor::bind_external_alignment(TokenQuery& query, const LabelLook
                         auto ids = std::make_shared<Corpus::IdSet>();
                         for (LexiconId id = 0; id < K; ++id) {
                             if ((id & 0xFFFF) == 0) check_cancelled();
-                            if (sa.region_attr_lex_get(key, id).find('|') != std::string_view::npos)
+                            if (has_alignment_separator(sa.region_attr_lex_get(key, id), loc_an))
                                 ids->push_back(static_cast<int32_t>(id));
                         }
                         composites = ids;
@@ -2286,12 +2295,12 @@ size_t QueryExecutor::bind_external_alignment(TokenQuery& query, const LabelLook
                     }
                     for (int32_t id : *composites) {
                         const std::string_view v = sa.region_attr_lex_get(key, static_cast<LexiconId>(id));
-                        if (hits(v, vals)) add_regions_of(std::string(v));
+                        if (hits(v, vals, loc_an)) add_regions_of(std::string(v));
                     }
                 } else {
                     for (size_t ri = 0; ri < sa.region_count(); ++ri) {
                         if ((ri & 0xFFFF) == 0) check_cancelled();
-                        if (hits(sa.region_value(key, ri), vals)) regions.push_back(static_cast<int64_t>(ri));
+                        if (hits(sa.region_value(key, ri), vals, loc_an)) regions.push_back(static_cast<int64_t>(ri));
                     }
                 }
                 std::sort(regions.begin(), regions.end());
@@ -2327,7 +2336,14 @@ size_t QueryExecutor::bind_external_alignment(TokenQuery& query, const LabelLook
             if (corpus_.has_attr(loc_an)) {
                 const PositionalAttr& pa = corpus_.attr(loc_an);
                 const bool mv = corpus_.is_multivalue(loc_an) && pa.has_mv();
+                if (!mv && alignment_attr_composite(corpus_, loc_an)) {
+                    // values with several ids (`a|b`): over the distinct values
+                    for (LexiconId id = 0; id < pa.lexicon().size(); ++id)
+                        if (hits(pa.lexicon().get(id), vals, loc_an))
+                            pa.for_each_position_id(id, [&](CorpusPos p) { pos.push_back(p); return true; });
+                }
                 for (const auto& v : vals) {
+                    if (!mv && alignment_attr_composite(corpus_, loc_an)) break;
                     if (mv) {
                         const LexiconId id = pa.mv_lookup(v);
                         if (id != UNKNOWN_LEX)
@@ -2355,7 +2371,7 @@ size_t QueryExecutor::bind_external_alignment(TokenQuery& query, const LabelLook
                     for (LexiconId id = 0; id < K; ++id) {
                         if ((id & 0xFFFF) == 0) check_cancelled();
                         const std::string_view v = sa.region_attr_lex_get(key, id);
-                        if (!hits(v, vals)) continue;
+                        if (!hits(v, vals, loc_an)) continue;
                         const int64_t* regs = nullptr;
                         size_t nreg = 0;
                         if (sa.regions_for_value(key, std::string(v), regs, nreg))
@@ -2364,7 +2380,7 @@ size_t QueryExecutor::bind_external_alignment(TokenQuery& query, const LabelLook
                 } else {
                     for (size_t ri = 0; ri < sa.region_count(); ++ri) {
                         if ((ri & 0xFFFF) == 0) check_cancelled();
-                        if (hits(sa.region_value(key, ri), vals)) add_region(ri);
+                        if (hits(sa.region_value(key, ri), vals, loc_an)) add_region(ri);
                     }
                 }
             }
@@ -9306,7 +9322,7 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
         // components the source side collects: the general join handles it)
         if (target_simple
             && corpus_.has_attr(an1) && corpus_.has_attr(an2)
-            && !corpus_.is_multivalue(an2)
+            && !corpus_.is_multivalue(an2) && !alignment_attr_composite(corpus_, an2)
             && !is_anchor_label(source_query, af.name1)
             && !is_anchor_label(target_query, af.name2)) {
             const auto& pa2 = corpus_.attr(an2);
@@ -9399,31 +9415,25 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
             // same semantics as alignment_values_match: whole values when both sides are
             // scalar, else any shared pipe component; missing values never align
             const bool scalar = !corpus_.is_multivalue(an1) && !corpus_.is_multivalue(an2);
-            auto keys_of = [&](std::optional<std::string_view> v, std::vector<std::string>& out) {
+            auto keys_of = [&](std::optional<std::string_view> v, const std::string& an, std::vector<std::string>& out) {
                 out.clear();
                 if (!v || alignment_value_is_missing(*v)) return;
-                if (scalar) { out.emplace_back(*v); return; }
-                size_t start = 0;
-                while (start <= v->size()) {
-                    size_t bar = v->find('|', start);
-                    size_t end = bar == std::string_view::npos ? v->size() : bar;
-                    if (end > start) out.emplace_back(v->substr(start, end - start));
-                    if (bar == std::string_view::npos) break;
-                    start = bar + 1;
-                }
+                if (scalar && !has_alignment_separator(*v, an)) { out.emplace_back(*v); return; }
+                std::unordered_set<std::string> ids;
+                split_alignment_ids(*v, an, ids);
+                out.assign(ids.begin(), ids.end());
                 std::sort(out.begin(), out.end());
-                out.erase(std::unique(out.begin(), out.end()), out.end());
             };
             std::unordered_map<std::string, std::vector<size_t>> src_by_key;
             src_by_key.reserve(source_set.matches.size() * 2 + 16);
             std::vector<std::string> keys;
             for (size_t i = 0; i < source_set.matches.size(); ++i) {
-                keys_of(resolve_alignment_operand_value(corpus_, source_set.matches[i], src_names, af.name1, an1), keys);
+                keys_of(resolve_alignment_operand_value(corpus_, source_set.matches[i], src_names, af.name1, an1), an1, keys);
                 for (auto& k : keys) src_by_key[std::move(k)].push_back(i);
             }
             std::vector<size_t> hit;
             for (size_t j = 0; j < target_set.matches.size(); ++j) {
-                keys_of(resolve_alignment_operand_value(corpus_, target_set.matches[j], tgt_names, af.name2, an2), keys);
+                keys_of(resolve_alignment_operand_value(corpus_, target_set.matches[j], tgt_names, af.name2, an2), an2, keys);
                 hit.clear();
                 for (const auto& k : keys) {
                     auto it = src_by_key.find(k);
