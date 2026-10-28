@@ -150,6 +150,12 @@ the hit's sentence, not that sentence itself, and `a:[…] with b:[…] :: a.s_t
 as `a:[…] =:s_tuid b:[…]`. A `with` whose two sides nothing links (no `::` condition between them) gives every
 combination of them, with a warning.
 
+`a:[…] =:X b:[…]` over an alignment layer X (an equivalence layer whose classes cross texts, scope `corpus`: `tuid`,
+`s_tuid`) is shown as pairs too, source `a` and target `b`, exactly as `a:[…] with b:[…] :: a.X = b.X`: the two
+tokens lie in different documents, so one hit spanning from one to the other would mean nothing. A layer kept within
+a text (coreference) keeps the two tokens one hit, and so does `=:X` followed by a command (`; count by a.lemma
+b.lemma`, `; tabulate …`), which reads the two-token hits.
+
 **JSON:** parallel results use **source/target** spans (`parallel` in JSON output) alongside or instead of a single KWIC row.
 
 - `pando --json` / `--api` pages by **source hit** (`page.total` = source hits, `total_pairs` = pairs).

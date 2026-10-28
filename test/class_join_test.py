@@ -173,8 +173,8 @@ def main():
         got_f = fast[-1] if fast else "?"
         got_s = slow[-1] if slow else "?"
         check(got_f == str(want) and got_s == str(want), f"{q}: {got_f} (generic {got_s}, reference {want})")
-        plan = run(q, True, "--json", "--debug", "--limit", "1")
-        check("class_join" in plan, f"{q}: plan class_join")
+        r = subprocess.run([a.pando, "--timing", "--count-only", d, q], capture_output=True, text=True)
+        check("path=class_join" in r.stdout + r.stderr, f"{q}: plan class_join")   # (pairs carry no debug block)
         # hit order: by the first token, then the second (the generic expansion lists by its seed token)
         hf, hs = hits(q, True), hits(q, False)
         ref = sorted((i, j) for i in range(n) for j in range(n)
@@ -244,6 +244,16 @@ def main():
                  and toks[j][1] == "nld" and toks[i][2] & toks[j][2])
     got = with_pairs(q, True)
     check(got == ref, f"{q}: {len(got) if isinstance(got, list) else got} pairs (reference {len(ref)})")
+    # `a:[A] =:X b:[B]` over an alignment layer (scope corpus) answers as `with … :: a.X = b.X`: the same pairs, a
+    # the source (2026-10-28); a following command (`; tabulate`, `count by`) still reads the two-token hits
+    for q, w in [('a:[form="house"] =:tuid b:[]', 'a:[form="house"] with b:[] :: a.tuid = b.tuid'),
+                 ('a:[form="is"] =:tuid b:[form="is"] :: a.text_lang="eng"',
+                  'a:[form="is"] with b:[form="is"] :: a.text_lang="eng" & a.tuid = b.tuid')]:
+        got, want = with_pairs(q, True), with_pairs(w, True)
+        check(isinstance(got, list) and got == want and len(got) > 0,
+              f"{q}: {len(got) if isinstance(got, list) else got} pairs, as {w}")
+        api = run(q, True, "--api", "--limit", "3")
+        check('"pairs"' in api and '"parallel": true' in api, f"{q}: --api gives pairs")
 
     # classes of regions: `s_tuid` (sentences and their translations); a token's class is its sentence's tuid
     info = open(os.path.join(d, "corpus.info"), encoding="utf-8").read()
@@ -401,23 +411,21 @@ def main():
     r = subprocess.run([a.pando, d, '[form="house"]', "--aligned", "nosuch"], capture_output=True, text=True)
     check("not an equivalence layer" in r.stdout + r.stderr, "--aligned nosuch: refused with a message")
 
-    # display: a pair across the filler text shows the runs around its tokens with an elision, not the filler
+    # display: a pair across the filler text is a pair (source | target, each with its own context, since
+    # 2026-10-28), never one hit stretching over the filler
     q = 'a:[form="the"] =:tuid b:[form="het"]'
     pairs = [(i, j) for i in range(n) for j in range(n) if i != j and toks[i][0] == "the" and toks[j][0] == "het"
              and toks[i][2] & toks[j][2]]
     far = [ij for ij in pairs if any(toks[k][1] == "xxx" for k in range(min(ij), max(ij)))]
     out = run(q, True, "--limit", "1000")
     lines = [l for l in out.splitlines() if "<!" in l]
-    # the match part: from the first highlighted token to the last
-    middles = [l[l.index("<!"):l.rindex("!>")] for l in lines]
-    elided = sum("\u2026" in m for m in middles)
-    check(len(far) > 0 and len(lines) == len(pairs) and not any("filler" in m for m in middles)
-          and elided >= len(far),
-          f"{q}: KWIC lines elide what lies between ({elided} elided, {len(far)} of {len(lines)} across the filler)")
+    check(len(far) > 0 and out.count("[pair ") == len(pairs) and len(lines) == 2 * len(pairs)
+          and not any("filler" in l[l.index("<!"):l.rindex("!>")] for l in lines),
+          f"{q}: {out.count('[pair ')} pairs shown (reference {len(pairs)}, {len(far)} across the filler)")
     js = json.loads(run(q, True, "--json", "--limit", "1000"))
-    ctxs = [h.get("context", {}) for h in js["result"]["hits"]]
-    check(len(ctxs) == len(pairs) and not any("filler" in c.get("match", "") for c in ctxs),
-          f"{q}: JSON context match without the filler")
+    sides = [p[k].get("context", {}) for p in js["result"].get("pairs", []) for k in ("source", "target")]
+    check(len(sides) == 2 * len(pairs) and not any("filler" in c.get("match", "") for c in sides),
+          f"{q}: JSON pairs, each side's match without the filler")
 
     if a.server:   # the XML fragment flexicorp shows: the runs, a <gap/> between, not the filler
         with socket.socket() as sk:
@@ -441,10 +449,10 @@ def main():
                                  "--aligned-where", "text_lang=nld"))["result"]["hits"]
             check([h.get("aligned") for h in ra["hits"]] == [h.get("aligned") for h in cli] and len(cli) > 0,
                   "server /query \"aligned\": the same aligned sentences as the CLI")
-            frags = [h.get("fragment", "") for h in (r or {}).get("hits", [])]
-            check(len(frags) == len(pairs) and not any('form="filler"' in f or ">filler<" in f for f in frags)
-                  and sum("<gap/>" in f for f in frags) >= len(far),
-                  f"{q}: server fragments without the filler ({sum('<gap/>' in f for f in frags)} with <gap/>)")
+            frags = [p[k].get("fragment", "") for p in (r or {}).get("pairs", []) for k in ("source", "target")]
+            # (each side's fragment is its own context: filler next to a token may be in it, nothing lies between)
+            check(len(frags) == 2 * len(pairs) and all(frags),
+                  f"{q}: server pairs, a fragment per side ({len(frags)} fragments)")
         finally:
             srv.terminate()
             srv.wait()

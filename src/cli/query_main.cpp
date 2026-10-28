@@ -2568,6 +2568,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
             size_t max_m = 0;
             bool count_t = false;
             size_t max_total_cap = 0;
+            bool as_pairs = false;
             if (opts.dump_matches) {
                 max_m = 0;
                 count_t = true;
@@ -2595,12 +2596,14 @@ static void run_query(const Corpus& corpus, const std::string& input,
                     // Parallel queries fan out source hits into many aligned pairs.
                     // Pair-based pre-truncation skews pages toward the first source hit(s),
                     // so keep full pair sets and page by source-hit groups at render time.
-                    max_m = stmt.is_parallel ? 0 : (opts.offset + opts.limit);
+                    // `=:X` over an alignment layer is shown as pairs too (equiv_query_gives_pairs)
+                    as_pairs = !stmt.is_parallel && equiv_query_gives_pairs(corpus, stmt.query);
+                    max_m = (stmt.is_parallel || as_pairs) ? 0 : (opts.offset + opts.limit);
                     count_t = opts.total;
                     // --limit 0: no hits on the page, so none to fetch; max_m 0 would mean "every
                     // hit" and materialise millions of matches just to count them. Keep one and
                     // count the rest, as --count-only and the server's limit-0 total do.
-                    if (opts.limit == 0 && !stmt.is_parallel) {
+                    if (opts.limit == 0 && !stmt.is_parallel && !as_pairs) {
                         max_m = 1;
                         count_t = true;
                     }
@@ -2791,6 +2794,10 @@ static void run_query(const Corpus& corpus, const std::string& input,
                 *session.last = executor.execute(stmt.query, max_m, count_t, max_total_cap,
                                           opts.sample, opts.sample_seed, opts.threads,
                                           aggregate_by);
+                if (as_pairs) {
+                    matches_as_pairs(*session.last);
+                    session.last->total_count = session.last->parallel_matches.size();
+                }
                 }
                 if (sink_state.sink) {
                     sink_state.hits = executor.sink_hits();

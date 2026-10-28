@@ -43,7 +43,9 @@ std::optional<MatchSet> QueryExecutor::execute_class_join(const TokenQuery& q, s
         return std::nullopt;
     // a default within narrower than the layer's scope would cut the classes: the generic path drops it for such
     // layers (layer_crosses_default_within); one as wide or wider holds every class, so the classes stand as they are
-    return class_join(q, decl->attr, false, max_matches, max_total_cap, aggregate_by_fields);
+    // max_matches 0 is every hit, as in the rest of the executor (a named set, the pairs of an alignment layer)
+    return class_join(q, decl->attr, false, max_matches == 0 ? SIZE_MAX : max_matches, max_total_cap,
+                      aggregate_by_fields);
 }
 
 // `a:[A] with b:[B] :: a.X = b.X` (one token on either side, the same token or region attribute X): the pairs whose X
@@ -94,6 +96,31 @@ std::optional<MatchSet> QueryExecutor::execute_parallel_class_join(const TokenQu
         out.parallel_matches.emplace_back(std::move(a), std::move(b));
     }
     return out;
+}
+
+bool equiv_query_gives_pairs(const Corpus& corpus, const TokenQuery& q) {
+    if (q.tokens.size() != 2 || q.relations.size() != 1) return false;
+    const QueryRelation& rel = q.relations[0];
+    if (rel.type != RelationType::EQUIV || rel.layer.empty()) return false;
+    for (const auto& tok : q.tokens)
+        if (tok.is_anchor()) return false;
+    const RelationDecl* decl = corpus.relation(rel.layer);
+    return decl && decl->kind == RelationDecl::Kind::Equivalence && decl->scope != "s" && decl->scope != "text";
+}
+
+void matches_as_pairs(MatchSet& ms) {
+    ms.parallel = true;
+    ms.parallel_matches.reserve(ms.matches.size());
+    for (const Match& m : ms.matches) {
+        if (m.positions.size() < 2) continue;
+        Match a, b;
+        a.positions = {m.positions[0]};
+        a.span_ends = {m.span_ends.empty() ? m.positions[0] : m.span_ends[0]};
+        b.positions = {m.positions[1]};
+        b.span_ends = {m.span_ends.size() < 2 ? m.positions[1] : m.span_ends[1]};
+        ms.parallel_matches.emplace_back(std::move(a), std::move(b));
+    }
+    ms.matches.clear();
 }
 
 std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std::string& attr, bool with_self,

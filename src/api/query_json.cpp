@@ -237,6 +237,16 @@ std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
         auto t1 = std::chrono::high_resolution_clock::now();
         return {std::move(ms), std::chrono::duration<double, std::milli>(t1 - t0).count()};
     }
+    if (equiv_query_gives_pairs(corpus, prog[0].query)) {
+        // `=:X` over an alignment layer: pairs, every one (a page is cut in to_query_result_json), as for `with`
+        const size_t cap = opts.max_total;
+        MatchSet ms = executor.execute(prog[0].query, cap, true, cap, 0, 0, std::max(1u, opts.threads));
+        matches_as_pairs(ms);
+        if (cap > 0 && ms.parallel_matches.size() >= cap) ms.total_exact = false;
+        ms.total_count = ms.parallel_matches.size();
+        auto t1 = std::chrono::high_resolution_clock::now();
+        return {std::move(ms), std::chrono::duration<double, std::milli>(t1 - t0).count()};
+    }
     MatchSet ms = executor.execute(prog[0].query, max_m, count_t, max_total_cap, 0, 0,
                                    std::max(1u, opts.threads));
     auto t1 = std::chrono::high_resolution_clock::now();
@@ -500,7 +510,8 @@ std::string to_query_result_json(const Corpus& corpus,
                     }
                 };
                 add(prog[0].query);
-                source_tokens = group_names.size();
+                // `a:[…] =:X b:[…]` as pairs: a is the source, b the target
+                source_tokens = ms.parallel && !prog[0].is_parallel ? 1 : group_names.size();
                 if (prog[0].is_parallel) add(prog[0].target_query);
             }
         } catch (const std::exception&) {

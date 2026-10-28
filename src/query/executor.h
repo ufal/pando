@@ -688,6 +688,13 @@ bool compute_stats_rows(const Corpus& corpus, const MatchSet& ms, const NameInde
                         const std::vector<StatsMetricSpec>& metrics,
                         std::vector<StatsRowResult>& out_rows);
 
+// `a:[A] =:X b:[B]` with X an equivalence layer whose classes cross texts (scope corpus or external: tuid, s_tuid)
+// is an alignment: its result is source | target pairs, as `a:[A] with b:[B] :: a.X = b.X` gives them (2026-10-28).
+// A layer kept within a text or sentence (coreference) leaves the two tokens one hit. executor_classes.cpp.
+bool equiv_query_gives_pairs(const Corpus& corpus, const TokenQuery& q);
+// The two-token matches of such a query as pairs (MatchSet::parallel); the matches are moved out.
+void matches_as_pairs(MatchSet& ms);
+
 // ── Region cursor for amortized O(1) region lookup ──────────────────────
 //
 // When iterating sorted corpus positions (e.g. from an inverted index posting
