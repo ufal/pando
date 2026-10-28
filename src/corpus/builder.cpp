@@ -287,12 +287,17 @@ void CorpusBuilder::read_conllu(const std::string& path) {
                 continue;
             }
 
-            if (starts_with("newdoc id")) {
+            // a keyword alone or before its `= value` (`# newpar`, `# newdoc id = …`)
+            auto keyword = [&](std::string_view w) {
+                return starts_with(w) && (sv.size() == w.size() || sv[w.size()] == ' ' || sv[w.size()] == '\t' ||
+                                          sv[w.size()] == '=');
+            };
+            if (keyword("newdoc")) {
                 // CoNLL-U document boundary — structural region "doc", not "text".
                 // Do not close "text": file-level # newregion text can span the same tokens as doc
                 // so queries can use text_lang (etc.) alongside doc_id.
                 close_doc_region_if_open();
-                doc_id_ = parse_id_after_eq();
+                doc_id_ = parse_id_after_eq();   // `# newdoc id = …`, or a bare `# newdoc`
                 doc_region_start_ = builder_.corpus_size();
                 doc_region_attrs_.clear();
                 doc_region_attrs_.push_back({"id", doc_id_.empty() ? "_" : doc_id_});
@@ -302,14 +307,21 @@ void CorpusBuilder::read_conllu(const std::string& path) {
                 std::string t = parse_id_after_eq();
                 upsert_region_attr(sent_region_attrs_, "tuid", t);
                 pending_sent_tuid_ = t;
-            } else if (starts_with("newpar id")) {
+            } else if (starts_with("meta::")) {
+                // `# meta::KEY = value`: an attribute of the document (CorefUD, GUM)
+                const size_t eqp = sv.find('=');
+                const std::string key = eqp == std::string_view::npos ? "" : trim_sv(sv.substr(6, eqp - 6));
+                if (has_doc_region_ && is_region_attr_key_token(key))
+                    upsert_region_attr(doc_region_attrs_, key, parse_id_after_eq());
+            } else if (keyword("newpar")) {
                 if (has_par_region_) {
                     CorpusPos end = builder_.corpus_size() > 0 ? builder_.corpus_size() - 1 : 0;
                     if (end >= par_start_)
                         builder_.add_region("par", par_start_, end,
                                             std::vector<std::pair<std::string, std::string>>{{"id", par_id_}});
                 }
-                par_id_ = parse_id_after_eq();
+                par_id_ = parse_id_after_eq();   // `# newpar id = …`, or a bare `# newpar`
+                if (par_id_.empty()) par_id_ = "_";
                 par_start_ = builder_.corpus_size();
                 has_par_region_ = true;
             } else {
@@ -728,6 +740,8 @@ void CorpusBuilder::read_vertical(const std::string& path) {
 //   { "type": "region_end", ... }
 //   { "type": "region", "struct": "err", "spans": [[a,b],[c,d]], "attrs": {...} }
 //   — for token_groups (e.g. err), one event can list disjoint spans; same attrs apply.
+//   token events may carry "deps": "4:nsubj|7:nsubj:xsubj" (CoNLL-U DEPS, heads numbered as "head" is): the
+//   enhanced dependencies, stored as the relation layer `deps`.
 //   { "type": "relation", "layer": "rst", "source": 15, "target": 8, "label": "causal-cause" }
 //   — an edge of a pointer layer declared in the header ("relations": {"rst": "pointer,label=rel,scope=doc"}),
 //   corpus positions; equivalence layers are declared there too ("coref": "equivalence,attr=coref").
@@ -1026,7 +1040,7 @@ void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expec
     std::unordered_set<std::string> positional_set;  // fast lookup, for verbose mode
     // Reserved token keys that are not positional attributes
     static const std::unordered_set<std::string> reserved_keys{
-        "type", "tok_id", "head_tok_id", "head", "sent_id", "doc_id", "v", "tok_pos"
+        "type", "tok_id", "head_tok_id", "head", "deps", "sent_id", "doc_id", "v", "tok_pos"
     };
 
     // ── Common state ───────────────────────────────────────────────────
@@ -1035,6 +1049,8 @@ void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expec
         std::string tok_id;
         std::string head_tok_id;
         long long explicit_head = 0; // 0 = root
+        std::string deps;             // enhanced dependencies, CoNLL-U DEPS (`4:nsubj|7:nsubj:xsubj`); empty = none given
+        bool has_deps = false;
     };
     std::vector<PendingToken> sentence_buf;
 
@@ -1074,6 +1090,7 @@ void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expec
                 if (it != tok_id_to_local.end())
                     sentence_head_id = it->second + 1;
             }
+            if (pt.has_deps) builder_.set_token_deps(pt.deps);
             builder_.add_token(pt.attrs, sentence_head_id);
         }
         builder_.end_sentence(sent_attrs);
@@ -1350,6 +1367,11 @@ void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expec
         if (pt.head_tok_id.empty())
             pt.head_tok_id = json_get_string(ln, "head_tok_id");
         pt.explicit_head = get_num_field(ln, "head");
+        // "deps": CoNLL-U DEPS, heads numbered as `head` is (1-based within the sentence)
+        if (json_find_member(ln, "deps") != std::string::npos) {
+            pt.deps = json_get_string(ln, "deps");
+            pt.has_deps = true;
+        }
 
         sentence_buf.push_back(std::move(pt));
     };

@@ -371,6 +371,10 @@ if(BUILD_TESTING)
     add_test(NAME relation_events
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/discourse_layer_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
+    # CoNLL-U read by pando-index and the same data as JSONL (deps, bare newpar/newdoc, meta::): the same index
+    add_test(NAME conllu_jsonl_parity
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/conllu_jsonl_parity_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
     add_test(NAME class_join
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/class_join_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>

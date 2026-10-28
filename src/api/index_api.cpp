@@ -19,6 +19,10 @@ void PandoIndexBuilder::end_sentence() {
     builder_.end_sentence();
 }
 
+void PandoIndexBuilder::set_token_deps(const std::string& deps) {
+    builder_.set_token_deps(deps);
+}
+
 void PandoIndexBuilder::add_region(const std::string& type,
                                    CorpusPos start,
                                    CorpusPos end,

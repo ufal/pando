@@ -38,6 +38,10 @@ public:
     // have been added since the last end_sentence.
     void end_sentence();
 
+    // The next token's enhanced dependencies (CoNLL-U DEPS, `4:nsubj|7:nsubj:xsubj`, heads numbered within the
+    // sentence as in add_token), called before its add_token: stored as the relation layer `deps`.
+    void set_token_deps(const std::string& deps);
+
     // Add a structural region with multiple named attributes, e.g.:
     //   type = "text", attrs = {{"id","doc.xml"}, {"langcode","en"}}
     //
