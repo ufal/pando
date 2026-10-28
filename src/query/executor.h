@@ -920,6 +920,9 @@ public:
     std::optional<MatchSet> class_join(const TokenQuery& q, const std::string& attr, bool with_self,
                                        size_t max_matches, size_t max_total_cap,
                                        const std::vector<std::string>* aggregate_by_fields) const;
+    // `[A] within L [having [C]]` / `not within L …` with L an equivalence layer: rewritten into a position filter
+    // (the intervals of the classes in question). false when `within` names no equivalence layer.
+    bool rewrite_within_class(const TokenQuery& q, TokenQuery& out) const;
     // A relation layer of the query (in its chain or a `::` filter) whose declared scope is wider than the corpus's
     // default_within (scope corpus, or another region): the default does not apply to that query.
     bool layer_crosses_default_within(const TokenQuery& q) const;

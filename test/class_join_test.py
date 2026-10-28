@@ -17,6 +17,8 @@ indexes it as JSONL and declares `relation.tuid=equivalence,attr=tuid`. For each
     (a token with itself included) and of the general joins;
   * `=:s_tuid` over a region attribute (sentences aligned by `s_tuid`; one left unaligned) and `with … a.s_tuid =
     b.s_tuid`: the class join with the pairs of tokens in aligned sentences, as the reference and the general paths;
+  * `[A] within L [having [C]]` and `not within` with L = s_tuid / tuid: the hits in a class (with a C token), or
+    not, as the reference counts them;
   * `--aligned s_tuid` / `--aligned tuid` (with `--aligned-where`): each hit with the sentences aligned with it,
     the aligned tokens marked, as the reference gives them;
   * `count by` over fields of either token to give the buckets of a brute-force tally, fast and generic.
@@ -242,6 +244,27 @@ def main():
                  and toks[j][1] == "nld" and same_s(i, j))
     fast, slow = with_pairs(q, True), with_pairs(q, False)
     check(fast == ref and slow == ref, f"{q}: {len(fast)} pairs (general joins {len(slow)}, reference {len(ref)})")
+
+    # `within L [having [C]]` / `not within …` with L an equivalence layer: the hit's class (one with a C token)
+    def classes_of(i, layer):
+        return toks[i][2] if layer == "tuid" else ({stuids[i]} if stuids[i] else set())
+    for layer in ("s_tuid", "tuid"):
+        for having, hc in [(None, None), ('[form="huis"]', FORM("huis")), ('[text_lang="ces"]', LANG("ces"))]:
+            with_c = set()
+            if hc:
+                for j in range(n):
+                    if hc(j):
+                        with_c |= classes_of(j, layer)
+            for neg in (False, True):
+                q = f'[form="house"] {"not " if neg else ""}within {layer}' + (f" having {having}" if having else "")
+                inside = [i for i in range(n) if toks[i][0] == "house"
+                          and (classes_of(i, layer) & with_c if hc else classes_of(i, layer))]
+                want = len([i for i in range(n) if toks[i][0] == "house"]) - len(inside) if neg else len(inside)
+                got = run(q, True, "--count-only").split()
+                check(got[-1:] == [str(want)], f"{q}: {got[-1] if got else '?'} (reference {want})")
+    r = subprocess.run([a.pando, "--count-only", d, '[form="the"] [] within s_tuid'], capture_output=True, text=True)
+    check("one-token query" in r.stdout + r.stderr and "=:s_tuid" in r.stdout + r.stderr,
+          "two tokens within s_tuid: refused, pointing to =:s_tuid")
 
     # --aligned: each hit with the sentences aligned with it (aligned_pieces.h): over s_tuid the other sentences of
     # its sentence's class, over tuid the sentences of its tokens' class mates with those marked; --aligned-where

@@ -457,4 +457,65 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
     return result;
 }
 
+// `[A] within L [having [C]]` / `[A] not within L [having [C]]` with L an equivalence layer (`s_tuid`, `tuid`): a class
+// as the region. The hit lies in a class (that has a C token); `not within`: it does not (an unaligned token is in no
+// class). Rewritten as P4.14 rewrites `within R having C`: the classes in question give position intervals (their
+// regions, or their tokens), a filter on the hit's position the other paths read. A one-token query; two tokens in
+// one class are `a:[A] =:L b:[B]`.
+bool QueryExecutor::rewrite_within_class(const TokenQuery& q, TokenQuery& out) const {
+    if (q.within.empty() || corpus_.has_structure(q.within)) return false;
+    const RelationDecl* decl = corpus_.relation(q.within);
+    if (!decl || decl->kind != RelationDecl::Kind::Equivalence) return false;
+    if (q.tokens.size() != 1 || q.tokens[0].has_repetition() || q.tokens[0].is_anchor())
+        throw std::runtime_error("within " + q.within + " takes a one-token query; for two tokens in one class of " +
+                                 q.within + ": a:[…] =:" + q.within + " b:[…]");
+    EquivalenceClasses classes;
+    if (!classes.open(corpus_, decl->attr))
+        throw std::runtime_error("within " + q.within + ": the corpus has no attribute '" + decl->attr + "'");
+    // the classes in question: those with a C token, or all
+    std::vector<LexiconId> cls;
+    if (q.within_having) {
+        compile_conditions(q.within_having);
+        for (CorpusPos p : resolve_conditions(q.within_having))
+            classes.for_each_class(p, [&](LexiconId c) { cls.push_back(c); });
+        std::sort(cls.begin(), cls.end());
+        cls.erase(std::unique(cls.begin(), cls.end()), cls.end());
+    } else {
+        for (LexiconId c = 0; c < classes.class_count(); ++c)
+            if (classes.is_class(c)) cls.push_back(c);
+    }
+    // their positions as sorted, disjoint intervals
+    std::vector<std::pair<int64_t, int64_t>> spans;
+    for (LexiconId c : cls) {
+        if (classes.regions())
+            classes.for_each_region(c, [&](const Region& r) { spans.emplace_back(r.start, r.end); });
+        else
+            classes.for_each_member(c, [&](CorpusPos p) { spans.emplace_back(p, p); });
+    }
+    std::sort(spans.begin(), spans.end());
+    auto iv = std::make_shared<std::vector<std::pair<int64_t, int64_t>>>();
+    for (const auto& [a, b] : spans) {
+        if (!iv->empty() && a <= iv->back().second + 1) iv->back().second = std::max<int64_t>(iv->back().second, b);
+        else iv->push_back({a, b});
+    }
+    if (q.not_within) {   // the complement
+        auto co = std::make_shared<std::vector<std::pair<int64_t, int64_t>>>();
+        int64_t from = 0;
+        for (const auto& [a, b] : *iv) {
+            if (a > from) co->push_back({from, a - 1});
+            from = b + 1;
+        }
+        if (from < corpus_.size()) co->push_back({from, corpus_.size() - 1});
+        iv = std::move(co);
+    }
+    out = q;
+    out.within.clear();
+    out.not_within = false;
+    out.within_having = nullptr;
+    GlobalRegionFilter gf;
+    gf.positions = std::move(iv);
+    out.global_region_filters.push_back(std::move(gf));
+    return true;
+}
+
 }  // namespace pando
