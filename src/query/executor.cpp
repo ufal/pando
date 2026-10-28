@@ -1464,6 +1464,20 @@ static bool alignment_attr_is_supported(const Corpus& corpus, const std::string&
     return static_cast<bool>(resolve_region_attr_key(sa, parts.struct_name, parts.attr_name));
 }
 
+// `a.X = b.X` with X an attribute the corpus does not have: what to write instead (the alignment attributes it has)
+static std::string unknown_alignment_attr_message(const Corpus& corpus, const std::string& attr) {
+    std::vector<std::string> have;
+    for (const auto& r : corpus.relations())
+        if (r.kind == RelationDecl::Kind::Equivalence && alignment_attr_is_supported(corpus, r.attr)) have.push_back(r.attr);
+    std::string msg = ":: no attribute '" + attr + "' in this corpus";
+    if (!have.empty()) {
+        msg += "; it is aligned by " + have[0];
+        for (size_t i = 1; i < have.size(); ++i) msg += ", " + have[i];
+        msg += " (a." + have[0] + " = b." + have[0] + ", or a:[…] =:" + have[0] + " b:[…])";
+    }
+    return msg;
+}
+
 static std::optional<std::string_view> alignment_attr_value_at(
         const Corpus& corpus, const std::string& attr, CorpusPos pos) {
     if (corpus.has_attr(attr))
@@ -9270,6 +9284,20 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
     MatchSet result;
     result.num_tokens = source_query.tokens.size() + target_query.tokens.size();
     result.parallel = true;
+
+    // nothing links the two sides: every combination (a cross product), almost always a forgotten condition
+    if (merged_alignment.empty() && source_query.global_function_filters.empty()
+        && target_query.global_function_filters.empty())
+        result.warnings.push_back(
+            "`with` without a condition linking its two sides gives every combination of them; link them with "
+            ":: a.X = b.X (the same sentence: a.s_id = b.s_id; an aligned unit: a.s_tuid = b.s_tuid), "
+            "or use a:[...] =:L b:[...] for an alignment layer L");
+
+    // an attribute the corpus does not have is an error, not 0 hits (a corpus aligned by sentence has s_tuid, no tuid)
+    for (const auto& af : merged_alignment)
+        for (const std::string* a : {&af.attr1, &af.attr2})
+            if (!alignment_attr_is_supported(corpus_, normalize_attr(*a)))
+                throw std::runtime_error(unknown_alignment_attr_message(corpus_, normalize_attr(*a)));
 
     MatchSet source_set = execute(src_exec, 0, true, 0, 0, 0, 1, nullptr, true);
     NameIndexMap src_names = build_name_map(source_query);

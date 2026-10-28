@@ -2835,6 +2835,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                 // (a program's earlier query statements only feed later ones)
                 const bool final_query = si + 1 == prog.size();
                 if (opts.count_only && final_query) {
+                    for (const auto& w : session.last->warnings) std::cerr << "Warning: " << w << "\n";
                     std::cout << session.last->total_count << "\n";
                     return;
                 }
@@ -2862,6 +2863,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                         (!is_named_assignment || (opts.api && is_last_statement))
                         && (is_last_statement || opts.print_all_program_steps);
                 const bool should_emit_output = !opts.api || si == last_json_output_si;
+                for (const auto& w : session.last->warnings) std::cerr << "Warning: " << w << "\n";
                 if (emit_query_concordance && should_emit_output) {
                     if (out_timing) {
                         auto t2 = std::chrono::high_resolution_clock::now();

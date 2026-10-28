@@ -525,6 +525,11 @@ std::string to_query_result_json(const Corpus& corpus,
             out << "]\n    }";
         }
         if (!extra_result_fields.empty()) out << ",\n    " << extra_result_fields;
+        if (!ms.warnings.empty()) {   // only when there are any: the result shape is otherwise unchanged
+            out << ",\n    \"warnings\": [";
+            for (size_t i = 0; i < ms.warnings.size(); ++i) out << (i ? ", " : "") << jstr(ms.warnings[i]);
+            out << "]";
+        }
         out << "\n  }\n}\n";
     };
 

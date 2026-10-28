@@ -764,6 +764,9 @@ struct MatchSet {
     /// P4.1: the path that produced this result honoured QueryExecutor's position
     /// range (internal to the partitioned driver; always false otherwise).
     bool range_ok = false;
+    /// Notes for the user on a query that ran but is probably not what was meant (a `with`
+    /// whose sides nothing links); the JSON emitters write them as "warnings" when present.
+    std::vector<std::string> warnings;
     /// P4.1: number of position ranges the query was split into (1 = not split).
     unsigned partitions = 1;
 };

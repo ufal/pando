@@ -372,6 +372,10 @@ if(BUILD_TESTING)
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/discourse_layer_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
     # CoNLL-U read by pando-index and the same data as JSONL (deps, bare newpar/newdoc, meta::): the same index
+    # `with`: an unknown linking attribute is an error with a hint; nothing linking the sides: a warning
+    add_test(NAME with_conditions
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/with_conditions_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
     add_test(NAME conllu_jsonl_parity
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/conllu_jsonl_parity_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
