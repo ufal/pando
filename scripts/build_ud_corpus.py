@@ -17,6 +17,11 @@ Defaults: --data-dir $PANDO_UD_DATA or ~/ud-data; --output-index <data-dir>/pand
 --pando-index $PANDO_INDEX, <repo>/build/pando-index, or pando-index on PATH.
 An archive already in --data-dir is not downloaded again.
 
+With flexencoder (--flexencoder PATH, $FLEXENCODER, or flexencoder on PATH; --no-flexencoder to leave it out) the
+treebanks are read by flexencoder's CoNLL-U reader, which also turns the annotation conventions in MISC into layers
+(CorefUD `Entity=`: mentions and the coref equivalence layer; GUM `Discourse=`: discourse units and the rst layer).
+Everything else comes out as pando-index's own CoNLL-U reader gives it, and pando-index still writes the index.
+
 By default (no --ud-archive-url): fetches https://universaldependencies.org/download.html,
 takes the latest *published* release line ("Version X.Y treebanks are available at …"),
 resolves the treebank archive on LINDAT via the REST API (typically ud-treebanks-vX.Y.tgz).
@@ -506,6 +511,35 @@ def run_pando_index(pando_index: Path, input_dir: Path, output_index: Path) -> N
     subprocess.run(cmd, check=True)
 
 
+def flexencoder_reads_conllu(exe: Path) -> bool:
+    """Whether this flexencoder has the CoNLL-U input (--conllu)."""
+    try:
+        r = subprocess.run([str(exe), "--help"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "--conllu" in (r.stdout + r.stderr)
+
+
+def default_flexencoder() -> Path | None:
+    """$FLEXENCODER, or flexencoder on PATH."""
+    env = os.environ.get("FLEXENCODER")
+    if env:
+        return Path(env).expanduser()
+    found = shutil.which("flexencoder")
+    return Path(found) if found else None
+
+
+def run_flexencoder(flexencoder: Path, pando_index: Path, input_dir: Path, output_index: Path) -> None:
+    # flexencoder builds through the Pando library it was built with, or streams its events to the pando-index on
+    # PATH: this script's pando-index first on PATH
+    output_index.parent.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env["PATH"] = str(pando_index.parent) + os.pathsep + env.get("PATH", "")
+    cmd = [str(flexencoder), "--conllu", str(input_dir), "--output-pando", str(output_index)]
+    print("Running:", " ".join(cmd))
+    subprocess.run(cmd, check=True, env=env, cwd=str(output_index.parent))
+
+
 def default_pando_index() -> Path | None:
     """$PANDO_INDEX, this repository's build/pando-index, or pando-index on PATH."""
     env = os.environ.get("PANDO_INDEX")
@@ -543,6 +577,18 @@ def main() -> int:
         type=Path,
         help="pando-index executable (default: $PANDO_INDEX, the one next to this script, "
         "<repo>/build/pando-index, or pando-index on PATH)",
+    )
+    p.add_argument(
+        "--flexencoder",
+        default=None,
+        type=Path,
+        help="flexencoder executable, to index MISC annotation conventions as layers too "
+        "(default: $FLEXENCODER, or flexencoder on PATH)",
+    )
+    p.add_argument(
+        "--no-flexencoder",
+        action="store_true",
+        help="Index with pando-index's own CoNLL-U reader, even when flexencoder is there",
     )
     p.add_argument(
         "--output-index",
@@ -631,7 +677,17 @@ def main() -> int:
                   "or pass --pando-index PATH", file=sys.stderr)
             return 1
         pando_index = pando_index.resolve()
+    flexencoder = None
+    if not args.no_flexencoder and not args.inject_only:
+        flexencoder = args.flexencoder.expanduser() if args.flexencoder else default_flexencoder()
+        if flexencoder is not None and not (flexencoder.is_file() and flexencoder_reads_conllu(flexencoder)):
+            if args.flexencoder:
+                print(f"{flexencoder}: not a flexencoder with CoNLL-U input (--conllu)", file=sys.stderr)
+                return 1
+            flexencoder = None
     print(f"Data dir:    {data_dir}\nIndex:       {output_index}\npando-index: {pando_index}")
+    if not args.inject_only:
+        print(f"Reader:      {'flexencoder ' + str(flexencoder) if flexencoder else 'pando-index (CoNLL-U)'}")
 
     ud_root: Path | None = args.ud_root.resolve() if args.ud_root else None
 
@@ -718,11 +774,16 @@ def main() -> int:
         print(f"UD root: {ud_root}")
 
     if args.dry_run:
-        print(f"[dry-run] would run pando-index {ud_root} {output_index}")
+        print(f"[dry-run] would run {'flexencoder --conllu' if flexencoder else 'pando-index'} {ud_root} {output_index}")
         return 0
 
     assert output_index is not None
-    run_pando_index(pando_index, ud_root, output_index)
+    if flexencoder:
+        run_flexencoder(flexencoder, pando_index, ud_root, output_index)
+    else:
+        run_pando_index(pando_index, ud_root, output_index)
+        print("Note: coreference (CorefUD Entity=) and discourse (GUM Discourse=) layers are indexed when "
+              "flexencoder is installed (--flexencoder PATH).")
     print(f"Done. Try:\n  pando {output_index} '[upos=\"VERB\"]' --total")
     return 0
 

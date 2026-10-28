@@ -8,6 +8,8 @@
 #   ./install.sh --ud                 also download the latest Universal Dependencies
 #                                     release and index it (~/ud-data/pando_idx)
 #   ./install.sh --ud-dir DIR         … into DIR instead (implies --ud)
+#   ./install.sh --flexencoder PATH   … read UD with flexencoder (default: flexencoder on
+#                                     PATH, if any): coreference / discourse layers too
 #   ./install.sh --test               run the test suite after building
 #
 #   ./install.sh --allow-std-regex    build without RE2 (std::regex: regex queries
@@ -23,6 +25,7 @@ PREFIX="${HOME}/.local"
 INSTALL=1
 UD=0
 UD_DIR=""
+FLEXENCODER=""
 TEST=0
 BUILD_DIR=build
 RE2_MODE=ON
@@ -32,10 +35,11 @@ while [[ $# -gt 0 ]]; do
     --no-install) INSTALL=0; shift ;;
     --ud) UD=1; shift ;;
     --ud-dir) UD=1; UD_DIR="$2"; shift 2 ;;
+    --flexencoder) FLEXENCODER="$2"; shift 2 ;;
     --test) TEST=1; shift ;;
     --build-dir) BUILD_DIR="$2"; shift 2 ;;
     --allow-std-regex) RE2_MODE=AUTO; shift ;;
-    -h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1 (see ./install.sh --help)" >&2; exit 2 ;;
   esac
 done
@@ -97,6 +101,7 @@ if [[ $UD -eq 1 ]]; then
   echo "==> Universal Dependencies corpus"
   UD_ARGS=(--pando-index "$BIN/pando-index")
   [[ -n "$UD_DIR" ]] && UD_ARGS+=(--data-dir "$UD_DIR")
+  [[ -n "$FLEXENCODER" ]] && UD_ARGS+=(--flexencoder "$FLEXENCODER")
   python3 scripts/build_ud_corpus.py "${UD_ARGS[@]}"
 fi
 
