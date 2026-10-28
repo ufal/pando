@@ -45,7 +45,9 @@ int main() {
     assert(take_language_prefix(t).empty() && t == "[lemma=\"PMLTQ\"]");
     t = "pmltq a-node []"; // capitals only
     assert(take_language_prefix(t).empty());
-    t = "MANATEE [lemma=\"x\"]"; // not a pando language
+    t = "MANATEE [lemma=\"x\"]";
+    assert(take_language_prefix(t) == "manatee" && t == "[lemma=\"x\"]");
+    t = "SKETCH [lemma=\"x\"]"; // not a prefix
     assert(take_language_prefix(t).empty());
     t = "PMLTQ";
     assert(take_language_prefix(t).empty() && t == "PMLTQ");

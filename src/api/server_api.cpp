@@ -621,7 +621,7 @@ ServerResponse ServerApi::run(const std::string& body) {
     // the program's language (pando-cql by default; cwb-cql, pmltq, tiger: query/dialect/dialect.h)
     opts.dialect = json_extract_str(body, "dialect");
     if (!opts.dialect.empty() && normalize_dialect(opts.dialect).empty())
-        return json_error(400, "unknown query language '" + opts.dialect + "' (pando knows pando-cql, cwb-cql, pmltq, tiger)");
+        return json_error(400, "unknown query language '" + opts.dialect + "' (pando knows pando-cql, cwb-cql, manatee-cql, pmltq, tiger)");
     // or as the program's first word (`PMLTQ a-node [...]; freq by lemma`): it wins
     if (std::string named = take_language_prefix(cql); !named.empty()) opts.dialect = named;
     const RequestLimits rl = request_limits(body);
@@ -724,7 +724,7 @@ ServerResponse ServerApi::query(const std::string& body) {
     // the query's language (pando-cql by default; cwb-cql, pmltq, tiger: query/dialect/dialect.h)
     opts.dialect = json_extract_str(body, "dialect");
     if (!opts.dialect.empty() && normalize_dialect(opts.dialect).empty())
-        return json_error(400, "unknown query language '" + opts.dialect + "' (pando knows pando-cql, cwb-cql, pmltq, tiger)");
+        return json_error(400, "unknown query language '" + opts.dialect + "' (pando knows pando-cql, cwb-cql, manatee-cql, pmltq, tiger)");
     // or as the query's first word (`PMLTQ a-node [...]`): it wins
     if (std::string named = take_language_prefix(query_text); !named.empty()) opts.dialect = named;
     opts.sample    = json_extract_num(body, "sample", 0);

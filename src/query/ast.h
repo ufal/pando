@@ -349,6 +349,14 @@ struct TokenQuery {
     std::vector<QueryRelation> relations;  // relations[i] is between tokens[i] and tokens[i+1]
     std::string                within;     // "s", "p", "text" or empty
     bool                       not_within = false;  // "not within s"
+    /// Manatee's `within` (dialect/manatee): a merge of the hits (by start, then end) with the regions that, once a
+    /// hit runs past its region's end, moves on to the region holding that end and skips the hits starting before
+    /// it. For a variable-length pattern it drops hits that pando's `within` keeps (executor_manatee.cpp).
+    bool                       manatee_within = false;
+    /// Manatee's `A | B` between sequences and its repeated groups `(A B)+`, `(A B?)?`: the query is the union of
+    /// these token sequences besides `tokens`, a hit being a (start, end) pair counted once however many of them
+    /// find it (executor_manatee.cpp). Within, filters and names as for `tokens`.
+    std::vector<std::vector<QueryToken>> union_alternatives;
     ConditionPtr               within_having;  // "within s having [cond]": existential check on region
     std::vector<ContainingClause>     containing_clauses;  // "containing s", "containing subtree [cond]"
     std::vector<GlobalRegionFilter>   global_region_filters;    // :: match.text_year > 2000

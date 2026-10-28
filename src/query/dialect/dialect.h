@@ -14,8 +14,8 @@ class Corpus;
 std::string normalize_dialect(const std::string& name);
 
 /// A query that names its language as its first word, in capitals and followed by white space
-/// (`PMLTQ a-node [ lemma = "be" ]`; PANDO, CWB, CQP, PMLTQ, PML-TQ, TIGER — FQS's list without
-/// MANATEE): the word is taken off `text` and returned as the dialect's name; "" (text unchanged)
+/// (`PMLTQ a-node [ lemma = "be" ]`; PANDO, CWB, CQP, PMLTQ, PML-TQ, TIGER, MANATEE — FQS's list):
+/// the word is taken off `text` and returned as the dialect's name; "" (text unchanged)
 /// for any other query. For front ends without a language choice (KonText's CQL field).
 std::string take_language_prefix(std::string& text);
 

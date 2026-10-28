@@ -3,6 +3,7 @@
 
 #include "corpus/corpus.h"
 #include "query/dialect/cwb/cwb_translate.h"
+#include "query/dialect/manatee/manatee_translate.h"
 #include "query/dialect/pmltq/pmltq_translate.h"
 #include "query/dialect/tiger/tiger_translate.h"
 
@@ -21,11 +22,12 @@ std::string normalize_dialect(const std::string& name) {
     if (d == "cwb" || d == "cwb-cql" || d == "cqp") return "cwb";
     if (d == "pmltq" || d == "pml-tq") return "pmltq";
     if (d == "tiger" || d == "tigersearch") return "tiger";
+    if (d == "manatee" || d == "manatee-cql" || d == "sketch-cql") return "manatee";
     return "";
 }
 
 std::string take_language_prefix(std::string& text) {
-    static const char* const words[] = {"PANDO", "CWB", "CQP", "PMLTQ", "PML-TQ", "TIGER"};
+    static const char* const words[] = {"PANDO", "CWB", "CQP", "PMLTQ", "PML-TQ", "TIGER", "MANATEE"};
     size_t b = 0;
     while (b < text.size() && std::isspace(static_cast<unsigned char>(text[b]))) ++b;
     size_t e = b;
@@ -66,6 +68,7 @@ Program parse_dialect_only(const std::string& text, const std::string& d, Parser
                            const Corpus* corpus, int debug_level, std::string* trace_out) {
     if (d == "cwb") return translate_cwb_program(text, debug_level, trace_out);
     if (d == "pmltq") return translate_pmltq_program(text, debug_level, trace_out);
+    if (d == "manatee") return translate_manatee_program(text, debug_level, trace_out);
     if (d == "tiger") {
         // the node layer's category attribute: `cat` (TEITOK) when the corpus has it, else `type`
         std::string cat_attr = "type";
@@ -87,7 +90,7 @@ Program parse_in_dialect(const std::string& text, const std::string& dialect, Pa
         return parser.parse();
     }
     if (d.empty())
-        throw std::runtime_error("Unknown query language '" + dialect + "' (pando knows pando-cql, cwb-cql, pmltq, tiger)");
+        throw std::runtime_error("Unknown query language '" + dialect + "' (pando knows pando-cql, cwb-cql, manatee-cql, pmltq, tiger)");
     try {
         return parse_dialect_only(text, d, parse_opts, corpus, debug_level, trace_out);
     } catch (const std::runtime_error&) {

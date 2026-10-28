@@ -8458,6 +8458,8 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
     if (TokenQuery hq; rewrite_head_layer(query, hq))
         return execute(hq, max_matches, count_total, max_total_cap, sample_size, random_seed, num_threads,
                        aggregate_by_fields, skip_name_validation);
+    if (auto ms = execute_manatee(query, max_matches, count_total, max_total_cap, sample_size, aggregate_by_fields))
+        return std::move(*ms);
     if (TokenQuery cq; rewrite_within_class(query, cq))
         return execute(cq, max_matches, count_total, max_total_cap, sample_size, random_seed, num_threads,
                        aggregate_by_fields, skip_name_validation);

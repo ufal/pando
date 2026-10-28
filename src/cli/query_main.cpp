@@ -69,7 +69,7 @@ struct Options {
     // with it over that equivalence layer (aligned_pieces.h)
     std::string aligned, aligned_where;
     size_t aligned_max = 0;
-    std::string cql_dialect = "native";  // native | cwb | pmltq | tiger
+    std::string cql_dialect = "native";  // native | cwb | manatee | pmltq | tiger
     bool json    = false;
     // Debug verbosity: 0 = off, 1 = basic (plan, timing), 2+ = more detail in future
     int  debug_level = 0;
@@ -2466,12 +2466,16 @@ static bool query_has_labeled_token(const TokenQuery& q, const std::string& labe
 
 static void run_query(const Corpus& corpus, const std::string& input,
                       Options& opts, Session& session, QueryTiming* out_timing = nullptr) {
-    // the dialect (--cql): the same entry point as the server's "dialect" (query/dialect/dialect.h)
+    // the dialect (--cql, or the query's first word in capitals: `MANATEE [lemma="x"]`, `PMLTQ a-node […]`): the
+    // same entry point as the server's "dialect" (query/dialect/dialect.h)
     ParserOptions parse_opts{opts.strict_quoted_strings};
     if (normalize_dialect(opts.cql_dialect).empty())
         throw std::runtime_error("Unknown --cql dialect: " + opts.cql_dialect);
+    std::string text = input;
+    std::string dialect = opts.cql_dialect;
+    if (std::string named = take_language_prefix(text); !named.empty()) dialect = named;
     std::string dialect_trace;
-    Program prog = parse_in_dialect(input, opts.cql_dialect, parse_opts, &corpus, opts.debug_level,
+    Program prog = parse_in_dialect(text, dialect, parse_opts, &corpus, opts.debug_level,
                                     opts.debug_level > 0 ? &dialect_trace : nullptr);
     if (opts.debug_level > 0 && !dialect_trace.empty())
         std::cerr << dialect_trace;
@@ -3781,11 +3785,13 @@ static Options parse_args(int argc, char* argv[]) {
                   << "  --api            API mode: JSON only, single-object responses\n"
                   << "  --debug[=N]      Include debug info (plan, timing, cardinalities); N>=1 for verbosity\n"
 #if defined(PANDO_WITH_CWB_DIALECT)
-                  << "  --cql native|cwb|pmltq|tiger  Query language front-end (default: native; "
-                     "cwb=CWB/CQP subset, pmltq=PML-TQ, tiger=TIGERSearch-style macros for constituency)\n"
+                  << "  --cql native|cwb|manatee|pmltq|tiger  Query language front-end (default: native; "
+                     "cwb=CWB/CQP subset, manatee=Manatee CQL (Sketch Engine, KonText), pmltq=PML-TQ, "
+                     "tiger=TIGERSearch-style macros for constituency); a query may also name its language "
+                     "as its first word: MANATEE …, PMLTQ …, CWB …\n"
 #else
-                  << "  --cql native|pmltq|tiger  Query language front-end (default: native; pmltq=PML-TQ, "
-                     "tiger=TIGERSearch-style macros; cwb: -DPANDO_CWB_DIALECT=ON)\n"
+                  << "  --cql native|manatee|pmltq|tiger  Query language front-end (default: native; "
+                     "manatee=Manatee CQL, pmltq=PML-TQ, tiger=TIGERSearch-style macros; cwb: -DPANDO_CWB_DIALECT=ON)\n"
 #endif
                   << "  --pmltq-export-sql  With --cql pmltq: print ClickPMLTQ SQL only (needs PMLTQ_GOLD_JS_DIR + "
                      "pmltq2sql-optimized.js); skips corpus load; use corpus path '-' or any placeholder\n"

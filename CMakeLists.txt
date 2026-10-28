@@ -40,6 +40,10 @@ option(PANDO_CWB_DIALECT "Build CWB/CQP lexer, parser, and translate_cwb_program
 # PML-TQ dialect: lexer/parser scaffold + translate_pmltq_program (see dev/PMLTQ-ROADMAP.md).
 option(PANDO_PMLTQ_DIALECT "Build PML-TQ lexer, parser stub, and translate_pmltq_program" ON)
 
+# Manatee CQL dialect (Sketch Engine / KonText): written from manatee-open's grammar (query/cqpeval.y) as a
+# specification, see dev/CQL-MANATEE-DIALECT.md.
+option(PANDO_MANATEE_DIALECT "Build the Manatee CQL lexer, parser and translate_manatee_program" ON)
+
 set(PANDO_WITH_RE2 OFF)
 string(TOUPPER "${PANDO_USE_RE2}" _pando_re2_mode)
 if(NOT _pando_re2_mode STREQUAL "OFF" AND NOT _pando_re2_mode STREQUAL "FALSE" AND NOT _pando_re2_mode STREQUAL "0")
@@ -110,6 +114,20 @@ else()
 endif()
 target_include_directories(pando_pmltq_dialect PUBLIC src)
 
+if(PANDO_MANATEE_DIALECT)
+    add_library(pando_manatee_dialect STATIC
+        src/query/dialect/manatee/manatee_lexer.cpp
+        src/query/dialect/manatee/manatee_parser.cpp
+        src/query/dialect/manatee/manatee_lower.cpp
+        src/query/dialect/manatee/manatee_translate.cpp
+    )
+else()
+    add_library(pando_manatee_dialect STATIC
+        src/query/dialect/manatee/manatee_translate_stub.cpp
+    )
+endif()
+target_include_directories(pando_manatee_dialect PUBLIC src)
+
 # Build identity (git describe) for --version, /health, /info: regenerated on
 # every build, rewritten only when it changes.
 set(PANDO_BUILD_INFO_CPP "${CMAKE_CURRENT_BINARY_DIR}/pando_build_info.cpp")
@@ -167,6 +185,7 @@ add_library(pando_core STATIC
     src/query/executor.cpp
     src/query/executor_layers.cpp
     src/query/executor_classes.cpp
+    src/query/executor_manatee.cpp
     src/query/executor_aggregate.cpp
     src/query/executor_sort.cpp
     src/query/sort_field.cpp
@@ -176,7 +195,7 @@ add_library(pando_core STATIC
 )
 target_include_directories(pando_core PUBLIC src)
 add_dependencies(pando_core pando_build_info)
-target_link_libraries(pando_core PUBLIC pando_cwb_dialect pando_pmltq_dialect)
+target_link_libraries(pando_core PUBLIC pando_cwb_dialect pando_pmltq_dialect pando_manatee_dialect)
 
 if(PANDO_WITH_RE2)
     target_compile_definitions(pando_core PUBLIC PANDO_USE_RE2)
@@ -250,6 +269,12 @@ if(BUILD_TESTING AND PANDO_CWB_DIALECT)
     add_executable(cwb_dialect_test src/query/dialect/cwb/cwb_dialect_test.cpp)
     target_link_libraries(cwb_dialect_test PRIVATE pando_core)
     add_test(NAME cwb_dialect COMMAND cwb_dialect_test)
+endif()
+
+if(BUILD_TESTING AND PANDO_MANATEE_DIALECT)
+    add_executable(manatee_dialect_test src/query/dialect/manatee/manatee_dialect_test.cpp)
+    target_link_libraries(manatee_dialect_test PRIVATE pando_manatee_dialect)
+    add_test(NAME manatee_dialect COMMAND manatee_dialect_test)
 endif()
 
 if(BUILD_TESTING AND PANDO_PMLTQ_DIALECT)
@@ -337,7 +362,12 @@ if(BUILD_TESTING)
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
                 --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/deps_sample.conllu)
         # Equivalence layers (equivalence_layer.*): =:coref over an attribute's classes, declared with --relation
-        add_test(NAME class_join
+        if(PANDO_MANATEE_DIALECT)
+        add_test(NAME manatee_dialect_corpus
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/manatee_dialect_corpus_test.py
+                    --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
+    endif()
+    add_test(NAME class_join
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/class_join_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
                 --server $<TARGET_FILE:pando-server>)
@@ -443,6 +473,9 @@ endif()
 install(TARGETS pando_cwb_dialect
     ARCHIVE DESTINATION lib
     COMPONENT cwb_dialect)
+install(TARGETS pando_manatee_dialect
+    ARCHIVE DESTINATION lib
+    COMPONENT manatee_dialect)
 install(TARGETS pando_pmltq_dialect
     ARCHIVE DESTINATION lib
     COMPONENT pmltq_dialect)

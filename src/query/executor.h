@@ -907,6 +907,11 @@ public:
     // `a:[A] =:X b:[B]` over an equivalence layer X: the class join (executor_classes.cpp), each class touched by
     // the more selective side read once; exact total, page in hit order. nullopt when the query is not of that
     // shape (or aggregates, samples, or the fast paths are off).
+    // The Manatee CQL dialect's unions (TokenQuery::union_alternatives) and Manatee's `within`
+    // (TokenQuery::manatee_within), executor_manatee.cpp; nullopt when the query has neither (or samples)
+    std::optional<MatchSet> execute_manatee(const TokenQuery& q, size_t max_matches, bool count_total,
+                                            size_t max_total_cap, size_t sample_size,
+                                            const std::vector<std::string>* aggregate_by_fields);
     std::optional<MatchSet> execute_class_join(const TokenQuery& q, size_t max_matches, size_t max_total_cap,
                                                size_t sample_size,
                                                const std::vector<std::string>* aggregate_by_fields) const;
