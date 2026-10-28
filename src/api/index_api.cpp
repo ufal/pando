@@ -1,9 +1,13 @@
 #include "api/index_api.h"
 
+#include "index/index_upgrade.h"
+
+#include <stdexcept>
+
 namespace pando {
 
 PandoIndexBuilder::PandoIndexBuilder(const std::string& output_dir)
-    : builder_(output_dir) {}
+    : output_dir_(output_dir), builder_(output_dir) {}
 
 void PandoIndexBuilder::add_token(
         const std::unordered_map<std::string, std::string>& attrs,
@@ -53,6 +57,8 @@ void PandoIndexBuilder::add_relation(const std::string& layer, CorpusPos source,
 
 void PandoIndexBuilder::finalize() {
     builder_.finalize();
+    if (upgrade_index(output_dir_, true) != 0 || measure_declared_equivalences(output_dir_, true) != 0)
+        throw std::runtime_error("pando: the derived index files of " + output_dir_ + " could not be written");
 }
 
 CorpusPos PandoIndexBuilder::corpus_size() const {

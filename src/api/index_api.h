@@ -69,14 +69,16 @@ public:
     void add_relation(const std::string& layer, CorpusPos source, CorpusPos target, const std::string& label);
 
     // Finalize the index: sort lexicons, remap .dat IDs, build reverse
-    // indexes and write corpus.info. Must be called exactly once when
-    // all tokens and regions have been added.
+    // indexes and write corpus.info, then add what pando-index adds after a build (index_upgrade.h: dependency
+    // files, relation.head, head attributes, folds, bitmaps, edge postings; equivalence layers measured).
+    // Must be called exactly once when all tokens and regions have been added. Throws on an error.
     void finalize();
 
     // Current corpus size (number of tokens) seen so far.
     CorpusPos corpus_size() const;
 
 private:
+    std::string output_dir_;
     StreamingBuilder builder_;
 };
 

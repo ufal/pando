@@ -166,6 +166,7 @@ add_library(pando_core STATIC
     src/index/packed_postings.cpp
     src/index/packed_dat.cpp
     src/index/index_publish.cpp
+    src/index/index_upgrade.cpp
     src/index/head_attr.cpp
     src/index/positional_attr.cpp
     src/index/structural_attr.cpp
