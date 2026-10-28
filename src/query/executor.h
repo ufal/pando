@@ -907,6 +907,13 @@ public:
     // `a:[A] =:X b:[B]` over an equivalence layer X: the class join (executor_classes.cpp), each class touched by
     // the more selective side read once; exact total, page in hit order. nullopt when the query is not of that
     // shape (or aggregates, samples, or the fast paths are off).
+    // Manatee's aligned corpora (TokenQuery::aligned_parts, `A within ces: B`), executor_aligned.cpp: A joined with
+    // the segments aligned (s_tuid) with those of the corpus `ces` holding a hit of B; nullopt without them
+    std::optional<MatchSet> execute_aligned(const TokenQuery& q, size_t max_matches, bool count_total,
+                                            size_t max_total_cap, size_t sample_size,
+                                            const std::vector<std::string>* aggregate_by_fields);
+    // an aligned corpus's name as a region filter on a hit: the document attribute that has that value
+    GlobalRegionFilter aligned_corpus_filter(const std::string& name, CompOp op) const;
     // The Manatee CQL dialect's unions (TokenQuery::union_alternatives) and Manatee's `within`
     // (TokenQuery::manatee_within), executor_manatee.cpp; nullopt when the query has neither (or samples)
     std::optional<MatchSet> execute_manatee(const TokenQuery& q, size_t max_matches, bool count_total,

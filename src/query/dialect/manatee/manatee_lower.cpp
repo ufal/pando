@@ -314,8 +314,21 @@ private:
     void clause(const Clause& c, TokenQuery& tq) {
         const Suffix& s = c.suffix;
         const char* kw = c.containing ? "containing" : "within";
-        if (s.kind == Suffix::Kind::Aligned)
-            unsupported(std::string(kw) + " an aligned corpus (" + s.corpus + ": …)", s.pos);
+        if (s.kind == Suffix::Kind::Aligned) {
+            if (c.containing) unsupported("containing an aligned corpus (" + s.corpus + ": …)", s.pos);
+            AlignedPart part;
+            part.corpus = s.corpus;
+            part.negated = c.negated;
+            auto sub = std::make_shared<TokenQuery>();
+            std::vector<Tokens> alts = expand_sequence(s.sequence);
+            sub->tokens = std::move(alts[0]);
+            for (size_t i = 1; i < alts.size(); ++i) sub->union_alternatives.push_back(std::move(alts[i]));
+            part.query = std::move(sub);
+            tq.aligned_parts.push_back(std::move(part));
+            return;
+        }
+        if (!tq.aligned_parts.empty())
+            unsupported(std::string(kw) + " a structure after an aligned corpus", s.pos);
         if (s.kind != Suffix::Kind::Sequence)
             unsupported(std::string(kw) + " a number of tokens", s.pos);
         const auto& alts = s.sequence.alternatives;

@@ -186,6 +186,7 @@ add_library(pando_core STATIC
     src/query/executor_layers.cpp
     src/query/executor_classes.cpp
     src/query/executor_manatee.cpp
+    src/query/executor_aligned.cpp
     src/query/executor_aggregate.cpp
     src/query/executor_sort.cpp
     src/query/sort_field.cpp

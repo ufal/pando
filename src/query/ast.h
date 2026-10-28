@@ -342,6 +342,16 @@ struct ContainingClause {
     bool negated = false;        // "not containing ..."
 };
 
+// Manatee's aligned corpora (dialect/manatee): `A within ces: B` — A inside a segment whose aligned segment in the
+// corpus `ces` has a hit of B; `!within`: not inside one (executor_aligned.cpp). In pando's single index the
+// aligned segments are an `s_tuid` class and `ces` a value of a document attribute (`text_iso="ces"`).
+struct TokenQuery;
+struct AlignedPart {
+    std::string corpus;                  // as written: resolved against the document attributes
+    bool negated = false;                // !within
+    std::shared_ptr<TokenQuery> query;   // B
+};
+
 // ── The full token query ────────────────────────────────────────────────
 
 struct TokenQuery {
@@ -357,6 +367,8 @@ struct TokenQuery {
     /// these token sequences besides `tokens`, a hit being a (start, end) pair counted once however many of them
     /// find it (executor_manatee.cpp). Within, filters and names as for `tokens`.
     std::vector<std::vector<QueryToken>> union_alternatives;
+    /// Manatee's `within corpus: query` clauses, applied left to right after `within` (AlignedPart)
+    std::vector<AlignedPart> aligned_parts;
     ConditionPtr               within_having;  // "within s having [cond]": existential check on region
     std::vector<ContainingClause>     containing_clauses;  // "containing s", "containing subtree [cond]"
     std::vector<GlobalRegionFilter>   global_region_filters;    // :: match.text_year > 2000

@@ -117,6 +117,17 @@ int main() {
         q = tq("[upos=\"VERB\"] containing <s/>");
         check(q.containing_clauses.size() == 1 && q.containing_clauses[0].region == "s", "containing <s/>");
     }
+    // aligned corpora
+    {
+        TokenQuery q = tq("[lemma=\"house\"] within ces: [lemma=\"dům\"]");
+        check(q.aligned_parts.size() == 1 && q.aligned_parts[0].corpus == "ces" && !q.aligned_parts[0].negated &&
+                  q.aligned_parts[0].query->tokens.size() == 1, "within ces: […]");
+        q = tq("[lemma=\"house\"] within ! ces: [lemma=\"dům\"]");
+        check(q.aligned_parts.size() == 1 && q.aligned_parts[0].negated, "within ! ces: […]");
+        q = tq("[lemma=\"house\"] !within ces: [lemma=\"dům\"] within deu: [lemma=\"Haus\"]");
+        check(q.aligned_parts.size() == 2 && q.aligned_parts[0].negated && !q.aligned_parts[1].negated,
+              "two aligned clauses, left to right");
+    }
     // syntax errors (Manatee rejects them)
     for (const char* bad : {"[word=\"x\"", "[word]", "a:[word=\"x\"]", "[word=\"x\"] & 1.word=\"x\"",
                             "[word=\"x\"] within", "(meet [word=\"x\"] [word=\"y\"] -3 3 p)", "[word=\"x\"]{2"})
@@ -124,7 +135,7 @@ int main() {
               std::string("rejected: ") + bad + " (" + err(bad) + ")");
     // accepted by Manatee, refused by pando with the construct named
     for (const char* q : {"(meet [lemma=\"a\"] [lemma=\"b\"] -3 3)", "(union [lemma=\"a\"] [lemma=\"b\"])",
-                          "[lemma=\"a\"] within ces: [lemma=\"b\"]", "~\"house\"", "[#5]",
+"~\"house\"", "[#5]",
                           "[lemma=\"a\"] within 3"})
         check(err(q).find("not supported by pando") != std::string::npos, std::string("named as unsupported: ") + q +
               " (" + err(q) + ")");

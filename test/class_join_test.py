@@ -22,6 +22,8 @@ without the declarations has them as well). For each query it requires:
     not, as the reference counts them;
   * `--aligned s_tuid` / `--aligned tuid` (with `--aligned-where`): each hit with the sentences aligned with it,
     the aligned tokens marked, as the reference gives them;
+  * Manatee's aligned corpora (`MANATEE A within nld: B`, `!within`): A outside nld wholly inside a sentence whose
+    s_tuid class has a B hit in nld (Manatee's within merge for a varying-length A), as the reference gives them;
   * `count by` over fields of either token to give the buckets of a brute-force tally, fast and generic.
 Exit status 0 = all as required, 1 = a difference, 2 = a run error.
 """
@@ -325,6 +327,72 @@ def main():
         got = aligned('[form="house"]', layer, where)
         check(got == want, f"--aligned {layer} {where}: {sum(len(p) for _, p in want)} aligned sentences for "
                            f"{len(want)} hits" + ("" if got == want else f" (got {str(got)[:300]})"))
+    # Manatee's aligned corpora: `A within nld: B` — A (outside nld) wholly inside a sentence whose s_tuid class has
+    # a B hit in nld (Manatee's within merge for a varying-length A), `!within`: not inside one
+    import bisect
+    def merge_in(hits, ranges):
+        hits, ends, out, i, o = sorted(hits), [e for _, e in ranges], [], 0, 0
+        while i < len(hits) and o < len(ranges):
+            b, e = hits[i]
+            if b < ranges[o][0]:
+                i = bisect.bisect_left(hits, (ranges[o][0], -1), i); continue
+            if e > ranges[o][1]:
+                o = bisect.bisect_left(ends, e, o); continue
+            out.append(hits[i]); i += 1
+        return out
+    def merge_not_in(hits, ranges):
+        out, o = [], 0
+        for b, e in sorted(hits):
+            while o < len(ranges) and ranges[o][1] < e:
+                o += 1
+            if not (o < len(ranges) and ranges[o][0] <= b and e <= ranges[o][1]):
+                out.append((b, e))
+        return out
+    def segments(lang, bpred):
+        cls = {stuids[j] for j in range(n) if toks[j][1] == lang and bpred(j) and stuids[j]}
+        return sorted({sentence_span(i) for i in range(n) if stuids[i] in cls and toks[i][1] != lang})
+    def seq(pats, lang):   # (start, end) of a pattern outside `lang`
+        out = set()
+        for s0 in range(n):
+            def rec(i, k):
+                if k == len(pats):
+                    if i > s0:
+                        out.add((s0, i - 1))
+                    return
+                pred, lo, hi = pats[k]
+                j = i
+                for reps in range(hi + 1):
+                    if reps >= lo:
+                        rec(j, k + 1)
+                    if j >= n or (pred and not pred(j)):
+                        break
+                    j += 1
+            rec(s0, 0)
+        return {h for h in out if toks[h[0]][1] != lang}
+    F = lambda w: (lambda j: toks[j][0] == w)
+    for q, pats, lang, bpred, neg in [
+        ('[form="house"] within nld: [form="huis"]', [(F("house"), 1, 1)], "nld", F("huis"), False),
+        ('[form="house"] !within nld: [form="huis"]', [(F("house"), 1, 1)], "nld", F("huis"), True),
+        ('[form="the"] [] within ces: [form="dům"]', [(F("the"), 1, 1), (None, 1, 1)], "ces", F("dům"), False),
+        ('[form="the"] []{0,3} [form="house"] within nld: [form="huis"]',
+         [(F("the"), 1, 1), (None, 0, 3), (F("house"), 1, 1)], "nld", F("huis"), False),
+        ('[form="is"] []* [form="old"] !within ces: [form="je"]',
+         [(F("is"), 1, 1), (None, 0, 100), (F("old"), 1, 1)], "ces", F("je"), True),
+    ]:
+        hits = seq(pats, lang)
+        want = sorted((merge_not_in if neg else merge_in)(hits, segments(lang, bpred)))
+        out = run("MANATEE " + q, True, "--json", "--limit", "100000")
+        try:
+            got = sorted((h["match_start"], h["match_end"]) for h in json.loads(out)["result"]["hits"])
+        except (ValueError, KeyError):
+            got = out[:200]
+        total = run("MANATEE " + q, True, "--count-only").split()
+        check(got == want and total[-1:] == [str(len(want))],
+              f"MANATEE {q}: {total[-1] if total else '?'} hits (Manatee {len(want)})" + ("" if got == want else f" got {got}"))
+    r = subprocess.run([a.pando, "--count-only", d, 'MANATEE [form="house"] within xyz: [form="huis"]'],
+                       capture_output=True, text=True)
+    check("no aligned corpus 'xyz'" in r.stdout + r.stderr, "an unknown aligned corpus: refused with a message")
+
     r = subprocess.run([a.pando, d, '[form="house"]', "--aligned", "form"], capture_output=True, text=True)
     check(r.returncode == 0, "--aligned over any token attribute (form) runs")
     r = subprocess.run([a.pando, d, '[form="house"]', "--aligned", "nosuch"], capture_output=True, text=True)
