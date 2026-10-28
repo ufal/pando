@@ -47,7 +47,7 @@ static bool is_reserved_text_structural_key(const std::string& key) {
 // Outside that zone, text_xx = … is VRT-style (region text, attribute xx).
 static bool is_ud_sentence_translation_key(const std::string& key) {
     if (is_reserved_text_structural_key(key)) return false;
-    if (key.size() < 8 || key.compare(0, 5, "text_") != 0) return false;
+    if (key.size() < 7 || key.compare(0, 5, "text_") != 0) return false;   // text_en: 7
     std::string suf = key.substr(5);
     // 2–3 letter lowercase language codes (en, cs, got, la, …); exclude a few non-lang triples.
     if (suf.size() < 2 || suf.size() > 3) return false;

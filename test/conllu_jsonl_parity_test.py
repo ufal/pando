@@ -10,7 +10,7 @@ for it: tokens with `head` and `deps` (CoNLL-U DEPS, numbered within the sentenc
 
 Requires:
   * CoNLL-U: a `par` region for each `# newpar` (id `_` when it has none), a `doc` for a bare `# newdoc`,
-    `# meta::genre` as doc_genre;
+    `# meta::genre` as doc_genre, a translation `# text_en = …` as s_text_en;
   * JSONL: `deps` on token events gives the relation layer `deps` as DEPS in CoNLL-U does (declaration and edges),
     a quote token read back as `"`;
   * both: the same counts.
@@ -33,7 +33,7 @@ SENTS = [
     [(1, "It", "it", "PRON", 2, "nsubj", "2:nsubj"), (2, "rained", "rain", "VERB", 0, "root", "0:root")],
 ]
 # (sentence index, comment lines before it)
-COMMENTS = {0: ["# newdoc id = d1", "# meta::genre = news", "# newpar"], 1: ["# newpar id = p2"],
+COMMENTS = {0: ["# newdoc id = d1", "# meta::genre = news", "# newpar"], 1: ["# newpar id = p2", "# text_en = Bob left."],
             2: ["# newdoc", "# newpar"]}
 
 
@@ -125,6 +125,8 @@ def main():
           f"CoNLL-U: 3 paragraphs, 7 tokens in those without an id ({count(idx_c, '<par>[]')}, "
           f"{count(idx_c, '[par_id=\"_\"]')})")
     check(count(idx_c, "<doc>[]") == 2, f"CoNLL-U: a bare # newdoc opens a document ({count(idx_c, '<doc>[]')})")
+    check(count(idx_c, '[s_text_en="Bob left."]') == 2,
+          f"CoNLL-U: # text_en as s_text_en ({count(idx_c, '[s_text_en=\"Bob left.\"]')})")
     check(count(idx_c, '[doc_genre="news"]') == 7, f"CoNLL-U: # meta::genre as doc_genre ({count(idx_c, '[doc_genre=\"news\"]')})")
     for key in ("relation.deps", "relation.head"):
         check(ic.get(key) == ij.get(key) and ic.get(key), f"{key}: {ic.get(key)} / {ij.get(key)}")
