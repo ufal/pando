@@ -836,6 +836,7 @@ int main(int argc, char* argv[]) {
     }
     bool split_feats = false;
     std::optional<std::vector<std::string>> misc_keys;   // --misc-keys
+    std::vector<std::string> multivalue;   // --multivalue a,b: declared multivalue (values joined by '|')
     bool format_vertical = false;
     bool format_jsonl = false;
     bool overlay_index = false;
@@ -859,6 +860,15 @@ int main(int argc, char* argv[]) {
                     if (comma > from) misc_keys->push_back(v.substr(from, comma - from));
                     from = comma + 1;
                 }
+        }
+        else if ((a == "--multivalue" && i + 1 < argc) || a.rfind("--multivalue=", 0) == 0) {
+            const std::string v = a == "--multivalue" ? argv[++i] : a.substr(13);
+            for (size_t from = 0; from <= v.size();) {
+                size_t comma = v.find(',', from);
+                if (comma == std::string::npos) comma = v.size();
+                if (comma > from) multivalue.push_back(v.substr(from, comma - from));
+                from = comma + 1;
+            }
         }
         else if (a == "--overlay-index") overlay_index = true;
         else if (a == "--head-attrs" && i + 1 < argc) build_head_attrs = argv[++i];
@@ -890,6 +900,9 @@ int main(int argc, char* argv[]) {
                   << "  For each region attribute (e.g. text_langcode.val), the indexer also writes\n"
                   << "  .lex / .rev / .rev.idx (value → region ids) for fast :: metadata filters.\n\n"
                   << "  --split-feats     Split FEATS into feats#Feature columns (default: combined)\n"
+                  << "  --multivalue A,B  Attributes whose values hold several values joined by '|' (a token\n"
+                  << "                    attribute, or a region one as s_tuid): A=\"x|y\" matches \"x\" and \"y\";\n"
+                  << "                    a.A = b.A when they share one (as TEITOK settings' multivalue)\n"
                   << "  --misc-keys none|K1,K2  MISC keys indexed as attributes of their own (default:\n"
                   << "                    tuid,Translit,Vform,LTranslt,Root,CorrectForm,Gloss; none: no MISC)\n"
                   << "  --head-attrs auto|none|A[,B...]  head attributes (default auto: upos, deprel,\n"
@@ -988,6 +1001,7 @@ int main(int argc, char* argv[]) {
         pando::CorpusBuilder builder(output_dir);
         builder.set_split_feats(split_feats);
         if (misc_keys) builder.set_misc_keys(*misc_keys);
+        for (const auto& m : multivalue) builder.declare_multivalue(m);
 
         auto t0 = std::chrono::steady_clock::now();
         int64_t prev_tokens = 0;

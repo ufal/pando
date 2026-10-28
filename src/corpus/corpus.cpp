@@ -588,13 +588,13 @@ void Corpus::add_implicit_tuid_layers() {
     for (const auto& n : names) {
         if (relation(n)) continue;   // declared (and measured) in corpus.info
         // readable as classes (equivalence_classes.h), checked without building anything (a large index opens
-        // fast): a token attribute (multivalue: with its forward index), or a single-valued region attribute with
-        // its reverse index
+        // fast): a token attribute (multivalue: with its forward index), or a region attribute with its reverse index
+        // (multivalue or not: its values are split into ids)
         if (has_attr(n)) {
             if (is_multivalue(n) && !(attr(n).has_mv() && attr(n).has_mv_fwd())) continue;
         } else {
             RegionAttrParts parts;
-            if (!split_region_attr_name(n, parts) || !has_structure(parts.struct_name) || is_multivalue(n)) continue;
+            if (!split_region_attr_name(n, parts) || !has_structure(parts.struct_name)) continue;
             const StructuralAttr& sa = structure(parts.struct_name);
             const auto key = resolve_region_attr_key(sa, parts.struct_name, parts.attr_name);
             if (!key || !sa.has_region_value_reverse(*key)) continue;

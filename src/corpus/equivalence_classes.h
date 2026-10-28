@@ -7,10 +7,11 @@
 //   * a region attribute (`s_tuid`): a class is a set of regions, possibly far apart (a sentence and its
 //     translations); the members are the tokens of those regions, token → class the value of its region,
 //     class → regions the region attribute's reverse index.
-// A value holding several ids (`a|b` on a token aligned with two words, `"s1 s2"` on a sentence merging two; TEITOK
-// writes them so without declaring the attribute multivalue) puts its token / region in each of those classes: the
-// classes are then the ids, mapped from the values once per attribute (Composite, kept with the attribute). The ids
-// are joined by '|'; for alignment ids (`tuid`, `*_tuid`) also by a space.
+// A multivalue attribute (as its source declares it: TEITOK settings for a `tuid` holding several ids) puts its
+// token / region in the class of each of its ids ('|', the multivalue separator): a token aligned with two
+// words, a sentence merging two. For a token attribute the multivalue index has the ids; for a region attribute the
+// value → ids table is made once and kept with the attribute (Composite). An attribute not declared multivalue is
+// read as it is: its whole values are the classes.
 // The class join (executor_classes.cpp), the generic expansion and the declaration's measurement read these.
 
 #include "core/types.h"
@@ -34,13 +35,13 @@ struct EquivalenceComposite {
     std::vector<std::vector<LexiconId>> class_values;    // per class id
 };
 
-// `tuid` and `*_tuid` (TEITOK's alignment ids): several ids in one value are joined by '|' or a space
+// `tuid` and `*_tuid`: translation unit ids, multivalue
 inline bool is_alignment_id_attr(const std::string& name) {
     return name == "tuid" || (name.size() > 5 && name.compare(name.size() - 5, 5, "_tuid") == 0);
 }
 
-// the characters joining several ids in one value of the attribute `name`
-inline const char* id_separators(const std::string& name) { return is_alignment_id_attr(name) ? "| " : "|"; }
+// the multivalue separator
+inline const char* id_separators(const std::string&) { return "|"; }
 
 namespace equivalence_detail {
 
@@ -100,18 +101,14 @@ public:
         null1_ = lex.lookup("");
         null2_ = lex.lookup("_");
         nclasses_ = lex.size();
-        if (!mv_) {
-            comp_ = attr.cache().get<EquivalenceComposite>(std::string("equivalence-composite:") + seps, [&lex, seps] {
-                return equivalence_detail::build_composite(lex.size(), [&lex](LexiconId v) { return lex.get(v); }, seps);
-            });
-            if (comp_) nclasses_ = static_cast<LexiconId>(comp_->class_values.size());
-        }
+        (void)seps;
         return true;
     }
 
-    // A region attribute `key` of `regions` (single-valued, with its reverse index); `stacked`: the regions nest or
-    // overlap, so a token can be in several (TEITOK sentences inside sentences)
-    bool open(const StructuralAttr& regions, const std::string& key, bool stacked = false, const char* seps = "|") {
+    // A region attribute `key` of `regions` (with its reverse index); `stacked`: the regions nest or overlap, so a
+    // token can be in several (TEITOK sentences inside sentences); `multivalue`: a value's ids ('|') are its classes
+    bool open(const StructuralAttr& regions, const std::string& key, bool stacked = false, bool multivalue = false,
+              const char* seps = "|") {
         attr_ = nullptr;
         regions_ = &regions;
         stacked_ = stacked;
@@ -122,6 +119,7 @@ public:
         null1_ = regions.region_attr_lex_lookup(key, "");
         null2_ = regions.region_attr_lex_lookup(key, "_");
         nclasses_ = regions.region_attr_lex_size(key);
+        if (!multivalue) return true;
         const LexiconId n = nclasses_;
         comp_ = regions.cache().get<EquivalenceComposite>("equivalence-composite:" + key + ":" + seps,
                                                           [&regions, &key, n, seps] {
@@ -133,22 +131,21 @@ public:
         return true;
     }
 
-    // The classes of an attribute by name: a token attribute (`tuid`) or a region attribute (`s_tuid`). False when
-    // the corpus has neither or it cannot be read as classes (a multivalue region attribute).
+    // The classes of an attribute by name: a token attribute (`tuid`) or a region attribute (`s_tuid`), multivalue as
+    // the index declares it. False when the corpus has neither.
     bool open(const Corpus& corpus, const std::string& name) {
         if (corpus.has_attr(name)) return open(corpus.attr(name), corpus.is_multivalue(name), id_separators(name));
         RegionAttrParts parts;
         if (!split_region_attr_name(name, parts) || !corpus.has_structure(parts.struct_name)) return false;
-        if (corpus.is_multivalue(name)) return false;
         const StructuralAttr& sa = corpus.structure(parts.struct_name);
         const auto key = resolve_region_attr_key(sa, parts.struct_name, parts.attr_name);
         return key && sa.has_region_value_reverse(*key) &&
                open(sa, *key, corpus.is_nested(parts.struct_name) || corpus.is_overlapping(parts.struct_name),
-                    id_separators(name));
+                    corpus.is_multivalue(name), id_separators(name));
     }
 
     bool regions() const { return regions_ != nullptr; }
-    // values holding several ids (`a|b`): the classes are those ids
+    // a multivalue region attribute: the classes are the ids of its values
     bool composite() const { return comp_ != nullptr; }
 
     // the class ids are 0 … class_count() - 1 (some of them not a class: is_class)

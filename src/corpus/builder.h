@@ -41,6 +41,8 @@ public:
     // CoNLL-U MISC keys indexed as positional attributes of their own (each a full-length column);
     // empty: none. Default: tuid, Translit, Vform, LTranslt, Root, CorrectForm, Gloss.
     void set_misc_keys(std::vector<std::string> keys) { misc_keys_ = std::move(keys); }
+    /// An attribute (token, or region as `s_tuid`) whose values hold several values joined by '|'
+    void declare_multivalue(const std::string& name) { builder_.declare_multivalue(name); }
 
     StreamingBuilder& builder() { return builder_; }
 

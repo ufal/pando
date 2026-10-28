@@ -1449,20 +1449,19 @@ void StreamingBuilder::build_mv_reverse_index(const std::string& base,
 
     if (comp_set.empty()) return;  // no MV components at all
 
-    // Also add non-compound entries as components of themselves — positions with
-    // a single value "artist" (no pipe) should still be findable via the MV index.
-    // We only need to do this for entries that ALSO appear as components of compounds.
+    // Also add non-compound entries as components of themselves: a position with a single value "artist" (no
+    // pipe) is a one-value position and must be findable through the MV index, also when "artist" never occurs in
+    // a compound (an id only ever given alone: `[tuid="x"]` on a multivalue tuid found nothing).
     for (int32_t id = 0; id < lex_size; ++id) {
         if (!orig_to_comps[static_cast<size_t>(id)].empty()) continue;  // already split
         int64_t a = loff[id];
         int64_t b = loff[id + 1];
         std::string_view sv(lbase + a, static_cast<size_t>(b - a));
         if (!sv.empty() && sv.back() == '\0') sv.remove_suffix(1);
+        if (sv.empty() || sv == "_") continue;   // no value (`_`) is no component
         std::string s(sv);
-        if (comp_set.count(s)) {
-            // This single value also appears as a component in some compound
-            orig_to_comps[static_cast<size_t>(id)].push_back(std::move(s));
-        }
+        comp_set.insert(s);
+        orig_to_comps[static_cast<size_t>(id)].push_back(std::move(s));
     }
 
     // 2. Build sorted MV component lexicon

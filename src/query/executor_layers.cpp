@@ -49,7 +49,7 @@ std::vector<CorpusPos> QueryExecutor::find_class_mates(CorpusPos pos, const Rela
     EquivalenceClasses classes;
     if (!classes.open(corpus_, decl.attr))
         throw std::runtime_error("The equivalence layer '" + decl.name + "' names the attribute '" + decl.attr +
-                                 "', which this corpus does not have as a token attribute or a single-valued "
+                                 "', which this corpus does not have as a token attribute or a "
                                  "region attribute");
     std::vector<CorpusPos> out;
     classes.for_each_class(pos, [&](LexiconId c) {

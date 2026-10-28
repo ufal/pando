@@ -71,7 +71,8 @@ def main():
     opts = ap.parse_args()
     with tempfile.TemporaryDirectory() as tmp:
         idx = os.path.join(tmp, "idx")
-        subprocess.run([opts.pando_index, opts.conllu, idx], check=True, capture_output=True)
+        # the sentence ids are multivalue (`u3|u9`): declared, as a loader declares them from its settings
+        subprocess.run([opts.pando_index, "--multivalue", "s_tuid", opts.conllu, idx], check=True, capture_output=True)
 
         def cli(q, *args, mode="on"):
             env = dict(os.environ, PANDO_FASTPATH=mode)

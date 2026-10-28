@@ -16,7 +16,7 @@ RelationDecl measure_equivalence(const Corpus& corpus, RelationDecl decl, Equiva
     EquivalenceClasses classes;
     if (!classes.open(corpus, decl.attr))
         throw std::runtime_error("relation." + decl.name + ": the corpus has no attribute '" + decl.attr +
-                                 "' (a token attribute, or a single-valued region attribute such as s_tuid)");
+                                 "' (a token attribute, or a region attribute such as s_tuid)");
     const StructuralAttr* sents = corpus.has_structure("s") ? &corpus.structure("s") : nullptr;
     // the document region: TEITOK / VRT `text`, else CoNLL-U `# newdoc` (`doc`)
     const std::string doc_struct = corpus.has_structure("text") ? "text" : corpus.has_structure("doc") ? "doc" : "";

@@ -24,8 +24,8 @@ without the declarations has them as well). For each query it requires:
     the aligned tokens marked, as the reference gives them;
   * Manatee's aligned corpora (`MANATEE A within nld: B`, `!within`): A outside nld wholly inside a sentence whose
     s_tuid class has a B hit in nld (Manatee's within merge for a varying-length A), as the reference gives them;
-  * values with several ids in an attribute not declared multivalue (`w1|w2` on a token, `s1 s2` on a sentence)
-    and nested sentences: every path (class join, generic, `with`, the cross-statement form) as the reference;
+  * attributes declared multivalue (`w1|w2` on a token, `s1|s2` on a segment) and nested segments: every path
+    (class join, generic, `with`, the cross-statement form) as the reference;
   * `count by` over fields of either token to give the buckets of a brute-force tally, fast and generic.
 Exit status 0 = all as required, 1 = a difference, 2 = a run error.
 """
@@ -448,15 +448,15 @@ def main():
             srv.terminate()
             srv.wait()
 
-    # values with several ids, as TEITOK writes them without declaring the attribute multivalue: a token aligned
-    # with two words (`w1|w2`), a sentence merging two (`s1 s2`), a sentence inside a sentence; every path the same
+    # attributes declared multivalue (as TEITOK settings declare a `tuid` that can hold several ids): a token aligned
+    # with two words (`w1|w2`), a segment merging two (`s1|s2`), a segment inside a segment; every path the same
     # (sentence-like regions as `seg` / `seg_tuid`, as tico19 has them: JSONL `s` regions follow their own tokens)
     small = [{"type": "header", "version": 2, "positional": ["form", "tuid"], "structural": ["seg", "text"],
-              "nested": ["seg"]}]
+              "nested": ["seg"], "multivalue": ["tuid", "seg_tuid"]}]
     words = [("big", "w1|w2"), ("house", "w3"), ("groot", "w1"), ("huis", "w3|w4"), ("x", "w2"), ("y", "w4"),
              ("z", "_")]
     small += [{"type": "token", "form": f, "tuid": t} for f, t in words]
-    regions = [("seg", 0, 1, {"tuid": "s1 s2"}), ("seg", 2, 3, {"tuid": "s1"}), ("seg", 4, 6, {"tuid": "s2"}),
+    regions = [("seg", 0, 1, {"tuid": "s1|s2"}), ("seg", 2, 3, {"tuid": "s1"}), ("seg", 4, 6, {"tuid": "s2"}),
                ("seg", 5, 6, {"tuid": "s3"}), ("text", 0, 1, {"lang": "eng"}), ("text", 2, 6, {"lang": "nld"})]
     small += [{"type": "region", "struct": st, "start_pos": a0, "end_pos": b0, "attrs": at}
               for st, a0, b0, at in regions]
@@ -477,7 +477,7 @@ def main():
     for st, a0, b0, at in regions:
         if st == "seg":
             for i in range(a0, b0 + 1):
-                sids[i] |= set(at["tuid"].split(" "))
+                sids[i] |= set(at["tuid"].split("|"))
     s_pairs = lambda fa, fb: sum(1 for i in range(len(words)) for j in range(len(words))
                                  if i != j and fa(i) and fb(j) and sids[i] & sids[j])
     ENG = lambda i: i < 2
@@ -490,7 +490,7 @@ def main():
                     ('a:[] =:seg_tuid b:[]', s_pairs(lambda i: True, lambda i: True)),
                     ('a:[text_lang="eng"] =:seg_tuid b:[text_lang="nld"]', s_pairs(ENG, NLD))]:
         fast, slow = cnt(q), cnt(q, False)
-        check(fast == slow == str(want), f"several ids in one value: {q}: {fast} (generic {slow}, reference {want})")
+        check(fast == slow == str(want), f"multivalue ids: {q}: {fast} (generic {slow}, reference {want})")
 
     print("class join: " + ("as required" if not failures else f"{failures} problem(s)"))
     return 1 if failures else 0

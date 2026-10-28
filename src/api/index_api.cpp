@@ -26,6 +26,10 @@ void PandoIndexBuilder::set_default_within(const std::string& structure) {
     builder_.set_default_within(structure);
 }
 
+void PandoIndexBuilder::declare_multivalue(const std::string& name) {
+    builder_.declare_multivalue(name);
+}
+
 void PandoIndexBuilder::finalize() {
     builder_.finalize();
 }

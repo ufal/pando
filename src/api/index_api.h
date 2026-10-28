@@ -50,6 +50,10 @@ public:
     // Set default within-structure (e.g. "text"); written to corpus.info.
     void set_default_within(const std::string& structure);
 
+    // Declare a multivalue attribute (a token attribute, or a region attribute as `s_tuid`): its values hold
+    // several values joined by '|' (convert another separator before adding). Call before finalize().
+    void declare_multivalue(const std::string& name);
+
     // Finalize the index: sort lexicons, remap .dat IDs, build reverse
     // indexes and write corpus.info. Must be called exactly once when
     // all tokens and regions have been added.
