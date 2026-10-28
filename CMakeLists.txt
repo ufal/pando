@@ -174,7 +174,6 @@ add_library(pando_core STATIC
     src/index/relation_layer.cpp
     src/corpus/derive_deps.cpp
     src/corpus/equivalence_layer.cpp
-    src/corpus/corefud_entity.cpp
     src/corpus/corpus.cpp
     src/corpus/builder.cpp
     src/corpus/streaming_builder.cpp
@@ -368,6 +367,9 @@ if(BUILD_TESTING)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/manatee_dialect_corpus_test.py
                     --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
     endif()
+    add_test(NAME relation_events
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/discourse_layer_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
     add_test(NAME class_join
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/class_join_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
@@ -375,8 +377,7 @@ if(BUILD_TESTING)
     add_test(NAME equivalence_layer
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/equivalence_layer_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
-                --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/coref_sample.conllu
-                --corefud ${CMAKE_CURRENT_SOURCE_DIR}/test/data/corefud_sample.conllu)
+                --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/coref_sample.conllu)
         # A rebuild into the same folder must not keep dependency files derived from the earlier build
         add_test(NAME index_rebuild
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/index_rebuild_test.py

@@ -251,15 +251,6 @@ void CorpusBuilder::read_conllu(const std::string& path) {
                 return std::string(val);
             };
 
-            // # global.Entity = eid-etype-head-other: CorefUD's field order (corefud_entity.h)
-            if (starts_with("global.Entity")) {
-                coref_.set_format(parse_id_after_eq());
-                if (!coref_declared_) {
-                    builder_.declare_multivalue("coref");
-                    coref_declared_ = true;
-                }
-                continue;
-            }
             // # newregion X  — open a structural region span
             if (starts_with("newregion")) {
                 size_t j = 9; // "newregion"
@@ -451,16 +442,6 @@ void CorpusBuilder::read_conllu(const std::string& path) {
                 head_id = head_id * 10 + (c - '0');
             }
 
-            if (found >= 9) {   // CorefUD mentions: the heads get their entity ids
-                std::string ids = coref_.on_token(builder_.corpus_size(), field(9));
-                if (!ids.empty()) {
-                    if (!coref_declared_) {
-                        builder_.declare_multivalue("coref");
-                        coref_declared_ = true;
-                    }
-                    attrs["coref"] = std::move(ids);
-                }
-            }
             if (found >= 8) builder_.set_token_deps(field(8));   // enhanced dependencies (relation layer deps)
             builder_.add_token(attrs, head_id);
             in_sentence_ = true;
@@ -747,6 +728,9 @@ void CorpusBuilder::read_vertical(const std::string& path) {
 //   { "type": "region_end", ... }
 //   { "type": "region", "struct": "err", "spans": [[a,b],[c,d]], "attrs": {...} }
 //   — for token_groups (e.g. err), one event can list disjoint spans; same attrs apply.
+//   { "type": "relation", "layer": "rst", "source": 15, "target": 8, "label": "causal-cause" }
+//   — an edge of a pointer layer declared in the header ("relations": {"rst": "pointer,label=rel,scope=doc"}),
+//   corpus positions; equivalence layers are declared there too ("coref": "equivalence,attr=coref").
 //   Header token_group_prop_attrs: { "err": ["code"] } + positional err_code + multivalue err_code
 //   indexes group attrs (e.g. code → err_code) on tokens for MV search.
 //
@@ -1230,6 +1214,12 @@ void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expec
             builder_.declare_overlapping(s);
         for (const auto& s : json_get_string_array(ln, "zerowidth"))
             builder_.declare_zerowidth(s);
+        // relation layers: "relations": {"rst": "pointer,label=rel,scope=doc", "coref": "equivalence,attr=coref"}
+        {
+            std::vector<std::pair<std::string, std::string>> rels;
+            json_get_attrs_object(ln, "relations", rels);
+            for (const auto& [name, spec] : rels) builder_.declare_relation(name, spec);
+        }
         std::unordered_set<std::string> multivalue_set;
         for (const auto& s : json_get_string_array(ln, "multivalue")) {
             builder_.declare_multivalue(s);
@@ -1413,6 +1403,15 @@ void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expec
             if (!in_overlay_mode) handle_region_end(line);
         } else if (t == "region") {
             handle_region(line);
+        } else if (t == "relation") {
+            // an edge of a pointer layer declared in the header: corpus positions (0-based, as region start_pos)
+            const long long src = get_num_field(line, "source"), tgt = get_num_field(line, "target");
+            const std::string layer = json_get_string(line, "layer");
+            if (layer.empty() || line.find("\"source\"") == std::string::npos ||
+                line.find("\"target\"") == std::string::npos)
+                throw std::runtime_error("JSONL relation event needs \"layer\", \"source\" and \"target\": " + line);
+            builder_.add_relation_edge(layer, static_cast<CorpusPos>(src), static_cast<CorpusPos>(tgt),
+                                       json_get_string(line, "label"));
         }
     }
 
@@ -1432,12 +1431,6 @@ void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expec
 
 void CorpusBuilder::finalize() {
     builder_.finalize();
-    if (coref_.seen()) {
-        // the equivalence layer over the mention heads; pando-index measures its scope and span after the build
-        std::ofstream info(output_dir_ + "/corpus.info", std::ios::app);
-        info << "relation.coref=equivalence,attr=coref,scope=text,endpoints=token,source=annotated\n";
-        std::cerr << "Coreference (CorefUD Entity): " << coref_.mentions() << " mentions; their heads carry coref\n";
-    }
 }
 
 } // namespace pando

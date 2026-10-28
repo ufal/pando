@@ -1,7 +1,6 @@
 #pragma once
 
 #include "core/types.h"
-#include "corpus/corefud_entity.h"
 #include "corpus/streaming_builder.h"
 #include <memory>
 #include <string>
@@ -79,9 +78,6 @@ private:
     std::vector<std::pair<std::string, std::string>> sent_region_attrs_;
     /// Copied onto each token until the sentence ends (TEITOK-style alignment id).
     std::string pending_sent_tuid_;
-    /// CorefUD `Entity=` in MISC: mention heads get the entity id as `coref` (corefud_entity.h)
-    CorefEntityReader coref_;
-    bool coref_declared_ = false;
     std::string output_dir_;
 
     // Region tracking for vertical/VRT input: stack of open regions

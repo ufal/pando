@@ -1,6 +1,7 @@
 #pragma once
 
 #include "index/relation_layer.h"
+#include "index/relation_decl.h"
 #include <string_view>
 
 #include "core/types.h"
@@ -78,6 +79,14 @@ public:
     void declare_zerowidth(const std::string& s)    { declared_zerowidth_.insert(s); }
     void declare_multivalue(const std::string& s)   { declared_multivalue_.insert(s); }
 
+    /// A relation layer from its declaration (relation_decl.h, as in corpus.info: `pointer,label=rel,scope=doc`,
+    /// `equivalence,attr=coref`); throws on a malformed one. A pointer layer's edges come by add_relation_edge (a layer
+    /// of its own: a token without edges has none); an equivalence layer is its attribute (pando-index measures it).
+    void declare_relation(const std::string& name, const std::string& spec);
+    /// An edge of a declared pointer layer between corpus positions (from `source` to `target`, as a dependent to its
+    /// head: `a:[] >:L b:[]` has a = target, b = source), in any order.
+    void add_relation_edge(const std::string& layer, CorpusPos source, CorpusPos target, const std::string& label);
+
     /// Positional attrs whose values use `|` between Key=Val pairs (UD `feats`), not MV alternates.
     void declare_kv_pipe(const std::string& s) { declared_kv_pipe_.insert(s); }
 
@@ -153,6 +162,8 @@ private:
     bool pending_deps_set_ = false;
     std::vector<RelationLayerWriter::Token> sent_deps_;
     std::unique_ptr<RelationLayerWriter> deps_writer_;
+    std::vector<RelationDecl> declared_relations_;                                     // declare_relation
+    std::unordered_map<std::string, std::vector<RelationLayerWriter::Edge>> relation_edges_;   // add_relation_edge
     void flush_sentence_deps();
 
     // Current sentence

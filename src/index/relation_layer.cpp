@@ -117,6 +117,42 @@ void RelationLayerWriter::add_sentence(CorpusPos start, const std::vector<Token>
     }
 }
 
+void RelationLayerWriter::add_unit(std::vector<Edge> edges) {
+    std::sort(edges.begin(), edges.end(), [](const Edge& a, const Edge& b) {
+        return a.source != b.source ? a.source < b.source : a.target != b.target ? a.target < b.target : a.label < b.label;
+    });
+    edges.erase(std::unique(edges.begin(), edges.end(), [](const Edge& a, const Edge& b) {
+        return a.source == b.source && a.target == b.target && a.label == b.label;
+    }), edges.end());
+    struct Rev { int64_t target, source; int32_t label; };
+    std::vector<Rev> rev;
+    for (size_t i = 0; i < edges.size();) {
+        const CorpusPos pos = edges[i].source;
+        ++tokens_;
+        ++deviating_;
+        put(src_, &pos, sizeof pos, base_ + ".src");
+        put(off_, &written_edges_, sizeof written_edges_, base_ + ".off");
+        for (; i < edges.size() && edges[i].source == pos; ++i) {
+            const int64_t target = edges[i].target;
+            const int32_t id = label_id(edges[i].label);
+            put(tgt_, &target, sizeof target, base_ + ".tgt");
+            put(lab_, &id, sizeof id, base_ + ".lab");
+            ++written_edges_;
+            ++edges_;
+            rev.push_back({target, pos, id});
+            span_ = std::max<int64_t>(span_, target > pos ? target - pos : pos - target);
+        }
+    }
+    std::sort(rev.begin(), rev.end(), [](const Rev& a, const Rev& b) {
+        return a.target != b.target ? a.target < b.target : a.source != b.source ? a.source < b.source : a.label < b.label;
+    });
+    for (const Rev& r : rev) {
+        put(rtgt_, &r.target, sizeof r.target, base_ + ".rtgt");
+        put(rsrc_, &r.source, sizeof r.source, base_ + ".rsrc");
+        put(rlab_, &r.label, sizeof r.label, base_ + ".rlab");
+    }
+}
+
 void RelationLayerWriter::finish() {
     if (finished_) return;
     finished_ = true;

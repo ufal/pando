@@ -222,11 +222,15 @@ void Corpus::open(const std::string& dir_given, bool preload,
 
     // Relation layers stored as deviations from the basic tree (relation_layer.h): need the tree and its label
     layers_.clear();
+    // and pointer layers of their own (no inherit: discourse relations), which need no tree
     for (const auto& r : info_.relations) {
-        if (r.inherit != "head" || r.materialized || !has_deps_) continue;
+        if (r.kind != RelationDecl::Kind::Pointer || r.name == "head" || r.materialized) continue;
+        const bool inherits = r.inherit == "head";
+        if (inherits && !has_deps_) continue;
+        if (!inherits && !r.inherit.empty()) continue;
         auto layer = std::make_unique<RelationLayer>();
         const PositionalAttr* label = attrs_.count("deprel") ? attrs_.at("deprel").get() : nullptr;
-        if (layer->open(dir, r.name, &deps_, label))
+        if (layer->open(dir, r.name, inherits ? &deps_ : nullptr, inherits ? label : nullptr))
             layers_[r.name] = std::move(layer);
         else
             std::cerr << "Warning: relation." << r.name << " declared but its files in " << dir << " are missing or inconsistent\n";

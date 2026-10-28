@@ -30,6 +30,15 @@ void PandoIndexBuilder::declare_multivalue(const std::string& name) {
     builder_.declare_multivalue(name);
 }
 
+void PandoIndexBuilder::declare_relation(const std::string& name, const std::string& spec) {
+    builder_.declare_relation(name, spec);
+}
+
+void PandoIndexBuilder::add_relation(const std::string& layer, CorpusPos source, CorpusPos target,
+                                     const std::string& label) {
+    builder_.add_relation_edge(layer, source, target, label);
+}
+
 void PandoIndexBuilder::finalize() {
     builder_.finalize();
 }

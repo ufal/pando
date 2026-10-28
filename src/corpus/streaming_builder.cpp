@@ -822,6 +822,25 @@ void StreamingBuilder::add_region(const std::string& type,
 
 // ── finalize ────────────────────────────────────────────────────────────
 
+void StreamingBuilder::declare_relation(const std::string& name, const std::string& spec) {
+    std::string err;
+    auto r = parse_relation(name, spec, &err);
+    if (!r) throw std::runtime_error("relation " + name + ": " + err);
+    if (r->kind == RelationDecl::Kind::Pointer && !r->inherit.empty())
+        throw std::runtime_error("relation " + name + ": a layer given edge by edge is a layer of its own (no inherit=)");
+    for (auto& d : declared_relations_)
+        if (d.name == name) {
+            d = *r;
+            return;
+        }
+    declared_relations_.push_back(*r);
+}
+
+void StreamingBuilder::add_relation_edge(const std::string& layer, CorpusPos source, CorpusPos target,
+                                         const std::string& label) {
+    relation_edges_[layer].push_back({source, target, label});
+}
+
 void StreamingBuilder::finalize() {
     if (finalized_) return;
 
@@ -1119,6 +1138,25 @@ void StreamingBuilder::finalize() {
             if (deps_writer_->skipped_empty())
                 std::cerr << "; " << deps_writer_->skipped_empty() << " edges to empty nodes left out";
             std::cerr << ")\n";
+        }
+        // declared relation layers (declare_relation): a pointer layer's edges written (sorted), an equivalence
+        // layer as declared (measured by pando-index after the build)
+        for (const auto& [layer, _] : relation_edges_) {
+            const bool known = std::any_of(declared_relations_.begin(), declared_relations_.end(), [&](const RelationDecl& r) {
+                return r.name == layer && r.kind == RelationDecl::Kind::Pointer;
+            });
+            if (!known) throw std::runtime_error("relation edges for the layer '" + layer + "', which is not declared a pointer layer");
+        }
+        for (RelationDecl r : declared_relations_) {
+            if (r.kind == RelationDecl::Kind::Pointer) {
+                auto it = relation_edges_.find(r.name);
+                RelationLayerWriter w(output_dir_, r.name);
+                if (it != relation_edges_.end()) w.add_unit(std::move(it->second));
+                w.finish();
+                r.span = w.span();
+                std::cerr << "Relation " << r.name << ": " << w.edges() << " edges from " << w.deviating() << " tokens\n";
+            }
+            info << "relation." << r.name << "=" << r.format() << "\n";
         }
         if (!token_group_struct_.empty()) {
             std::vector<std::string> tg(token_group_struct_.begin(), token_group_struct_.end());

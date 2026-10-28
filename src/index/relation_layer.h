@@ -47,6 +47,15 @@ public:
     // The tokens of one sentence starting at `start`; edges to or from empty nodes (`5.1`) are left out and counted.
     void add_sentence(CorpusPos start, const std::vector<Token>& tokens);
 
+    // Edges at corpus positions, for a layer of its own (no inherit: a token without edges here has none), one unit
+    // at a time (a document): every source and target inside the unit, units in corpus order, so the files stay
+    // sorted. Several edges of a source, and of a pair under different labels, are kept.
+    struct Edge {
+        CorpusPos source, target;
+        std::string label;
+    };
+    void add_unit(std::vector<Edge> edges);
+
     // Writes the label list and closes the files.
     void finish();
 
@@ -81,6 +90,8 @@ public:
     // false when the files are missing or inconsistent
     bool open(const std::string& dir, const std::string& name, const DependencyIndex* base, const PositionalAttr* base_label);
     bool valid() const { return valid_; }
+    // inherits from the basic tree (a token not stored has its basic edge); else a layer of its own (none)
+    bool inherits() const { return base_ != nullptr; }
 
     // f(head position, label) for every edge of `pos` (a root edge has head NO_HEAD); f returns false to stop
     template <typename F>

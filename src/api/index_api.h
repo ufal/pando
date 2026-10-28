@@ -54,6 +54,14 @@ public:
     // several values joined by '|' (convert another separator before adding). Call before finalize().
     void declare_multivalue(const std::string& name);
 
+    // Declare a relation layer (relation_decl.h, as in corpus.info: "pointer,label=rel,scope=doc" for links given
+    // edge by edge, "equivalence,attr=coref" for classes named by an attribute's values). Call before finalize().
+    void declare_relation(const std::string& name, const std::string& spec);
+
+    // An edge of a declared pointer layer between corpus positions, `source` attached to `target` (as a dependent to
+    // its head), in any order; several per source, and per pair under different labels, are kept.
+    void add_relation(const std::string& layer, CorpusPos source, CorpusPos target, const std::string& label);
+
     // Finalize the index: sort lexicons, remap .dat IDs, build reverse
     // indexes and write corpus.info. Must be called exactly once when
     // all tokens and regions have been added.

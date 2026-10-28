@@ -267,7 +267,8 @@ CollCounts DcollCounter::finish_layer() {
     if (!want_all_children_ && !deprel_filter_) return done();
 
     const CorpusPos n = corpus_.size();
-    if (nodes_.size() * 32 <= static_cast<size_t>(n)) {
+    // a layer of its own (no basic edges to inherit) is read node by node
+    if (nodes_.size() * 32 <= static_cast<size_t>(n) || !L.inherits()) {
         std::vector<CorpusPos> kids;
         for (CorpusPos node : nodes_) {
             kids.clear();
