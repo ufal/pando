@@ -232,6 +232,12 @@ void Corpus::open(const std::string& dir_given, bool preload,
             std::cerr << "Warning: relation." << r.name << " declared but its files in " << dir << " are missing or inconsistent\n";
     }
 
+    // Translation units are equivalence layers without a declaration: a token attribute `tuid` and region
+    // attributes `*_tuid` (`s_tuid`, `p_tuid`, `text_tuid`, TEITOK's alignment ids), so `[A] =:tuid [B]`,
+    // `within s_tuid` and `--aligned s_tuid` work on any parallel index. Unmeasured (span -1, measured and recorded
+    // by pando-index after a build); scope corpus, the widest, until measured (a default within never cuts them).
+    add_implicit_tuid_layers();
+
     // P5.6 head attributes (after the dependency index: one without .dat reads its
     // source attribute at p + head_rel[p])
     head_attr_names_.clear();
@@ -570,4 +576,37 @@ std::string Corpus::display_name() const {
     return name;
 }
 
-} // namespace pando
+void Corpus::add_implicit_tuid_layers() {
+    auto is_tuid = [](const std::string& n) {
+        return n == "tuid" || (n.size() > 5 && n.compare(n.size() - 5, 5, "_tuid") == 0);
+    };
+    std::vector<std::string> names;
+    for (const auto& n : info_.positional_attrs)
+        if (n == "tuid") names.push_back(n);
+    for (const auto& n : info_.region_attrs)
+        if (is_tuid(n)) names.push_back(n);
+    for (const auto& n : names) {
+        if (relation(n)) continue;   // declared (and measured) in corpus.info
+        // readable as classes (equivalence_classes.h), checked without building anything (a large index opens
+        // fast): a token attribute (multivalue: with its forward index), or a single-valued region attribute with
+        // its reverse index
+        if (has_attr(n)) {
+            if (is_multivalue(n) && !(attr(n).has_mv() && attr(n).has_mv_fwd())) continue;
+        } else {
+            RegionAttrParts parts;
+            if (!split_region_attr_name(n, parts) || !has_structure(parts.struct_name) || is_multivalue(n)) continue;
+            const StructuralAttr& sa = structure(parts.struct_name);
+            const auto key = resolve_region_attr_key(sa, parts.struct_name, parts.attr_name);
+            if (!key || !sa.has_region_value_reverse(*key)) continue;
+        }
+        RelationDecl d;
+        d.name = n;
+        d.kind = RelationDecl::Kind::Equivalence;
+        d.attr = n;
+        d.scope = "corpus";
+        d.endpoints = "token";
+        info_.relations.push_back(std::move(d));
+    }
+}
+
+}  // namespace pando

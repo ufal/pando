@@ -5,7 +5,8 @@
 
 Generates a small parallel corpus (self-authored, seeded): texts in three languages (`text_lang`), each token with a
 `tuid` (multivalue: some tokens align to two units, some pairs share two units, some tokens are unaligned `_`),
-indexes it as JSONL and declares `relation.tuid=equivalence,attr=tuid`. For each query it requires:
+indexes it as JSONL (the build declares and measures `relation.tuid` and `relation.s_tuid` itself; an index
+without the declarations has them as well). For each query it requires:
   * the class join to be taken (plan path class_join) where the shape allows it;
   * the same total and the same hits as the generic expansion (PANDO_FASTPATH=off), and every hit and pages at an
     offset in hit order: by the first token, then the second;
@@ -102,9 +103,8 @@ def main():
     with open(src, "w", encoding="utf-8") as f:
         for e in events:
             f.write(json.dumps(e, ensure_ascii=False) + "\n")
-    for cmd in ([a.pando_index, "--format", "jsonl", src, d],
-                [a.pando_index, "--relation", "tuid=equivalence,attr=tuid", d],
-                [a.pando_index, "--relation", "s_tuid=equivalence,attr=s_tuid", d]):
+    # no --relation: `tuid` and `s_tuid` are declared and measured by the build itself
+    for cmd in ([a.pando_index, "--format", "jsonl", src, d],):
         p = subprocess.run(cmd, capture_output=True, text=True)
         if p.returncode != 0:
             print(f"run error: {' '.join(cmd)}\n{p.stderr}")
@@ -116,6 +116,23 @@ def main():
         nonlocal failures
         failures += not ok
         print(("ok   " if ok else "FAIL ") + msg)
+
+    info = open(os.path.join(d, "corpus.info"), encoding="utf-8").read()
+    for name in ("tuid", "s_tuid"):
+        line = next((l for l in info.splitlines() if l.startswith(f"relation.{name}=")), "")
+        check(f"equivalence,attr={name}" in line and "span=" in line and "span=-1" not in line,
+              f"{name} declared and measured by the build: {line}")
+    # an index without the declarations (built before them): the layers are there all the same
+    import shutil
+    old_idx = os.path.join(tmp, "old")
+    shutil.copytree(d, old_idx)
+    with open(os.path.join(old_idx, "corpus.info"), "w", encoding="utf-8") as f:
+        f.write("".join(l + "\n" for l in info.splitlines() if not l.startswith("relation.")))
+    for q in ('a:[form="house"] =:tuid b:[]', 'a:[] =:s_tuid b:[]', '[form="house"] within s_tuid having [form="huis"]'):
+        r1 = subprocess.run([a.pando, "--count-only", d, q], capture_output=True, text=True)
+        r2 = subprocess.run([a.pando, "--count-only", old_idx, q], capture_output=True, text=True)
+        check(r1.stdout == r2.stdout and r1.returncode == 0 and r2.returncode == 0,
+              f"{q} on an index without declarations: {r2.stdout.strip() or r2.stderr.strip()[:100]}")
 
     def run(q, fast, *extra):
         env = dict(os.environ, PANDO_FASTPATH="on" if fast else "off")

@@ -190,6 +190,8 @@ private:
     /// Merged overlay token-group name → path to `groups/<orig>.jsonl` in overlay dir.
     std::unordered_map<std::string, std::string> group_index_path_override_;
     std::vector<std::pair<std::string, std::string>> overlays_;
+    // `tuid` / `*_tuid` attributes without a relation declaration: declared as equivalence layers (corpus.cpp)
+    void add_implicit_tuid_layers();
 };
 
 /// Overlay indexes kept next to a main index, in `<index_dir>/overlays/<layer>/` (each built by
