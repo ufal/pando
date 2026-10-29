@@ -71,7 +71,10 @@ public:
     size_t nodes() const { return nodes_.size(); }
 
     /// `dcoll … by attr, attr2`: also tally attr2 of every counted token (the
-    /// relation a collocate comes in, its upos, …); nullptr = none.
+    /// relation a collocate comes in, its upos, …); nullptr = none. `deprel` is
+    /// always the relation between node and collocate: for a `head` collocate the
+    /// node's deprel (over a relation layer the link's label), not the head's own
+    /// relation upwards; other attributes are the collocate's own.
     void set_breakdown(const PositionalAttr* attr) { bd_ = attr; }
 
     /// Does the counting (the nodes are buffered, so the children can be found
@@ -79,7 +82,11 @@ public:
     CollCounts finish();
 
 private:
-    void count(CorpusPos p, uint32_t times = 1);
+    // `bd`: the breakdown value to tally; kBdOwn = the counted token's own (a child: its relation to the node),
+    // else given (a head's `deprel`: the relation the node has to it, bd_label)
+    static constexpr LexiconId kBdOwn = -2;
+    void count(CorpusPos p, uint32_t times = 1, LexiconId bd = kBdOwn);
+    LexiconId bd_label(std::string_view label, CorpusPos dependent) const;
     CollCounts done() const;
     CollCounts finish_layer();
     const RelationLayer* layer_ = nullptr;

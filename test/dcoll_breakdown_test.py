@@ -44,6 +44,37 @@ def main():
                 fails.append(f"json {c['word']}: breakdown {c['breakdown']} != obs {c['obs']}")
                 break
 
+        # `dcoll head`: attr2 is the dependent's (the match's) value, the relation it has to that head, not the
+        # head's own relation upwards (2026-10-29); a reference straight from the CoNLL-U
+        ref = {}
+        for sent in open(o.conllu, encoding="utf-8").read().split("\n\n"):
+            rows = [l.split("\t") for l in sent.splitlines() if l and not l.startswith("#") and l.split("\t")[0].isdigit()]
+            by_id = {c[0]: c for c in rows}
+            for c in rows:
+                h = by_id.get(c[6])
+                if c[3] == "NOUN" and h is not None:
+                    ref.setdefault(h[2], {}).setdefault(c[7], 0)
+                    ref[h[2]][c[7]] += 1
+        j = json.loads(subprocess.run([o.pando, "--json", idx, '[upos="NOUN"]; dcoll head by lemma, deprel'],
+                                      capture_output=True, text=True).stdout)
+        got = {c["word"]: c["breakdown"] for c in j["result"]["collocates"]}
+        wrong = [w for w, b in got.items() if b != ref.get(w)]
+        if not got or wrong:
+            fails.append(f"dcoll head breakdown not the matches' relations: {[(w, got[w], ref.get(w)) for w in wrong[:3]]}")
+
+        # other attributes stay the collocate's own: `dcoll head by lemma, upos` gives the heads' word classes
+        j = json.loads(subprocess.run([o.pando, "--json", idx, '[upos="NOUN"]; dcoll head by lemma, upos'],
+                                      capture_output=True, text=True).stdout)
+        head_upos = {}
+        for sent in open(o.conllu, encoding="utf-8").read().split("\n\n"):
+            for l in sent.splitlines():
+                c = l.split("\t")
+                if l and not l.startswith("#") and c[0].isdigit():
+                    head_upos.setdefault(c[2], set()).add(c[3])
+        bad = [c["word"] for c in j["result"]["collocates"] if not set(c["breakdown"]) <= head_upos.get(c["word"], set())]
+        if bad:
+            fails.append(f"dcoll head by lemma, upos: not the heads' own upos for {bad[:3]}")
+
         # without attr2: no breakdown at all
         j = json.loads(subprocess.run([o.pando, "--json", idx, '[upos="NOUN"]; dcoll children by lemma'],
                                       capture_output=True, text=True).stdout)

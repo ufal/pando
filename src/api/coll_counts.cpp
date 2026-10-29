@@ -110,15 +110,24 @@ DcollCounter::DcollCounter(const Corpus& corpus, const PositionalAttr& pa,
     }
 }
 
-inline void DcollCounter::count(CorpusPos p, uint32_t times) {
+inline void DcollCounter::count(CorpusPos p, uint32_t times, LexiconId bd) {
     const LexiconId id = pa_.id_at(p);
     if (id < 0 || static_cast<size_t>(id) >= counts_.size()) return;
     counts_[static_cast<size_t>(id)] += times;
     total_ += times;
     if (bd_) {
-        const LexiconId b = bd_->id_at(p);
+        const LexiconId b = bd == kBdOwn ? bd_->id_at(p) : bd;
         if (b >= 0) bd_counts_[static_cast<uint64_t>(id) << 32 | static_cast<uint32_t>(b)] += times;
     }
+}
+
+// A head's breakdown value: a `deprel` breakdown is the link's relation, the dependent's deprel (over a layer the
+// link's label: a conjunct is `nsubj` of the verb it shares, its own deprel `conj`); any other attribute (upos, …)
+// is the head's own, as for every collocate.
+LexiconId DcollCounter::bd_label(std::string_view label, CorpusPos dependent) const {
+    if (!bd_ || !corpus_.has_attr("deprel") || bd_ != &corpus_.attr("deprel")) return kBdOwn;
+    if (!label.empty()) return bd_->lexicon().lookup(std::string(label));
+    return bd_->id_at(dependent);
 }
 
 CollCounts DcollCounter::done() const {
@@ -137,7 +146,7 @@ CollCounts DcollCounter::finish() {
     if (want_head_)
         for (CorpusPos node : nodes_) {
             CorpusPos h = deps.head(node);
-            if (h != NO_HEAD && h != node) count(h);
+            if (h != NO_HEAD && h != node) count(h, 1, bd_label({}, node));
         }
     if (want_descendants_)
         for (CorpusPos node : nodes_)
@@ -242,8 +251,8 @@ CollCounts DcollCounter::finish_layer() {
     if (want_head_)
         for (CorpusPos node : nodes_) {
             CorpusPos last = NO_HEAD;
-            L.for_each_head(node, [&](CorpusPos h, std::string_view) {
-                if (h != NO_HEAD && h != node && h != last) count(h);
+            L.for_each_head(node, [&](CorpusPos h, std::string_view label) {
+                if (h != NO_HEAD && h != node && h != last) count(h, 1, bd_label(label, node));
                 last = h;   // edges come sorted by head
                 return true;
             });
