@@ -225,6 +225,20 @@ int main(int argc, char* argv[]) {
     svr.Get(".*", handler);
     svr.Post(".*", handler);
 
+#ifndef _WIN32
+    // SO_REUSEADDR only (a restart rebinds past TIME_WAIT); httplib's default SO_REUSEPORT
+    // lets a second server bind a port another one listens on, and the old one keeps answering
+    svr.set_socket_options([](socket_t sock) {
+        int yes = 1;
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const void*>(&yes), sizeof(yes));
+    });
+#endif
+    // bound before the banner: a port in use is an error, not a server that never answers
+    if (!svr.bind_to_port("0.0.0.0", static_cast<int>(port))) {
+        std::cerr << "Failed to bind port " << port << " (in use by another server?)\n";
+        return 1;
+    }
+
     if (std::string(build_regex_engine()) != "re2")
         std::cerr << "WARNING: this pando-server was built without RE2: regex queries run on std::regex, "
                      "~300x slower over a large lexicon. Rebuild with RE2 (apt install libre2-dev) for production.\n";
@@ -236,7 +250,7 @@ int main(int argc, char* argv[]) {
               << (query_threads != 1 ? ", query threads " + (query_threads ? std::to_string(query_threads) : std::string("auto")) : std::string())
               << (query_timeout_ms ? ", query timeout " + std::to_string(query_timeout_ms) + " ms" : std::string())
               << "\n";
-    if (!svr.listen("0.0.0.0", static_cast<int>(port))) {
+    if (!svr.listen_after_bind()) {
         std::cerr << "Failed to listen on port " << port << "\n";
         return 1;
     }

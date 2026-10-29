@@ -532,6 +532,11 @@ if(BUILD_TESTING)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/server_sample_test.py
                 --server $<TARGET_FILE:pando-server> --pando-index $<TARGET_FILE:pando-index>
                 --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu)
+        # a port another server listens on is an error (no SO_REUSEPORT); a restart rebinds at once
+        add_test(NAME server_port
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/server_port_test.py
+                --server $<TARGET_FILE:pando-server> --pando-index $<TARGET_FILE:pando-index>
+                --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu)
         # P6.1: client sessions (stored hit sets, sort / count / pages without re-running)
         add_test(NAME server_sessions
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/server_sessions_test.py
