@@ -165,6 +165,10 @@ def main():
         ('a:[form="is"] =:tuid b:[form="is"]', FORM("is"), FORM("is")),
         ('a:[form="dog"] =:tuid b:[] :: a.text_lang="eng" & b.text_lang!="eng"',
          AND(FORM("dog"), LANG("eng")), lambda i: toks[i][1] != "eng"),
+        # a language in the token (sliced search, 2026-10-29): the languages lie in turns, so each side's slice is
+        # several stretches; the narrow side either first or second
+        ('a:[text_lang="eng"] =:tuid b:[form="huis" & text_lang="nld"]', LANG("eng"), AND(FORM("huis"), LANG("nld"))),
+        ('a:[form="the" & text_lang="eng"] =:tuid b:[text_lang="nld"]', AND(FORM("the"), LANG("eng")), LANG("nld")),
     ]
     for q, fa, fb in cases:
         want = brute(fa, fb)
@@ -264,6 +268,8 @@ def main():
         ('a:[form="house"] =:s_tuid b:[form="huis"]', FORM("house"), FORM("huis")),
         ('a:[] =:s_tuid b:[] :: a.text_lang="eng" & b.text_lang="ces"', LANG("eng"), LANG("ces")),
         ('a:[form="is"] =:s_tuid b:[form="is"]', FORM("is"), FORM("is")),
+        ('a:[form="is" & text_lang="eng"] =:s_tuid b:[text_lang="nld"]', AND(FORM("is"), LANG("eng")), LANG("nld")),
+        ('a:[text_lang="ces"] =:s_tuid b:[] :: b.text_lang="eng"', LANG("ces"), LANG("eng")),
     ]:
         ref = sorted((i, j) for i in range(n) for j in range(n) if i != j and fa(i) and fb(j) and same_s(i, j))
         fast, slow = hits(q, True), hits(q, False)

@@ -10,6 +10,7 @@
 #include "query/executor_aggregate_internal.h"
 
 #include <algorithm>
+#include <functional>
 #include <iterator>
 #include <optional>
 #include <unordered_map>
@@ -24,6 +25,75 @@ struct Member {
     LexiconId cls;
     bool in_a, in_b;
 };
+
+// Sorted, disjoint, inclusive position intervals: a side's slice of the corpus.
+using Slice = std::vector<std::pair<CorpusPos, CorpusPos>>;
+
+Slice slice_intersect(const Slice& a, const Slice& b) {
+    Slice out;
+    for (size_t i = 0, j = 0; i < a.size() && j < b.size();) {
+        const CorpusPos lo = std::max(a[i].first, b[j].first), hi = std::min(a[i].second, b[j].second);
+        if (lo <= hi) out.emplace_back(lo, hi);
+        if (a[i].second < b[j].second) ++i;
+        else ++j;
+    }
+    return out;
+}
+
+Slice slice_union(const Slice& a, const Slice& b) {
+    Slice all(a);
+    all.insert(all.end(), b.begin(), b.end());
+    std::sort(all.begin(), all.end());
+    Slice out;
+    for (const auto& [lo, hi] : all) {
+        if (!out.empty() && lo <= out.back().second + 1) out.back().second = std::max(out.back().second, hi);
+        else out.emplace_back(lo, hi);
+    }
+    return out;
+}
+
+bool in_slice(const Slice& s, CorpusPos p) {
+    auto it = std::upper_bound(s.begin(), s.end(), p,
+                               [](CorpusPos v, const std::pair<CorpusPos, CorpusPos>& x) { return v < x.first; });
+    return it != s.begin() && p <= std::prev(it)->second;
+}
+
+size_t slice_tokens(const Slice& s) {
+    size_t n = 0;
+    for (const auto& [lo, hi] : s) n += static_cast<size_t>(hi - lo + 1);
+    return n;
+}
+
+// f(lo, hi) for each part of [a, b] inside the slice
+template <typename F>
+void clip(const Slice& s, CorpusPos a, CorpusPos b, F&& f) {
+    auto it = std::lower_bound(s.begin(), s.end(), a,
+                               [](const std::pair<CorpusPos, CorpusPos>& x, CorpusPos v) { return x.second < v; });
+    for (; it != s.end() && it->first <= b; ++it) f(std::max(a, it->first), std::min(b, it->second));
+}
+
+// The tokens of the regions whose attribute (`text_lang`) has exactly this value, as a slice: what
+// `[text_lang="cs"]` or `:: b.text_lang="cs"` allows. false when the index cannot give it (not a region
+// attribute, no reverse index, a multivalue attribute, the empty value).
+bool region_value_slice(const Corpus& corpus, const std::string& attr, const std::string& value, Slice& out) {
+    RegionAttrParts parts;
+    if (value.empty() || corpus.has_attr(attr) || corpus.is_multivalue(attr) || !split_region_attr_name(attr, parts)
+        || !corpus.has_structure(parts.struct_name))
+        return false;
+    const StructuralAttr& sa = corpus.structure(parts.struct_name);
+    const auto key = resolve_region_attr_key(sa, parts.struct_name, parts.attr_name);
+    const int64_t* rs = nullptr;
+    size_t n = 0;
+    if (!key || !sa.regions_for_value(*key, value, rs, n)) return false;
+    Slice iv;
+    iv.reserve(n);
+    for (size_t k = 0; k < n; ++k) {
+        const Region r = sa.get(static_cast<size_t>(rs[k]));
+        if (r.start <= r.end) iv.emplace_back(r.start, r.end);
+    }
+    out = slice_union(iv, {});
+    return true;
+}
 
 }  // namespace
 
@@ -141,22 +211,58 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
         const StructuralAttr* regions = nullptr;
         std::vector<int8_t> memo;   // per region: -1 not yet evaluated, else the outcome
     };
+    // A side's language (sliced search): a region attribute with one value, `[… & text_lang="cs"]` at the top of
+    // its token conditions or `:: b.text_lang="cs"`, holds for a few long stretches of the corpus when the corpus
+    // keeps a language together (OPUS / TEITOK projects: a folder per language). Such conditions become the side's
+    // slice: it is listed interval by interval, its members are tested by interval, and the class members read for
+    // it are those inside the slice (an `s_tuid` class holds a sentence in every language; one is wanted).
     struct Side {
-        const ConditionPtr* cond = nullptr;
+        ConditionPtr cond;   // its token conditions, without those taken into the slice
         std::vector<Filter> filters;
         NameIndexMap names;
         std::vector<CorpusPos> listed;   // its candidates, when its conditions narrow it down
         bool has_list = false;
+        bool sliced = false;
+        Slice slice;
     };
     Side side[2];
+    auto narrow = [](Side& s, Slice iv) {
+        s.slice = s.sliced ? slice_intersect(s.slice, iv) : std::move(iv);
+        s.sliced = true;
+    };
+    // the region-attribute leaves ANDed at the top of a condition go into the slice; the rest is returned
+    std::function<ConditionPtr(const ConditionPtr&, Side&)> take_slices = [&](const ConditionPtr& c,
+                                                                                Side& s) -> ConditionPtr {
+        if (!c) return c;
+        if (c->is_leaf) {
+            const AttrCondition& ac = c->leaf;
+            Slice iv;
+            if (ac.op == CompOp::EQ && !ac.case_insensitive && !ac.diacritics_insensitive && !ac.is_nvals
+                && !ac.in_positions && !ac.in_regions && region_value_slice(corpus_, normalize_attr(ac.attr), ac.value, iv)) {
+                narrow(s, std::move(iv));
+                return nullptr;
+            }
+            return c;
+        }
+        if (c->is_structural || c->is_count || c->bool_op != BoolOp::AND) return c;
+        ConditionPtr l = take_slices(c->left, s), r = take_slices(c->right, s);
+        if (!l) return r;
+        if (!r) return l;
+        if (l == c->left && r == c->right) return c;
+        return ConditionNode::make_branch(BoolOp::AND, l, r);
+    };
     for (int i = 0; i < 2; ++i) {
-        side[i].cond = &q.tokens[static_cast<size_t>(i)].conditions;
+        side[i].cond = take_slices(q.tokens[static_cast<size_t>(i)].conditions, side[i]);
         if (!q.tokens[static_cast<size_t>(i)].name.empty()) side[i].names[q.tokens[static_cast<size_t>(i)].name] = 0;
     }
     for (const auto& f : q.global_region_filters) {
         if (f.positions || f.anchor_name.empty()) return std::nullopt;
         int i = f.anchor_name == q.tokens[0].name ? 0 : f.anchor_name == q.tokens[1].name ? 1 : -1;
         if (i < 0) return std::nullopt;
+        if (Slice iv; f.op == CompOp::EQ && !f.regex && region_value_slice(corpus_, f.region_attr, f.value, iv)) {
+            narrow(side[i], std::move(iv));
+            continue;
+        }
         Filter flt;
         flt.one.global_region_filters.push_back(f);
         const size_t us = f.region_attr.find('_');
@@ -170,8 +276,11 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
     // a side's token conditions: membership in its resolved candidates when it has them (a region attribute as a
     // token condition, `[text_iso="eng"]`, is costly to test token by token), else tested at the token
     auto passes = [&](Side& s, CorpusPos p) {
-        if (s.has_list ? !std::binary_search(s.listed.begin(), s.listed.end(), p) : !check_conditions(p, *s.cond))
+        if (s.has_list) {
+            if (!std::binary_search(s.listed.begin(), s.listed.end(), p)) return false;
+        } else if ((s.sliced && !in_slice(s.slice, p)) || !check_conditions(p, s.cond)) {
             return false;
+        }
         for (Filter& f : s.filters) {
             const int64_t r = f.regions ? f.regions->find_region(p) : -1;
             if (r >= 0 && f.memo[static_cast<size_t>(r)] >= 0) {
@@ -190,14 +299,47 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
     // a side's candidates: from its token conditions, else from a region filter (the tokens of the regions it
     // holds for, `b.text_iso="ces"`); a side with neither has no list
     auto restricted = [&](const Side& s) {
-        if (*s.cond) return true;
+        if (s.cond || s.sliced) return true;
         for (const Filter& f : s.filters)
             if (f.regions) return true;
         return false;
     };
     auto list_side = [&](Side& s) {
-        if (*s.cond) {
-            s.listed = resolve_conditions(*s.cond);
+        if (s.sliced) {
+            // the slice's tokens meeting the rest: the rest's postings read interval by interval (each a binary
+            // search into them), or, when the rest is the rarer, its positions kept where they fall in the slice
+            const size_t in_slice_n = slice_tokens(s.slice);
+            if (s.cond && estimate_cardinality(s.cond) < in_slice_n / 4) {
+                for (CorpusPos p : resolve_conditions(s.cond))
+                    if (in_slice(s.slice, p)) s.listed.push_back(p);
+            } else {
+                s.listed.reserve(s.cond ? 0 : in_slice_n);
+                for (const auto& [lo, hi] : s.slice) {
+                    if (!s.cond) {
+                        for (CorpusPos p = lo; p <= hi; ++p) s.listed.push_back(p);
+                        continue;
+                    }
+                    QueryExecutor w(*this, nullptr, progress_);
+                    w.operand_window_ = {lo, hi + 1};
+                    const std::vector<CorpusPos> part = w.resolve_conditions(s.cond);
+                    s.listed.insert(s.listed.end(), part.begin(), part.end());
+                }
+            }
+            if (!s.filters.empty())
+                s.listed.erase(std::remove_if(s.listed.begin(), s.listed.end(), [&](CorpusPos p) {
+                    for (Filter& f : s.filters) {
+                        Match m;
+                        m.positions = {p};
+                        m.span_ends = {p};
+                        if (!match_passes_inline_region_filters(m, f.one, s.names)) return true;
+                    }
+                    return false;
+                }), s.listed.end());
+            s.has_list = true;
+            return;
+        }
+        if (s.cond) {
+            s.listed = resolve_conditions(s.cond);
             s.has_list = true;
             return;
         }
@@ -220,8 +362,34 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
     // the narrower side by the lexicon's counts, before anything is listed (a side with only a region filter counts
     // as every token); only it is listed now
     size_t est[2];
-    for (int i = 0; i < 2; ++i)
-        est[i] = *side[i].cond ? estimate_cardinality(*side[i].cond) : static_cast<size_t>(corpus_.size());
+    for (int i = 0; i < 2; ++i) {
+        est[i] = side[i].cond ? estimate_cardinality(side[i].cond) : static_cast<size_t>(corpus_.size());
+        if (side[i].sliced) est[i] = std::min(est[i], slice_tokens(side[i].slice));
+    }
+    // the class members worth reading: those in either side's slice, when both sides have one
+    const bool clipped = side[0].sliced && side[1].sliced;
+    const Slice either = clipped ? slice_union(side[0].slice, side[1].slice) : Slice{};
+    auto for_each_member = [&](LexiconId c, const Slice* only, auto&& f) {
+        if (only && classes.regions()) {
+            classes.for_each_range(c, [&](CorpusPos a, CorpusPos b) {
+                clip(*only, a, b, [&](CorpusPos lo, CorpusPos hi) {
+                    for (CorpusPos p = lo; p <= hi; ++p) f(p);
+                });
+            });
+            return;
+        }
+        classes.for_each_member(c, [&](CorpusPos p) {
+            if (!only || in_slice(*only, p)) f(p);
+        });
+    };
+    auto members_in = [&](LexiconId c, const Slice* only) {
+        if (!only || !classes.regions()) return classes.size(c);
+        size_t n = 0;
+        classes.for_each_range(c, [&](CorpusPos a, CorpusPos b) {
+            clip(*only, a, b, [&](CorpusPos lo, CorpusPos hi) { n += static_cast<size_t>(hi - lo + 1); });
+        });
+        return n;
+    };
     const bool r0 = restricted(side[0]), r1 = restricted(side[1]);
     const int driver = r0 && (!r1 || est[0] <= est[1]) ? 0 : r1 ? 1 : -1;
     if (driver >= 0) list_side(side[driver]);
@@ -264,7 +432,7 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
             if (!passes(side[0], a)) return;
             bs.clear();
             classes.for_each_class(a, [&](LexiconId c) {
-                classes.for_each_member(c, [&](CorpusPos b) {
+                for_each_member(c, side[1].sliced ? &side[1].slice : nullptr, [&](CorpusPos b) {
                     if ((with_self || b != a) && passes(side[1], b)) bs.push_back(b);
                 });
             });
@@ -302,7 +470,7 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
             if (classes.is_class(c)) touched.push_back(c);
     }
     size_t scan_cost = 0;
-    for (LexiconId c : touched) scan_cost += classes.size(c);
+    for (LexiconId c : touched) scan_cost += members_in(c, clipped ? &either : nullptr);
     // the other side listed only when that is cheaper than testing it at the members of the touched classes
     if (driver >= 0 && restricted(side[1 - driver]) && est[1 - driver] < scan_cost) list_side(side[1 - driver]);
     if (side[0].has_list && side[1].has_list && side[0].listed.size() + side[1].listed.size() < scan_cost) {
@@ -318,7 +486,7 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
                          [](const Member& x, const Member& y) { return x.cls < y.cls; });
     } else {
         for (LexiconId c : touched)
-            classes.for_each_member(c, [&](CorpusPos p) {
+            for_each_member(c, clipped ? &either : nullptr, [&](CorpusPos p) {
                 const bool a = passes(side[0], p), b = passes(side[1], p);
                 if (a || b) members.push_back({p, c, a, b});
             });
