@@ -3999,7 +3999,7 @@ int main(int argc, char* argv[]) {
         try {
             run_query(corpus, opts.query, opts, session, opts.timing ? &timing : nullptr);
             if (opts.timing)
-                std::cerr << "open_sec=" << std::fixed << std::setprecision(3) << timing.open_sec
+                std::cerr << "open_sec=" << std::fixed << std::setprecision(6) << timing.open_sec
                           << " query_sec=" << timing.query_sec
                           << " fetch_sec=" << timing.fetch_sec
                           << " total=" << timing.total

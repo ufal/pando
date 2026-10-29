@@ -94,6 +94,7 @@ void walk_query(const TokenQuery& q, Uses& u) {
             u.negated_relation = true;
     }
     walk_cond(q.within_having, u);
+    for (const auto& w : q.more_withins) walk_cond(w.having, u);
     for (const auto& cc : q.containing_clauses) walk_cond(cc.subtree_cond, u);
 }
 

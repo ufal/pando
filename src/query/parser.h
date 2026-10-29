@@ -54,7 +54,7 @@ private:
     bool try_parse_relation(QueryRelation& rel, bool in_filter = false);
 
     // Parse the within clause: "within s", "within s_tuid='X'", "within s having [cond]"
-    void parse_within_clause(TokenQuery& tq);
+    void parse_within_clause(TokenQuery& tq, bool negated = false);
 
     // Parse "containing s", "containing subtree [cond]"
     void parse_containing_clause(TokenQuery& tq, bool negated);

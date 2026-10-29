@@ -346,6 +346,15 @@ struct ContainingClause {
 // corpus `ces` has a hit of B; `!within`: not inside one (executor_aligned.cpp). In pando's single index the
 // aligned segments are an `s_tuid` class and `ces` a value of a document attribute (`text_iso="ces"`).
 struct TokenQuery;
+/// A second `within …` clause and later ones: each restricts the hits as well (`within s_tuid having [A] within
+/// s_tuid having [B]`: aligned with an A and with a B). Applied before execution as position restrictions
+/// (QueryExecutor::rewrite_more_withins).
+struct WithinClause {
+    std::string  within;
+    bool         not_within = false;
+    ConditionPtr having;
+};
+
 struct AlignedPart {
     std::string corpus;                  // as written: resolved against the document attributes
     bool negated = false;                // !within
@@ -370,6 +379,7 @@ struct TokenQuery {
     /// Manatee's `within corpus: query` clauses, applied left to right after `within` (AlignedPart)
     std::vector<AlignedPart> aligned_parts;
     ConditionPtr               within_having;  // "within s having [cond]": existential check on region
+    std::vector<WithinClause>  more_withins;   // the second `within` clause and later ones (WithinClause)
     std::vector<ContainingClause>     containing_clauses;  // "containing s", "containing subtree [cond]"
     std::vector<GlobalRegionFilter>   global_region_filters;    // :: match.text_year > 2000
     std::vector<GlobalAlignmentFilter> global_alignment_filters; // :: a.tuid = b.tuid

@@ -112,8 +112,9 @@ std::optional<MatchSet> QueryExecutor::execute_class_join(const TokenQuery& q, s
     if (!decl || decl->kind != RelationDecl::Kind::Equivalence || !rel.label.empty()) return std::nullopt;
     for (const auto& tok : q.tokens)
         if (tok.has_repetition() || tok.is_anchor() || tok.is_dep_subtree) return std::nullopt;
+    // `:: a.X = b.Y` between the two tokens is read by class_join (as part of the classes); other shapes return nullopt
     if (!q.within.empty() || q.not_within || q.within_having || !q.containing_clauses.empty()
-        || !q.global_alignment_filters.empty() || !q.global_function_filters.empty() || !q.position_orders.empty())
+        || !q.global_function_filters.empty() || !q.position_orders.empty())
         return std::nullopt;
     // a default within narrower than the layer's scope would cut the classes: the generic path drops it for such
     // layers (layer_crosses_default_within); one as wide or wider holds every class, so the classes stand as they are
@@ -281,6 +282,55 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
         }
         side[i].filters.push_back(std::move(flt));
     }
+    // `:: a.X = b.Y` between the two tokens, X and Y plain token attributes with one value each (`a.lemma = b.lemma`):
+    // a pair holds when the two values are the same, as the generic path's alignment filter compares them (a missing
+    // value, "_" or empty, is the same as nothing). The members are then grouped by class and value, and the groups
+    // are read below as the classes are: a pair is two tokens of one group. A value is read as an id of X's lexicon
+    // (Y's ids looked up in it, once each); any other filter between the tokens is not of this shape.
+    struct PairKey {
+        const PositionalAttr* pa[2];
+        std::vector<LexiconId> mapped;   // Y's id → X's id when Y is another attribute (kUnmapped: not looked up yet)
+        std::vector<int8_t> missing[2];  // per side and id: -1 not yet read, else whether the value is missing
+    };
+    constexpr LexiconId kUnmapped = UNKNOWN_LEX - 1;
+    std::vector<PairKey> keys;
+    for (const auto& af : q.global_alignment_filters) {
+        const int i1 = af.name1 == q.tokens[0].name ? 0 : af.name1 == q.tokens[1].name ? 1 : -1;
+        const int i2 = af.name2 == q.tokens[0].name ? 0 : af.name2 == q.tokens[1].name ? 1 : -1;
+        if (i1 < 0 || i2 < 0 || i1 == i2 || q.tokens[0].name.empty()) return std::nullopt;
+        const std::string an1 = normalize_attr(af.attr1), an2 = normalize_attr(af.attr2);
+        for (const std::string* an : {&an1, &an2})
+            if (!corpus_.has_attr(*an) || corpus_.is_multivalue(*an) || Corpus::is_internal_attr_name(*an))
+                return std::nullopt;
+        PairKey k;
+        k.pa[i1] = &corpus_.attr(an1);
+        k.pa[i2] = &corpus_.attr(an2);
+        if (k.pa[0] != k.pa[1]) k.mapped.assign(static_cast<size_t>(k.pa[1]->lexicon().size()), kUnmapped);
+        for (int s = 0; s < 2; ++s) k.missing[s].assign(static_cast<size_t>(k.pa[s]->lexicon().size()), -1);
+        keys.push_back(std::move(k));
+    }
+    // the values of the token at p on side s, as ids of the X lexicons; false when one is missing (no pair then)
+    auto key_of = [&](int s, CorpusPos p, std::vector<LexiconId>& out) {
+        out.clear();
+        for (PairKey& k : keys) {
+            LexiconId id = k.pa[s]->id_at(p);
+            if (id < 0 || static_cast<size_t>(id) >= k.missing[s].size()) return false;
+            int8_t& miss = k.missing[s][static_cast<size_t>(id)];
+            if (miss < 0) {
+                const std::string_view v = k.pa[s]->lexicon().get(id);
+                miss = !include_empty_alignment_values_ && (v.empty() || v == "_");
+            }
+            if (miss) return false;
+            if (s == 1 && !k.mapped.empty()) {
+                LexiconId& m = k.mapped[static_cast<size_t>(id)];
+                if (m == kUnmapped) m = k.pa[0]->lexicon().lookup(k.pa[1]->lexicon().get(id));
+                if (m == UNKNOWN_LEX) return false;
+                id = m;
+            }
+            out.push_back(id);
+        }
+        return true;
+    };
     // a side's token conditions: membership in its resolved candidates when it has them (a region attribute as a
     // token condition, `[text_iso="eng"]`, is costly to test token by token), else tested at the token; `ex`: the
     // executor testing them (a thread's own)
@@ -441,13 +491,14 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
     if (!count_total && !aggregating && max_matches != SIZE_MAX && (driver != 1 || est[0] / 8 <= est[1])) {
         if (driver == 1 && restricted(side[0])) list_side(side[0]);
         std::vector<CorpusPos> bs;
+        std::vector<LexiconId> ka, kb;
         bool full = false;
         auto take = [&](CorpusPos a) {
-            if (!passes(side[0], a)) return;
+            if (!passes(side[0], a) || !key_of(0, a, ka)) return;
             bs.clear();
             classes.for_each_class(a, [&](LexiconId c) {
                 for_each_member(c, side[1].sliced ? &side[1].slice : nullptr, [&](CorpusPos b) {
-                    if ((with_self || b != a) && passes(side[1], b)) bs.push_back(b);
+                    if ((with_self || b != a) && passes(side[1], b) && key_of(1, b, kb) && kb == ka) bs.push_back(b);
                 });
             });
             std::sort(bs.begin(), bs.end());
@@ -555,6 +606,58 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
             members.reserve(n);
             for (auto& part : parts) members.insert(members.end(), part.begin(), part.end());
         }
+    }
+    // with `:: a.X = b.Y`: each class split into groups by the members' values, a group numbered like a class (in
+    // class order, so the rows stay grouped). A member on both sides whose two values differ (X and Y two attributes)
+    // is two rows, one per side; it cannot pair with itself then.
+    if (!keys.empty()) {
+        const size_t nk = keys.size();
+        std::vector<Member> grouped, rows;
+        grouped.reserve(members.size());
+        std::vector<LexiconId> rkeys;   // the rows' values, nk per row
+        std::vector<size_t> order;
+        std::vector<LexiconId> ka, kb;
+        auto key_less = [&](size_t x, size_t y) {
+            return std::lexicographical_compare(rkeys.begin() + static_cast<std::ptrdiff_t>(x * nk),
+                                                rkeys.begin() + static_cast<std::ptrdiff_t>((x + 1) * nk),
+                                                rkeys.begin() + static_cast<std::ptrdiff_t>(y * nk),
+                                                rkeys.begin() + static_cast<std::ptrdiff_t>((y + 1) * nk));
+        };
+        LexiconId group = 0;
+        for (size_t i = 0; i < members.size();) {
+            size_t j = i;
+            rows.clear();
+            rkeys.clear();
+            for (; j < members.size() && members[j].cls == members[i].cls; ++j) {
+                const Member& m = members[j];
+                const bool a = m.in_a && key_of(0, m.pos, ka), b = m.in_b && key_of(1, m.pos, kb);
+                if (a && b && ka == kb) {
+                    rows.push_back(m);
+                    rkeys.insert(rkeys.end(), ka.begin(), ka.end());
+                    continue;
+                }
+                if (a) {
+                    rows.push_back({m.pos, m.cls, true, false});
+                    rkeys.insert(rkeys.end(), ka.begin(), ka.end());
+                }
+                if (b) {
+                    rows.push_back({m.pos, m.cls, false, true});
+                    rkeys.insert(rkeys.end(), kb.begin(), kb.end());
+                }
+            }
+            order.resize(rows.size());
+            for (size_t k = 0; k < rows.size(); ++k) order[k] = k;
+            std::stable_sort(order.begin(), order.end(), key_less);
+            for (size_t k = 0; k < order.size(); ++k) {
+                if (k > 0 && key_less(order[k - 1], order[k])) ++group;
+                Member m = rows[order[k]];
+                m.cls = group;
+                grouped.push_back(m);
+            }
+            if (!rows.empty()) ++group;
+            i = j;
+        }
+        members = std::move(grouped);
     }
     // the count per class; a class without both an A and a B member holds no pair and is dropped
     size_t total = 0;
@@ -856,6 +959,71 @@ bool QueryExecutor::rewrite_within_class(const TokenQuery& q, TokenQuery& out) c
     GlobalRegionFilter gf;
     gf.positions = std::move(iv);
     out.global_region_filters.push_back(std::move(gf));
+    return true;
+}
+
+// `… within L1 having [A] within L2 having [B]`: every clause restricts the hits. The first stays as it is; each
+// later one becomes a filter on the hit's position: an equivalence layer as rewrite_within_class has it, a region
+// (one-token queries: the token lies in such a region) through its regions with a C token, or all of them.
+bool QueryExecutor::rewrite_more_withins(const TokenQuery& q, TokenQuery& out) const {
+    if (q.more_withins.empty()) return false;
+    out = q;
+    out.more_withins.clear();
+    for (const WithinClause& w : q.more_withins) {
+        TokenQuery one;
+        one.tokens = q.tokens;
+        one.within = w.within;
+        one.not_within = w.not_within;
+        one.within_having = w.having;
+        TokenQuery cq;
+        if (rewrite_within_class(one, cq)) {
+            out.global_region_filters.push_back(std::move(cq.global_region_filters.back()));
+            continue;
+        }
+        if (!corpus_.has_structure(w.within))
+            throw std::runtime_error("within " + w.within + ": the corpus has no region or class layer of that name");
+        if (q.tokens.size() != 1 || q.tokens[0].has_repetition() || q.tokens[0].is_anchor())
+            throw std::runtime_error("a second within on regions (" + w.within + ") takes a one-token query; "
+                                     "for longer queries: one within " + w.within + " and :: filters");
+        const auto& sa = corpus_.structure(w.within);
+        std::vector<int64_t> regions;
+        if (w.having) {
+            compile_conditions(w.having);
+            int64_t hint = -1;
+            for (CorpusPos p : resolve_conditions(w.having)) {
+                const int64_t r = sa.find_region_from(p, hint);
+                if (r >= 0) { hint = r; regions.push_back(r); }
+            }
+            std::sort(regions.begin(), regions.end());
+            regions.erase(std::unique(regions.begin(), regions.end()), regions.end());
+        } else {
+            for (size_t r = 0; r < sa.region_count(); ++r) regions.push_back(static_cast<int64_t>(r));
+        }
+        std::vector<std::pair<int64_t, int64_t>> spans;
+        for (int64_t r : regions) {
+            const Region reg = sa.get(static_cast<size_t>(r));
+            if (reg.start <= reg.end) spans.emplace_back(reg.start, reg.end);
+        }
+        std::sort(spans.begin(), spans.end());
+        auto iv = std::make_shared<std::vector<std::pair<int64_t, int64_t>>>();
+        for (const auto& [a, b] : spans) {
+            if (!iv->empty() && a <= iv->back().second + 1) iv->back().second = std::max<int64_t>(iv->back().second, b);
+            else iv->push_back({a, b});
+        }
+        if (w.not_within) {
+            auto co = std::make_shared<std::vector<std::pair<int64_t, int64_t>>>();
+            int64_t from = 0;
+            for (const auto& [a, b] : *iv) {
+                if (a > from) co->push_back({from, a - 1});
+                from = b + 1;
+            }
+            if (from < corpus_.size()) co->push_back({from, corpus_.size() - 1});
+            iv = std::move(co);
+        }
+        GlobalRegionFilter gf;
+        gf.positions = std::move(iv);
+        out.global_region_filters.push_back(std::move(gf));
+    }
     return true;
 }
 

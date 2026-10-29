@@ -287,6 +287,33 @@ def main():
     fast, slow = with_pairs(q, True), with_pairs(q, False)
     check(fast == ref and slow == ref, f"{q}: {len(fast)} pairs (general joins {len(slow)}, reference {len(ref)})")
 
+    # `:: a.form = b.form` between the two tokens (the same word on both sides, 2026-10-29): the class join groups
+    # the classes by the value; the hits, the total, a page and `count by` as the reference and the generic path.
+    # A multivalue attribute (`a.form = b.tuid`) is not of this shape: the generic path, with the same hits.
+    same_tu = lambda i, j: bool(toks[i][2] & toks[j][2])
+    for q, fa, fb, link, joined in [
+        ('a:[] =:s_tuid b:[] :: a.form = b.form', ANY, ANY, same_s, True),
+        ('a:[text_lang="eng"] =:s_tuid b:[text_lang="nld"] :: a.form = b.form', LANG("eng"), LANG("nld"), same_s, True),
+        ('a:[] =:tuid b:[] :: a.form = b.form', ANY, ANY, same_tu, True),
+        ('a:[form="is"] =:tuid b:[] :: b.form = a.form & b.text_lang="nld"', FORM("is"), LANG("nld"), same_tu, True),
+        ('a:[] =:s_tuid b:[] :: a.form = b.tuid', ANY, ANY, None, False),
+    ]:
+        if link:
+            ref = sorted((i, j) for i in range(n) for j in range(n)
+                         if i != j and fa(i) and fb(j) and link(i, j) and toks[i][0] == toks[j][0])
+        else:
+            ref = sorted(hits(q, False))
+        fast, slow = hits(q, True), hits(q, False)
+        r = subprocess.run([a.pando, "--timing", "--count-only", d, q], capture_output=True, text=True)
+        plan = "path=class_join" in r.stdout + r.stderr
+        check(fast == ref and sorted(slow) == ref and plan == joined and (r.stdout.split() or ["?"])[0] == str(len(ref))
+              and hits(q, True, 3, 5) == ref[3:8],
+              f"{q}: {len(fast)} hits (generic {len(slow)}, reference {len(ref)}), total, page, "
+              f"plan {'class_join' if joined else 'generic'}")
+        if joined:
+            cq = f"{q}; count by a.text_lang, b.text_lang"
+            check(run(cq, True) == run(cq, False), f"{cq}: as the generic path")
+
     # `within L [having [C]]` / `not within …` with L an equivalence layer: the hit's class (one with a C token)
     def classes_of(i, layer):
         return toks[i][2] if layer == "tuid" else ({stuids[i]} if stuids[i] else set())
@@ -307,6 +334,35 @@ def main():
     r = subprocess.run([a.pando, "--count-only", d, '[form="the"] [] within s_tuid'], capture_output=True, text=True)
     check("one-token query" in r.stdout + r.stderr and "=:s_tuid" in r.stdout + r.stderr,
           "two tokens within s_tuid: refused, pointing to =:s_tuid")
+    # two `within` clauses: both restrict the hits (the second once replaced the first), in either order, mixed with
+    # `not within` and with a region
+    def in_layer(i, layer, hc, neg):
+        with_c = set()
+        for j in range(n):
+            if hc(j):
+                with_c |= classes_of(j, layer)
+        return bool(classes_of(i, layer) & with_c) != neg
+    for layer in ("s_tuid", "tuid"):
+        for (h1, c1, n1), (h2, c2, n2) in [
+                (('[text_lang="nld"]', LANG("nld"), False), ('[text_lang="ces"]', LANG("ces"), False)),
+                (('[text_lang="ces"]', LANG("ces"), False), ('[text_lang="nld"]', LANG("nld"), False)),
+                (('[text_lang="nld"]', LANG("nld"), False), ('[form="huis"]', FORM("huis"), True)),
+                (('[form="huis"]', FORM("huis"), True), ('[text_lang="nld"]', LANG("nld"), False))]:
+            w = lambda h, neg: f'{"not " if neg else ""}within {layer} having {h}'
+            q = f'[text_lang="eng"] {w(h1, n1)} {w(h2, n2)}'
+            want = sum(1 for i in range(n) if toks[i][1] == "eng"
+                       and in_layer(i, layer, c1, n1) and in_layer(i, layer, c2, n2))
+            got = run(q, True, "--count-only").split()
+            got_s = run(q, False, "--count-only").split()
+            check(got[-1:] == [str(want)] and got_s[-1:] == [str(want)],
+                  f"{q}: {got[-1] if got else '?'} (generic {got_s[-1] if got_s else '?'}, reference {want})")
+    want = sum(1 for i in range(n) if toks[i][1] == "eng" and in_layer(i, "s_tuid", LANG("nld"), False))
+    for q in ('[text_lang="eng"] within s within s_tuid having [text_lang="nld"]',
+              '[text_lang="eng"] within s_tuid having [text_lang="nld"] within s'):
+        got = run(q, True, "--count-only").split()
+        check(got[-1:] == [str(want)], f"{q}: {got[-1] if got else '?'} (reference {want})")
+    r = subprocess.run([a.pando, "--count-only", d, '[] [] within s within text'], capture_output=True, text=True)
+    check("one-token query" in r.stdout + r.stderr, "two tokens, a second within on regions: refused")
 
     # --aligned: each hit with the sentences aligned with it (aligned_pieces.h): over s_tuid the other sentences of
     # its sentence's class, over tuid the sentences of its tokens' class mates with those marked; --aligned-where

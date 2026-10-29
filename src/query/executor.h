@@ -950,6 +950,9 @@ public:
     // `[A] within L [having [C]]` / `not within L …` with L an equivalence layer: rewritten into a position filter
     // (the intervals of the classes in question). false when `within` names no equivalence layer.
     bool rewrite_within_class(const TokenQuery& q, TokenQuery& out) const;
+    // The second `within` clause and later ones (TokenQuery::more_withins) as position filters; false when there are
+    // none. Throws when one cannot be (a region clause on a query of more than one token).
+    bool rewrite_more_withins(const TokenQuery& q, TokenQuery& out) const;
     // A relation layer of the query (in its chain or a `::` filter) whose declared scope is wider than the corpus's
     // default_within (scope corpus, or another region): the default does not apply to that query.
     bool layer_crosses_default_within(const TokenQuery& q) const;

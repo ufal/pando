@@ -8479,6 +8479,9 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                        aggregate_by_fields, skip_name_validation);
     // relation layers: `>:head` is the basic tree; another layer goes through the generic expansion
     // (for_each_related with the layer, executor_layers.cpp), which every dependency fast path leaves to it
+    if (TokenQuery wq; rewrite_more_withins(query, wq))
+        return execute(wq, max_matches, count_total, max_total_cap, sample_size, random_seed, num_threads,
+                       aggregate_by_fields, skip_name_validation);
     if (TokenQuery hq; rewrite_head_layer(query, hq))
         return execute(hq, max_matches, count_total, max_total_cap, sample_size, random_seed, num_threads,
                        aggregate_by_fields, skip_name_validation);

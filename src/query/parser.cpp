@@ -195,8 +195,7 @@ Statement Parser::parse_statement() {
                 Token next = lexer_.peek();
                 if (next.type == TokType::IDENT && next.text == "within") {
                     lexer_.consume();
-                    stmt.query.not_within = true;
-                    parse_within_clause(stmt.query);
+                    parse_within_clause(stmt.query, /*negated=*/true);
                 } else if (next.type == TokType::IDENT && next.text == "containing") {
                     lexer_.consume();
                     parse_containing_clause(stmt.query, true);
@@ -839,8 +838,7 @@ TokenQuery Parser::parse_token_query() {
             Token next = lexer_.peek();
             if (next.type == TokType::IDENT && next.text == "within") {
                 lexer_.consume();
-                tq.not_within = true;
-                parse_within_clause(tq);
+                parse_within_clause(tq, /*negated=*/true);
             } else if (next.type == TokType::IDENT && next.text == "containing") {
                 lexer_.consume();
                 parse_containing_clause(tq, /*negated=*/true);
@@ -1501,7 +1499,16 @@ void Parser::read_region_filter_value(GlobalRegionFilter& gf) {
         throw std::runtime_error("A pattern in a region filter can only be used with = or !=");
 }
 
-void Parser::parse_within_clause(TokenQuery& tq) {
+void Parser::parse_within_clause(TokenQuery& tq, bool negated) {
+    // a second `within` clause: parsed on its own, kept besides the first (WithinClause)
+    if (!tq.within.empty()) {
+        TokenQuery more;
+        parse_within_clause(more, negated);
+        for (auto& gf : more.global_region_filters) tq.global_region_filters.push_back(std::move(gf));
+        tq.more_withins.push_back({more.within, more.not_within, more.within_having});
+        return;
+    }
+    tq.not_within = negated;
     // Expects "within" keyword already consumed. Parses:
     //   within s
     //   within s_tuid="XXX"
