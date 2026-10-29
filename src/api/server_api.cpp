@@ -777,32 +777,39 @@ ServerResponse ServerApi::query(const std::string& body) {
         return query_from(opts, total_async, timeout_ms, progress, from, lease, rl.tier, job_limit);
     }
 
-    // an aligned query (`a:[…] with b:[…] :: …`) computes all its pairs for any page: one
-    // cache entry serves every page ("load more" does not run it again), and its total
-    // is exact from the start (no background count)
-    const bool parallel_q = query_is_parallel(query_text, opts.strict_quoted_strings, opts.dialect);
+    // a query answering as pairs (`a:[…] with b:[…] :: …`, `=:X` over an alignment layer) has an exact
+    // total from the start (no background count). When its result holds every pair, one cache entry
+    // serves every page ("load more" does not run it again); the class join gives the pairs up to the
+    // page's end only (with the total and the sources counted), cached per page.
+    const bool parallel_q = query_gives_pairs(corpus_, query_text, opts.strict_quoted_strings, opts.dialect);
 
     // P6.4: the same query / page / count again (KonText: submit, view, each page)
     auto run_q = [&](const QueryOptions& o) -> std::pair<MatchSet, double> {
         const bool sampled_now = (o.sample > 0 || o.shuffle) && !parallel_q;
-        std::string ck;
+        std::string ck, ck_all;
         if (cache_.max_bytes() && !(sampled_now && o.seed == 0)) {
+            const std::string flags = std::string(o.total ? "t" : "-") + (o.shuffle ? "s" : "-")
+                + (o.strict_quoted_strings ? "q" : "-") + (o.allow_empty_alignment ? "e" : "-") + ","
+                + normalize_dialect(o.dialect);
             std::string sig;
-            if (parallel_q)
-                sig = "parallel," + std::to_string(o.max_total) + ",";
-            else
+            if (parallel_q) {
+                ck_all = cache_key({"query/1", query_text, "parallel," + std::to_string(o.max_total) + "," + flags});
+                if (auto e = cache_.get(ck_all); e && e->page) return {*e->page, 0.0};
+                sig = "parallel-page," + std::to_string(o.offset) + "," + std::to_string(o.limit) + ","
+                      + std::to_string(o.max_total) + ",";
+            } else {
                 for (size_t v : {o.offset, o.limit, o.max_total, o.sample, static_cast<size_t>(o.seed)})
                     sig += std::to_string(v) + ",";
-            sig += std::string(o.total ? "t" : "-") + (o.shuffle ? "s" : "-") + (o.strict_quoted_strings ? "q" : "-")
-                   + (o.allow_empty_alignment ? "e" : "-") + "," + normalize_dialect(o.dialect);
-            ck = cache_key({"query/1", query_text, sig});
+            }
+            ck = cache_key({"query/1", query_text, sig + flags});
             if (auto e = cache_.get(ck); e && e->page) return {*e->page, 0.0};
         }
         auto r = run_single_query(corpus_, query_text, o, progress);
         if (!ck.empty()) {
             ResultCache::Entry e;
             e.page = std::make_shared<const MatchSet>(r.first);
-            cache_.put(ck, std::move(e));
+            const bool every_pair = r.first.total_exact && r.first.parallel_matches.size() >= r.first.total_count;
+            cache_.put(parallel_q && every_pair ? ck_all : ck, std::move(e));
         }
         return r;
     };

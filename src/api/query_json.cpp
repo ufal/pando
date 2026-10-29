@@ -196,6 +196,18 @@ bool query_is_parallel(const std::string& query_text, bool strict_quoted_strings
     }
 }
 
+bool query_gives_pairs(const Corpus& corpus, const std::string& query_text, bool strict_quoted_strings,
+                       const std::string& dialect) {
+    if (query_text.find("with") == std::string::npos && query_text.find("=:") == std::string::npos) return false;
+    try {
+        Program prog = parse_in_dialect(query_text, dialect, ParserOptions{strict_quoted_strings}, &corpus);
+        if (prog.empty() || !prog[0].has_query) return false;
+        return prog[0].is_parallel || (prog.size() == 1 && equiv_query_gives_pairs(corpus, prog[0].query));
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
                                             const std::string& query_text,
                                             const QueryOptions& opts,
@@ -229,21 +241,37 @@ std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
     }
     if (prog[0].is_parallel) {
         // every aligned pair (a page is cut from them in to_query_result_json); with
-        // max_total, at most that many and the total marked inexact when reached
+        // max_total, at most that many and the total marked inexact when reached. Without
+        // max_total, the class join gives the pairs up to the page's end and counts the
+        // rest (total_count, pair_sources), only the page when no total is asked; any other
+        // path keeps every pair, or with no total asked stops at the page's end.
         const size_t cap = opts.max_total;
-        MatchSet ms = executor.execute_parallel(prog[0].query, prog[0].target_query, cap, cap == 0);
+        const size_t page_end = opts.limit == 0 ? 0 : opts.offset + opts.limit;
+        MatchSet ms = executor.execute_parallel(prog[0].query, prog[0].target_query, cap > 0 ? cap : page_end,
+                                                cap == 0 && (opts.total || page_end == 0));
+        const bool paged = cap == 0 && ms.plan_path == "class_join";
+        if (!paged && cap == 0 && page_end > 0 && ms.parallel_matches.size() < ms.total_count)
+            ms = executor.execute_parallel(prog[0].query, prog[0].target_query, 0, true);
         if (cap > 0 && ms.parallel_matches.size() >= cap) ms.total_exact = false;
-        ms.total_count = ms.parallel_matches.size();
+        if (!paged) ms.total_count = ms.parallel_matches.size();
+        if (!paged && cap == 0 && !opts.total && page_end > 0 && ms.parallel_matches.size() >= page_end)
+            ms.total_exact = false;
         auto t1 = std::chrono::high_resolution_clock::now();
         return {std::move(ms), std::chrono::duration<double, std::milli>(t1 - t0).count()};
     }
     if (equiv_query_gives_pairs(corpus, prog[0].query)) {
-        // `=:X` over an alignment layer: pairs, every one (a page is cut in to_query_result_json), as for `with`
+        // `=:X` over an alignment layer: pairs (a page is cut in to_query_result_json), as for `with`: up to the
+        // page's end, the total counted when asked (with max_total, at most that many, the total marked inexact
+        // when reached)
         const size_t cap = opts.max_total;
-        MatchSet ms = executor.execute(prog[0].query, cap, true, cap, 0, 0, std::max(1u, opts.threads));
+        const size_t page_end = opts.limit == 0 ? 0 : opts.offset + opts.limit;
+        MatchSet ms = executor.execute(prog[0].query, page_end > 0 && (cap == 0 || page_end < cap) ? page_end : cap,
+                                       opts.total || page_end == 0, cap, 0, 0, std::max(1u, opts.threads));
+        // another path than the class join counts no sources: every pair then, as before
+        if (ms.plan_path != "class_join" && ms.matches.size() < ms.total_count && ms.total_exact)
+            ms = executor.execute(prog[0].query, cap, true, cap, 0, 0, std::max(1u, opts.threads));
         matches_as_pairs(ms);
-        if (cap > 0 && ms.parallel_matches.size() >= cap) ms.total_exact = false;
-        ms.total_count = ms.parallel_matches.size();
+        if (cap > 0 && ms.total_count >= cap) ms.total_exact = false;
         auto t1 = std::chrono::high_resolution_clock::now();
         return {std::move(ms), std::chrono::duration<double, std::milli>(t1 - t0).count()};
     }
@@ -551,16 +579,22 @@ std::string to_query_result_json(const Corpus& corpus,
         const auto& pm = ms.parallel_matches;
         const size_t pstart = std::min(opts.offset, pm.size());
         const size_t pend = opts.limit == 0 ? pm.size() : std::min(pstart + opts.limit, pm.size());
+        // the pairs held may be the page's alone (the class join): the total and the sources are then counted there
+        const size_t total = std::max(ms.total_count, pm.size());
         size_t sources = 0;
-        for (size_t i = 0; i < pm.size(); ++i)
-            if (i == 0 || pm[i].first.positions != pm[i - 1].first.positions
-                || pm[i].first.span_ends != pm[i - 1].first.span_ends) ++sources;
+        if (pm.size() < total && ms.pair_sources > 0) {
+            sources = ms.pair_sources;
+        } else {
+            for (size_t i = 0; i < pm.size(); ++i)
+                if (i == 0 || pm[i].first.positions != pm[i - 1].first.positions
+                    || pm[i].first.span_ends != pm[i - 1].first.span_ends) ++sources;
+        }
         out << "{\n  \"ok\": true,\n  \"backend\": \"pando\",\n  \"operation\": \"query\",\n";
         out << "  \"last_command\": \"query\",\n  \"result\": {\n    \"parallel\": true,\n";
         out << "    \"query\": {\"language\": " << jstr(query_language_name(opts.dialect)) << ", \"text\": " << jstr(query_text) << "},\n";
         out << "    \"page\": {\"start\": " << pstart << ", \"size\": " << opts.limit
-            << ", \"returned\": " << (pend - pstart) << ", \"total\": " << pm.size()
-            << ", \"returned_pairs\": " << (pend - pstart) << ", \"total_pairs\": " << pm.size()
+            << ", \"returned\": " << (pend - pstart) << ", \"total\": " << total
+            << ", \"returned_pairs\": " << (pend - pstart) << ", \"total_pairs\": " << total
             << ", \"total_sources\": " << sources
             << ", \"total_exact\": " << (ms.total_exact ? "true" : "false") << "},\n";
         out << "    \"hits\": [],\n    \"pairs\": [\n";

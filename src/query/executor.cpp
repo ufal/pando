@@ -8492,7 +8492,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
     if (auto ms = execute_layer_deviations(query, max_matches, count_total, max_total_cap, sample_size,
                                            aggregate_by_fields))
         return std::move(*ms);
-    if (auto ms = execute_class_join(query, max_matches, max_total_cap, sample_size, aggregate_by_fields))
+    if (auto ms = execute_class_join(query, max_matches, count_total, max_total_cap, sample_size, aggregate_by_fields))
         return std::move(*ms);
     if (auto ms = execute_layer_decomposed(query, max_matches, count_total, max_total_cap, sample_size, num_threads,
                                            aggregate_by_fields))
@@ -9263,7 +9263,7 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
                               target_query.global_alignment_filters.end());
 
     // one token either side over one attribute: the class join (executor_classes.cpp)
-    if (auto ms = execute_parallel_class_join(source_query, target_query, merged_alignment, max_matches))
+    if (auto ms = execute_parallel_class_join(source_query, target_query, merged_alignment, max_matches, count_total))
         return std::move(*ms);
 
     TokenQuery src_exec = source_query;
@@ -9402,7 +9402,7 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
                     src_names, tgt_names, include_empty_alignment_values_,
                     result.parallel_matches, result.total_count,
                     max_matches, count_total, target_is_region);
-            result.total_exact = true;
+            result.total_exact = count_total || max_matches == 0 || result.total_count < max_matches;
             sort_parallel_pairs(result);
             return result;
             }
@@ -9424,7 +9424,7 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
                     src_names, tgt_names, include_empty_alignment_values_,
                     result.parallel_matches, result.total_count,
                     max_matches, count_total, target_is_region);
-            result.total_exact = true;
+            result.total_exact = count_total || max_matches == 0 || result.total_count < max_matches;
             sort_parallel_pairs(result);
             return result;
         }
@@ -9507,7 +9507,7 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
         }
     }
 done:
-    result.total_exact = true;
+    result.total_exact = count_total || max_matches == 0 || result.total_count < max_matches;
     sort_parallel_pairs(result);
     return result;
 }

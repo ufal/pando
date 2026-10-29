@@ -64,6 +64,10 @@ struct QueryOptions {
 /// True when the first statement is an aligned `… with …` query (run_single_query
 /// then returns every pair, whatever the page).
 bool query_is_parallel(const std::string& query_text, bool strict_quoted_strings = false, const std::string& dialect = "");
+/// The query answers as source | target pairs: an aligned query (`with`), or `a:[…] =:X b:[…]` over an alignment
+/// layer (equiv_query_gives_pairs).
+bool query_gives_pairs(const Corpus& corpus, const std::string& query_text, bool strict_quoted_strings = false,
+                       const std::string& dialect = "");
 
 std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
                                             const std::string& query_text,

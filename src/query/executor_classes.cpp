@@ -27,7 +27,7 @@ struct Member {
 
 }  // namespace
 
-std::optional<MatchSet> QueryExecutor::execute_class_join(const TokenQuery& q, size_t max_matches,
+std::optional<MatchSet> QueryExecutor::execute_class_join(const TokenQuery& q, size_t max_matches, bool count_total,
                                                           size_t max_total_cap, size_t sample_size,
                                                           const std::vector<std::string>* aggregate_by_fields) const {
     if (sample_size > 0 || !fastpaths_enabled()) return std::nullopt;
@@ -45,7 +45,7 @@ std::optional<MatchSet> QueryExecutor::execute_class_join(const TokenQuery& q, s
     // layers (layer_crosses_default_within); one as wide or wider holds every class, so the classes stand as they are
     // max_matches 0 is every hit, as in the rest of the executor (a named set, the pairs of an alignment layer)
     return class_join(q, decl->attr, false, max_matches == 0 ? SIZE_MAX : max_matches, max_total_cap,
-                      aggregate_by_fields);
+                      aggregate_by_fields, count_total);
 }
 
 // `a:[A] with b:[B] :: a.X = b.X` (one token on either side, the same token or region attribute X): the pairs whose X
@@ -54,7 +54,7 @@ std::optional<MatchSet> QueryExecutor::execute_class_join(const TokenQuery& q, s
 // nullopt for any other shape (the general joins of execute_parallel take it).
 std::optional<MatchSet> QueryExecutor::execute_parallel_class_join(const TokenQuery& source, const TokenQuery& target,
                                                                    const std::vector<GlobalAlignmentFilter>& align,
-                                                                   size_t max_matches) const {
+                                                                   size_t max_matches, bool count_total) const {
     if (!fastpaths_enabled() || include_empty_alignment_values_ || align.size() != 1) return std::nullopt;
     if (source.tokens.size() != 1 || target.tokens.size() != 1) return std::nullopt;
     const std::string& sn = source.tokens[0].name;
@@ -78,7 +78,7 @@ std::optional<MatchSet> QueryExecutor::execute_parallel_class_join(const TokenQu
     for (const auto& tok : q.tokens)
         if (tok.has_repetition() || tok.is_anchor() || tok.is_dep_subtree) return std::nullopt;
     // `with` leaves the pair of a token with itself out, as `=:` does (parallel_pair_is_self in executor.cpp)
-    auto ms = class_join(q, attr, false, max_matches == 0 ? SIZE_MAX : max_matches, 0, nullptr);
+    auto ms = class_join(q, attr, false, max_matches == 0 ? SIZE_MAX : max_matches, 0, nullptr, count_total);
     if (!ms) return std::nullopt;
     MatchSet out;
     out.parallel = true;
@@ -86,6 +86,7 @@ std::optional<MatchSet> QueryExecutor::execute_parallel_class_join(const TokenQu
     out.plan_path = "class_join";
     out.total_count = ms->total_count;
     out.total_exact = ms->total_exact;
+    out.pair_sources = ms->pair_sources;
     out.parallel_matches.reserve(ms->matches.size());
     for (const Match& m : ms->matches) {
         Match a, b;
@@ -125,7 +126,8 @@ void matches_as_pairs(MatchSet& ms) {
 
 std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std::string& attr, bool with_self,
                                                   size_t max_matches, size_t max_total_cap,
-                                                  const std::vector<std::string>* aggregate_by_fields) const {
+                                                  const std::vector<std::string>* aggregate_by_fields,
+                                                  bool count_total) const {
     if (with_self && aggregate_by_fields && !aggregate_by_fields->empty()) return std::nullopt;
     EquivalenceClasses classes;
     if (!classes.open(corpus_, attr)) return std::nullopt;
@@ -187,11 +189,17 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
     };
     // a side's candidates: from its token conditions, else from a region filter (the tokens of the regions it
     // holds for, `b.text_iso="ces"`); a side with neither has no list
-    for (auto& s : side) {
+    auto restricted = [&](const Side& s) {
+        if (*s.cond) return true;
+        for (const Filter& f : s.filters)
+            if (f.regions) return true;
+        return false;
+    };
+    auto list_side = [&](Side& s) {
         if (*s.cond) {
             s.listed = resolve_conditions(*s.cond);
             s.has_list = true;
-            continue;
+            return;
         }
         for (Filter& f : s.filters) {
             if (!f.regions) continue;
@@ -206,10 +214,17 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
                     for (CorpusPos p = rg.start; p <= rg.end; ++p) s.listed.push_back(p);
             }
             s.has_list = true;
-            break;
+            return;
         }
-    }
-
+    };
+    // the narrower side by the lexicon's counts, before anything is listed (a side with only a region filter counts
+    // as every token); only it is listed now
+    size_t est[2];
+    for (int i = 0; i < 2; ++i)
+        est[i] = *side[i].cond ? estimate_cardinality(*side[i].cond) : static_cast<size_t>(corpus_.size());
+    const bool r0 = restricted(side[0]), r1 = restricted(side[1]);
+    const int driver = r0 && (!r1 || est[0] <= est[1]) ? 0 : r1 ? 1 : -1;
+    if (driver >= 0) list_side(side[driver]);
     // `count by`: each field reads one of the two tokens (`a.lemma`, `b.text_iso`); a field on neither (the match
     // start) is not of this shape
     const bool aggregating = aggregate_by_fields && !aggregate_by_fields->empty();
@@ -233,8 +248,49 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
     // languages, than either side wants)
     std::vector<Member> members;
     std::vector<LexiconId> touched;
-    const int driver = side[0].has_list && (!side[1].has_list || side[0].listed.size() <= side[1].listed.size()) ? 0
-                       : side[1].has_list ? 1 : -1;
+    MatchSet result;
+    result.num_tokens = 2;
+    result.plan_path = "class_join";
+
+    // page first (no total asked, no `count by`, a page size, and the first token not much the wider side): the
+    // first tokens in corpus order, each with the second tokens of its classes, until the page is full; nothing else
+    // is read. A second side much narrower than the first would leave most first tokens without a partner: then the
+    // count below, which starts from it.
+    if (!count_total && !aggregating && max_matches != SIZE_MAX && (driver != 1 || est[0] / 8 <= est[1])) {
+        if (driver == 1 && restricted(side[0])) list_side(side[0]);
+        std::vector<CorpusPos> bs;
+        bool full = false;
+        auto take = [&](CorpusPos a) {
+            if (!passes(side[0], a)) return;
+            bs.clear();
+            classes.for_each_class(a, [&](LexiconId c) {
+                classes.for_each_member(c, [&](CorpusPos b) {
+                    if ((with_self || b != a) && passes(side[1], b)) bs.push_back(b);
+                });
+            });
+            std::sort(bs.begin(), bs.end());
+            bs.erase(std::unique(bs.begin(), bs.end()), bs.end());
+            for (CorpusPos b : bs) {
+                if (result.matches.size() >= max_matches) {
+                    full = true;
+                    return;
+                }
+                Match m;
+                m.positions = {a, b};
+                m.span_ends = {a, b};
+                result.matches.push_back(std::move(m));
+            }
+        };
+        if (side[0].has_list) {
+            for (size_t i = 0; i < side[0].listed.size() && !full; ++i) take(side[0].listed[i]);
+        } else {
+            for (CorpusPos a = 0; a < corpus_.size() && !full; ++a) take(a);
+        }
+        result.total_count = result.matches.size();
+        result.total_exact = !full;
+        return result;
+    }
+
     if (driver >= 0) {
         for (CorpusPos p : side[driver].listed)
             if (side[driver].filters.empty() || passes(side[driver], p))
@@ -247,6 +303,8 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
     }
     size_t scan_cost = 0;
     for (LexiconId c : touched) scan_cost += classes.size(c);
+    // the other side listed only when that is cheaper than testing it at the members of the touched classes
+    if (driver >= 0 && restricted(side[1 - driver]) && est[1 - driver] < scan_cost) list_side(side[1 - driver]);
     if (side[0].has_list && side[1].has_list && side[0].listed.size() + side[1].listed.size() < scan_cost) {
         std::vector<CorpusPos> both;
         both.reserve(side[0].listed.size() + side[1].listed.size());
@@ -267,6 +325,7 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
     }
     // the count per class; a class without both an A and a B member holds no pair and is dropped
     size_t total = 0;
+    std::vector<CorpusPos> sources;   // the first tokens with a partner
     {
         size_t out = 0;
         for (size_t i = 0; i < members.size();) {
@@ -278,11 +337,17 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
             }
             if (na > 0 && nb > 0) {
                 total += na * nb - nab;
-                for (size_t k = i; k < j; ++k) members[out++] = members[k];
+                for (size_t k = i; k < j; ++k) {
+                    if (members[k].in_a && (with_self || nb > static_cast<size_t>(members[k].in_b)))
+                        sources.push_back(members[k].pos);
+                    members[out++] = members[k];
+                }
             }
             i = j;
         }
         members.resize(out);
+        std::sort(sources.begin(), sources.end());
+        sources.erase(std::unique(sources.begin(), sources.end()), sources.end());
     }
     // a multivalue attribute: a pair sharing k classes was counted k times
     std::unordered_map<CorpusPos, std::vector<size_t>> multi;   // position → its member rows, when in several classes
@@ -448,9 +513,6 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
 
     // the page, in hit order as the generic expansion gives it: by the first token, then the second; the A members
     // in corpus order, each with the B members of its classes
-    MatchSet result;
-    result.num_tokens = 2;
-    result.plan_path = "class_join";
     if (max_matches > 0) {
         std::vector<size_t> order;
         for (size_t i = 0; i < members.size(); ++i)
@@ -478,6 +540,7 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
     }
     result.total_count = total;
     result.total_exact = true;
+    result.pair_sources = sources.size();
     if (max_total_cap > 0 && result.total_count > max_total_cap) {
         result.total_count = max_total_cap;
         result.total_exact = false;

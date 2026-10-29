@@ -453,6 +453,33 @@ def main():
             # (each side's fragment is its own context: filler next to a token may be in it, nothing lies between)
             check(len(frags) == 2 * len(pairs) and all(frags),
                   f"{q}: server pairs, a fragment per side ({len(frags)} fragments)")
+
+            # pages of pairs (2026-10-29): the class join gives the pairs up to the page's end, the total counted when
+            # asked (and the distinct sources with it); without a total the page alone, the total inexact while more
+            # follow. Every page as the CLI's full list, for `=:` and `with`, a narrow side either first or second.
+            def post(body):
+                req = urllib.request.Request(f"http://127.0.0.1:{port}/query", data=json.dumps(body).encode())
+                return json.loads(urllib.request.urlopen(req, timeout=30).read())["result"]
+            for pq in ['a:[form="house"] =:tuid b:[]', 'a:[] =:tuid b:[form="huis"]', 'a:[] =:s_tuid b:[]',
+                       'a:[form="is"] with b:[] :: a.tuid = b.tuid', 'a:[] with b:[form="huis"] :: a.tuid = b.tuid']:
+                full = with_pairs(pq, True)
+                for total in (True, False):
+                    pages, off, page = [], 0, None
+                    while off < len(full) + 4:
+                        page = post({"query": pq, "offset": off, "limit": 4, "total": total})
+                        pages += [(p["source"]["tokens"][0]["pos"], p["target"]["tokens"][0]["pos"])
+                                  for p in page["pairs"]]
+                        if total:
+                            check(page["page"]["total"] == len(full) and page["page"]["total_exact"],
+                                  f"{pq}: server page at {off}, total {page['page']['total']} (CLI {len(full)})")
+                            check(page["page"]["total_sources"] == len({s for s, _ in full}),
+                                  f"{pq}: server page at {off}, {page['page']['total_sources']} sources")
+                        elif off + 4 < len(full):   # inexact, or counted all the same (the narrow side second)
+                            check(not page["page"]["total_exact"] or page["page"]["total"] == len(full),
+                                  f"{pq}: no total asked, page at {off}: inexact or the total")
+                        off += 4
+                    check(pages == full and len(full) > 0,
+                          f"{pq}: server pages{' with total' if total else ''} as the CLI's {len(full)} pairs")
         finally:
             srv.terminate()
             srv.wait()

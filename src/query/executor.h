@@ -776,6 +776,9 @@ struct MatchSet {
     std::vector<std::string> warnings;
     /// P4.1: number of position ranges the query was split into (1 = not split).
     unsigned partitions = 1;
+    /// The class join with an exact total: the distinct first tokens over all its pairs (the page may hold fewer
+    /// pairs than the total); 0 otherwise.
+    size_t pair_sources = 0;
 };
 
 /// P4.1: half-open corpus position range [lo, hi) of one partition.
@@ -929,19 +932,21 @@ public:
     std::optional<MatchSet> execute_manatee(const TokenQuery& q, size_t max_matches, bool count_total,
                                             size_t max_total_cap, size_t sample_size,
                                             const std::vector<std::string>* aggregate_by_fields);
-    std::optional<MatchSet> execute_class_join(const TokenQuery& q, size_t max_matches, size_t max_total_cap,
-                                               size_t sample_size,
+    std::optional<MatchSet> execute_class_join(const TokenQuery& q, size_t max_matches, bool count_total,
+                                               size_t max_total_cap, size_t sample_size,
                                                const std::vector<std::string>* aggregate_by_fields) const;
     // `a:[A] with b:[B] :: a.X = b.X`, one token either side over one token or region attribute: the class join
     // (executor_classes.cpp) as source | target pairs. nullopt for any other shape.
     std::optional<MatchSet> execute_parallel_class_join(const TokenQuery& source, const TokenQuery& target,
                                                         const std::vector<GlobalAlignmentFilter>& align,
-                                                        size_t max_matches) const;
+                                                        size_t max_matches, bool count_total) const;
     // The class join over the values of `attr` (a token or a region attribute) for a two-token query (its `::` region filters assigned by token
-    // name); `with_self`: a token pairs with itself too (as `with` has it).
+    // name); `with_self`: a token pairs with itself too (as `with` has it). Without count_total and with a page size, the
+    // page alone when the first token is the narrower side (the total then inexact unless every hit is on it).
     std::optional<MatchSet> class_join(const TokenQuery& q, const std::string& attr, bool with_self,
                                        size_t max_matches, size_t max_total_cap,
-                                       const std::vector<std::string>* aggregate_by_fields) const;
+                                       const std::vector<std::string>* aggregate_by_fields,
+                                       bool count_total = true) const;
     // `[A] within L [having [C]]` / `not within L …` with L an equivalence layer: rewritten into a position filter
     // (the intervals of the classes in question). false when `within` names no equivalence layer.
     bool rewrite_within_class(const TokenQuery& q, TokenQuery& out) const;
