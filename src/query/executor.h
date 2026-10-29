@@ -1228,6 +1228,10 @@ private:
     /// P4.14: `within R having COND` → a precomputed restriction (the regions of R
     /// containing COND) when R is flat and COND resolves to postings.
     bool rewrite_within_having_mask(const TokenQuery& query, TokenQuery& out) const;
+    /// One plain token: `:: a.S_attr` naming that token becomes the match's own filter, and
+    /// `within S_attr="V"` drops `within S` (the filter already puts the token in a region of
+    /// S), so the region-mask fast paths apply.
+    bool rewrite_single_token_filters(const TokenQuery& query, TokenQuery& out) const;
     bool not_within_active(const TokenQuery& query) const;
 
     // Apply containing/not-containing clauses as post-filter

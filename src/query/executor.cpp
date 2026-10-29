@@ -8506,6 +8506,9 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
         if (TokenQuery hq; rewrite_within_having_mask(query, hq))
             return execute(hq, max_matches, count_total, max_total_cap, sample_size, random_seed, num_threads,
                            aggregate_by_fields, skip_name_validation);
+    if (TokenQuery wq; rewrite_single_token_filters(query, wq))
+        return execute(wq, max_matches, count_total, max_total_cap, sample_size, random_seed, num_threads,
+                       aggregate_by_fields, skip_name_validation);
     if (head_attrs_enabled())
         if (TokenQuery pq; rewrite_parent_query(corpus_, query, pq))
             return execute(pq, max_matches, count_total, max_total_cap, sample_size, random_seed,
@@ -10584,6 +10587,37 @@ bool QueryExecutor::rewrite_within_having_mask(const TokenQuery& query, TokenQue
     gf.positions = std::move(iv);
     out.global_region_filters.push_back(std::move(gf));
     return true;
+}
+
+bool QueryExecutor::rewrite_single_token_filters(const TokenQuery& query, TokenQuery& out) const {
+    if (fastpath_mode() == FastPathMode::Off) return false;
+    if (query.tokens.size() != 1) return false;
+    const QueryToken& tok = query.tokens[0];
+    // a plain token: not a region binding (`t:<text> :: t.id` names the region's own attribute),
+    // a subtree, a run or a repetition
+    if (tok.anchor != RegionAnchorType::NONE || tok.has_repetition() || tok.is_dep_subtree || tok.bare_string)
+        return false;
+    const std::string& name = tok.name;
+    bool changed = false;
+    out = query;
+    // `:: a.S_attr` with `a` the only token is the match's own filter
+    for (auto& gf : out.global_region_filters)
+        if (!gf.positions && !gf.anchor_name.empty() && (gf.anchor_name == name || gf.anchor_name == "match")) {
+            gf.anchor_name.clear();
+            changed = true;
+        }
+    // `within S` with an EQ filter on an attribute of S: the filter already puts the token in a region of S
+    if (!query.within.empty() && !query.not_within && !query.within_having && query.containing_clauses.empty()) {
+        const std::string prefix = query.within + "_";
+        for (const auto& gf : out.global_region_filters)
+            if (!gf.positions && gf.op == CompOp::EQ && gf.anchor_name.empty()
+                && gf.region_attr.size() > prefix.size() && gf.region_attr.compare(0, prefix.size(), prefix) == 0) {
+                out.within.clear();
+                changed = true;
+                break;
+            }
+    }
+    return changed;
 }
 
 bool QueryExecutor::not_within_active(const TokenQuery& query) const {

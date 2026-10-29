@@ -378,3 +378,11 @@ a:[upos="NOUN" & child [upos="ADJ"]]; count by a.lemma
 [feats/Case="Nom" & upos="NOUN"] [upos="VERB"]
 [upos="VERB" & feats/Tense="Past"] > [feats/Number="Plur"]
 a:[upos="NOUN"]; count by a.feats/Number
+# one token: `:: a.` on that token and `within S_attr=` (rewrite_single_token_filters)
+a:[upos="NOUN"] :: a.text_langcode="cs"
+a:[upos="NOUN"] :: a.text_langcode!="cs"
+a:[upos="NOUN"] within text :: a.text_langcode="en"
+a:[lemma=".*ness"] within s :: a.text_langcode="en"
+[upos="NOUN"] within text_langcode=/e.*/
+[upos="NOUN"] within text_langcode="en" having [upos="ADJ"]
+[upos="NOUN"]{2} within text_langcode="en"
