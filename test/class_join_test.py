@@ -494,6 +494,21 @@ def main():
             srv.terminate()
             srv.wait()
 
+    # CLI pages of pairs (2026-10-29): paged by source hit; the class join's pairs are fetched only up to a source hit
+    # past the page (fetch_pair_page; PANDO_PAIR_PAGE_MIN=2 makes it grow over several runs here). With a total: the
+    # page and its totals as with every pair fetched (PANDO_FASTPATH=off), text and JSON; without: the same pairs.
+    os.environ["PANDO_PAIR_PAGE_MIN"] = "2"
+    for pq in ['a:[form="house"] =:tuid b:[]', 'a:[] =:tuid b:[]', 'a:[] =:s_tuid b:[]',
+               'a:[form="is"] with b:[] :: a.tuid = b.tuid', 'a:[] with b:[] :: a.s_tuid = b.s_tuid']:
+        for extra in (["--limit", "3", "--total"], ["--offset", "2", "--limit", "2", "--total"],
+                      ["--json", "--offset", "1", "--limit", "3", "--total"], ["--offset", "50", "--limit", "5", "--total"]):
+            fast, slow = run(pq, True, *extra), run(pq, False, *extra)
+            check(fast == slow and not fast.startswith("ERROR"), f"CLI pair page {' '.join(extra)}: {pq} as every pair")
+        page = lambda fast: json.loads(run(pq, fast, "--json", "--offset", "1", "--limit", "3"))["result"]["pairs"]
+        strip = lambda ps: [(p["source"]["tokens"], p["target"]["tokens"]) for p in ps]
+        check(strip(page(True)) == strip(page(False)), f"CLI pair page without total: {pq} the same pairs")
+    del os.environ["PANDO_PAIR_PAGE_MIN"]
+
     # attributes declared multivalue (as TEITOK settings declare a `tuid` that can hold several ids): a token aligned
     # with two words (`w1|w2`), a segment merging two (`s1|s2`), a segment inside a segment; every path the same
     # (sentence-like regions as `seg` / `seg_tuid`, as tico19 has them: JSONL `s` regions follow their own tokens)

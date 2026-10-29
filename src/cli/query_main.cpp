@@ -23,7 +23,9 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
+#include <functional>
 #include <map>
+#include <optional>
 #include <iomanip>
 #include <vector>
 #include <unistd.h>  // isatty
@@ -137,6 +139,38 @@ struct QueryTiming {
 
 // ── JSON output ─────────────────────────────────────────────────────────
 
+// Pairs paged by source hit: the source hits in all, when known. `held` = the distinct source hits among the pairs
+// held. Every pair held: that; the class join counting the rest: its pair_sources; else unknown (nullopt).
+// The pairs for a page of `groups` source hits. `run(k)` gives at most k pairs (0: every pair). The class join gives
+// its pairs in source order and counts the rest (total, pair_sources): a run holds the page once a source hit past it
+// shows up, or once it ends short of k; k grows until then. Any other route gives every pair, as before.
+static MatchSet fetch_pair_page(size_t groups, const std::function<MatchSet(size_t)>& run) {
+    static const size_t k0 = [] {   // the first run's pairs (PANDO_PAIR_PAGE_MIN: tests make it small)
+        const char* e = std::getenv("PANDO_PAIR_PAGE_MIN");
+        const long long v = e && *e ? std::atoll(e) : 0;
+        return v > 0 ? static_cast<size_t>(v) : size_t{256};
+    }();
+    size_t k = std::max(k0, 4 * groups);
+    for (;;) {
+        MatchSet ms = run(k);
+        const auto& pm = ms.parallel_matches;
+        if (pm.size() < k) return ms;   // every pair there is
+        if (ms.plan_path != "class_join") return run(0);
+        size_t sources = 0;
+        for (size_t i = 0; i < pm.size() && sources <= groups; ++i)
+            if (i == 0 || pm[i].first.positions != pm[i - 1].first.positions
+                || pm[i].first.span_ends != pm[i - 1].first.span_ends) ++sources;
+        if (sources > groups) return ms;
+        k = k > SIZE_MAX / 4 ? SIZE_MAX : 4 * k;
+    }
+}
+
+static std::optional<size_t> pair_source_total(const MatchSet& ms, size_t held) {
+    if (ms.total_exact && ms.parallel_matches.size() >= ms.total_count) return held;
+    if (ms.total_exact && ms.pair_sources > 0) return ms.pair_sources;
+    return std::nullopt;
+}
+
 static void emit_json(const Corpus& corpus, const std::string& query_text,
                       const MatchSet& ms, const Options& opts,
                       double elapsed_ms) {
@@ -204,9 +238,11 @@ static void emit_json(const Corpus& corpus, const std::string& query_text,
             }
         }
 
-        size_t total_groups = groups.size();
-        size_t gstart = std::min(opts.offset, total_groups);
-        size_t gend   = std::min(gstart + opts.limit, total_groups);
+        // the pairs held may end after the page (fetch_pair_page): the source hits in all from the count
+        const std::optional<size_t> known_groups = pair_source_total(ms, groups.size());
+        size_t total_groups = known_groups ? *known_groups : groups.size();
+        size_t gstart = std::min(opts.offset, groups.size());
+        size_t gend   = std::min(gstart + opts.limit, groups.size());
         size_t returned_pairs = 0;
         for (size_t g = gstart; g < gend; ++g) returned_pairs += groups[g].size();
         jout << "{\n  \"ok\": true,\n  \"backend\": \"pando\",\n  \"operation\": \"query\",\n";
@@ -771,6 +807,7 @@ static void emit_kwic(const Corpus& corpus, const std::string& query_text,
         }
         size_t gstart = std::min(opts.offset, groups.size());
         size_t gend   = std::min(gstart + opts.limit, groups.size());
+        const std::optional<size_t> total_groups = pair_source_total(ms, groups.size());
         size_t shown_pairs = 0;
         for (size_t g = gstart; g < gend; ++g) {
             for (size_t idx : groups[g]) {
@@ -794,10 +831,11 @@ static void emit_kwic(const Corpus& corpus, const std::string& query_text,
                       << "): " << left_t << span_t << " " << right_t << "\n\n";
             }
         }
-        if (gend < groups.size()) {
-            size_t more_pairs = ms.parallel_matches.size() > shown_pairs
-                                ? (ms.parallel_matches.size() - shown_pairs) : 0;
-            std::cout << "(" << groups.size() << " source hits, "
+        if (!total_groups) {
+            std::cout << "(source hits " << (gstart + 1) << "-" << gend << ", more follow; --total for the count)\n";
+        } else if (gend < *total_groups) {
+            const size_t more_pairs = ms.total_count > shown_pairs ? ms.total_count - shown_pairs : 0;
+            std::cout << "(" << *total_groups << " source hits, "
                       << ms.total_count << " aligned pairs, "
                       << more_pairs << " pairs in later source hits)\n";
         }
@@ -2569,6 +2607,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
             bool count_t = false;
             size_t max_total_cap = 0;
             bool as_pairs = false;
+            bool pair_page = false;   // an anonymous pair query shown as a page: fetch_pair_page
             if (opts.dump_matches) {
                 max_m = 0;
                 count_t = true;
@@ -2598,6 +2637,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                     // so keep full pair sets and page by source-hit groups at render time.
                     // `=:X` over an alignment layer is shown as pairs too (equiv_query_gives_pairs)
                     as_pairs = !stmt.is_parallel && equiv_query_gives_pairs(corpus, stmt.query);
+                    pair_page = stmt.is_parallel || as_pairs;
                     max_m = (stmt.is_parallel || as_pairs) ? 0 : (opts.offset + opts.limit);
                     count_t = opts.total;
                     // --limit 0: no hits on the page, so none to fetch; max_m 0 would mean "every
@@ -2665,8 +2705,9 @@ static void run_query(const Corpus& corpus, const std::string& input,
             executor.set_include_empty_alignment_values(opts.allow_empty_alignment);
             auto t0 = std::chrono::high_resolution_clock::now();
             if (stmt.is_parallel) {
+                auto run = [&](size_t k) { return executor.execute_parallel(stmt.query, stmt.target_query, k, count_t); };
                 session.last = std::make_shared<MatchSet>(
-                        executor.execute_parallel(stmt.query, stmt.target_query, max_m, count_t));
+                        pair_page ? fetch_pair_page(opts.offset + opts.limit, run) : run(max_m));
             } else if (stmt.has_query && stmt.query.tokens.size() == 1
                        && stmt.query.tokens[0].is_dep_subtree) {
                 const std::string& src_q = stmt.query.tokens[0].dep_subtree_source;
@@ -2791,13 +2832,18 @@ static void run_query(const Corpus& corpus, const std::string& input,
                 if (!presorted) {
                 // a new object: the previous one may live on as a named set
                 session.last = std::make_shared<MatchSet>();
-                *session.last = executor.execute(stmt.query, max_m, count_t, max_total_cap,
-                                          opts.sample, opts.sample_seed, opts.threads,
-                                          aggregate_by);
-                if (as_pairs) {
-                    matches_as_pairs(*session.last);
-                    session.last->total_count = session.last->parallel_matches.size();
-                }
+                auto run = [&](size_t k) {
+                    MatchSet ms = executor.execute(stmt.query, k, count_t, max_total_cap,
+                                                   opts.sample, opts.sample_seed, opts.threads,
+                                                   aggregate_by);
+                    if (as_pairs) {
+                        matches_as_pairs(ms);
+                        // the class join counts the pairs past the ones held; any other route holds them all
+                        if (ms.plan_path != "class_join") ms.total_count = ms.parallel_matches.size();
+                    }
+                    return ms;
+                };
+                *session.last = pair_page && as_pairs ? fetch_pair_page(opts.offset + opts.limit, run) : run(max_m);
                 }
                 if (sink_state.sink) {
                     sink_state.hits = executor.sink_hits();
