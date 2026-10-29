@@ -111,6 +111,7 @@ public:
               const char* seps = "|") {
         attr_ = nullptr;
         regions_ = &regions;
+        mv_ = false;
         stacked_ = stacked;
         key_ = key;
         comp_.reset();
@@ -145,6 +146,8 @@ public:
     }
 
     bool regions() const { return regions_ != nullptr; }
+    // a token is in at most one class (not a multivalue attribute, nor regions that nest or overlap)
+    bool single() const { return !mv_ && !comp_ && !(regions_ && stacked_); }
     // a multivalue region attribute: the classes are the ids of its values
     bool composite() const { return comp_ != nullptr; }
 

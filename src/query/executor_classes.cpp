@@ -8,8 +8,12 @@
 #include "query/executor.h"
 #include "corpus/equivalence_classes.h"
 #include "query/executor_aggregate_internal.h"
+#include "core/worker_pool.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
+#include <memory>
 #include <functional>
 #include <iterator>
 #include <optional>
@@ -209,7 +213,9 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
     struct Filter {
         TokenQuery one;
         const StructuralAttr* regions = nullptr;
-        std::vector<int8_t> memo;   // per region: -1 not yet evaluated, else the outcome
+        // per region: -1 not yet evaluated, else the outcome (threads reading the members share it: any of them
+        // stores the one outcome)
+        std::unique_ptr<std::atomic<int8_t>[]> memo;
     };
     // A side's language (sliced search): a region attribute with one value, `[… & text_lang="cs"]` at the top of
     // its token conditions or `:: b.text_lang="cs"`, holds for a few long stretches of the corpus when the corpus
@@ -269,33 +275,40 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
         const std::string sn = us == std::string::npos ? std::string() : f.region_attr.substr(0, us);
         if (!sn.empty() && corpus_.has_structure(sn) && !corpus_.is_nested(sn) && !corpus_.is_overlapping(sn)) {
             flt.regions = &corpus_.structure(sn);
-            flt.memo.assign(flt.regions->region_count(), -1);
+            const size_t nr = flt.regions->region_count();
+            flt.memo.reset(new std::atomic<int8_t>[nr]);
+            for (size_t r = 0; r < nr; ++r) flt.memo[r].store(-1, std::memory_order_relaxed);
         }
         side[i].filters.push_back(std::move(flt));
     }
     // a side's token conditions: membership in its resolved candidates when it has them (a region attribute as a
-    // token condition, `[text_iso="eng"]`, is costly to test token by token), else tested at the token
-    auto passes = [&](Side& s, CorpusPos p) {
+    // token condition, `[text_iso="eng"]`, is costly to test token by token), else tested at the token; `ex`: the
+    // executor testing them (a thread's own)
+    auto passes_by = [&](const QueryExecutor& ex, const Side& s, CorpusPos p) {
         if (s.has_list) {
             if (!std::binary_search(s.listed.begin(), s.listed.end(), p)) return false;
-        } else if ((s.sliced && !in_slice(s.slice, p)) || !check_conditions(p, s.cond)) {
+        } else if ((s.sliced && !in_slice(s.slice, p)) || !ex.check_conditions(p, s.cond)) {
             return false;
         }
-        for (Filter& f : s.filters) {
+        for (const Filter& f : s.filters) {
             const int64_t r = f.regions ? f.regions->find_region(p) : -1;
-            if (r >= 0 && f.memo[static_cast<size_t>(r)] >= 0) {
-                if (!f.memo[static_cast<size_t>(r)]) return false;
-                continue;
+            if (r >= 0) {
+                const int8_t known = f.memo[static_cast<size_t>(r)].load(std::memory_order_relaxed);
+                if (known >= 0) {
+                    if (!known) return false;
+                    continue;
+                }
             }
             Match m;
             m.positions = {p};
             m.span_ends = {p};
-            const bool ok = match_passes_inline_region_filters(m, f.one, s.names);
-            if (r >= 0) f.memo[static_cast<size_t>(r)] = ok;
+            const bool ok = ex.match_passes_inline_region_filters(m, f.one, s.names);
+            if (r >= 0) f.memo[static_cast<size_t>(r)].store(ok, std::memory_order_relaxed);
             if (!ok) return false;
         }
         return true;
     };
+    auto passes = [&](const Side& s, CorpusPos p) { return passes_by(*this, s, p); };
     // a side's candidates: from its token conditions, else from a region filter (the tokens of the regions it
     // holds for, `b.text_iso="ces"`); a side with neither has no list
     auto restricted = [&](const Side& s) {
@@ -351,8 +364,9 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
                 Match m;
                 m.positions = {rg.start};
                 m.span_ends = {rg.start};
-                f.memo[r] = match_passes_inline_region_filters(m, f.one, s.names);
-                if (f.memo[r])
+                const bool ok = match_passes_inline_region_filters(m, f.one, s.names);
+                f.memo[r].store(ok, std::memory_order_relaxed);
+                if (ok)
                     for (CorpusPos p = rg.start; p <= rg.end; ++p) s.listed.push_back(p);
             }
             s.has_list = true;
@@ -485,15 +499,69 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
         std::stable_sort(members.begin(), members.end(),
                          [](const Member& x, const Member& y) { return x.cls < y.cls; });
     } else {
-        for (LexiconId c : touched)
-            for_each_member(c, clipped ? &either : nullptr, [&](CorpusPos p) {
-                const bool a = passes(side[0], p), b = passes(side[1], p);
-                if (a || b) members.push_back({p, c, a, b});
+        // the members of the touched classes, read in slices of about equal size; a large read over threads (the
+        // request's budget, else PANDO_CLASS_JOIN_THREADS, else min(usable CPUs, 8); a thread for every
+        // PANDO_CLASS_JOIN_MIN members, default 2^19; workers borrowed from the process pool), each slice with its
+        // own executor, the slices joined in class order
+        const Slice* only = clipped ? &either : nullptr;
+        auto read = [&](const QueryExecutor& ex, size_t lo, size_t hi, std::vector<Member>& out) {
+            for (size_t t = lo; t < hi; ++t) {
+                const LexiconId c = touched[t];
+                for_each_member(c, only, [&](CorpusPos p) {
+                    const bool a = passes_by(ex, side[0], p), b = passes_by(ex, side[1], p);
+                    if (a || b) out.push_back({p, c, a, b});
+                });
+            }
+        };
+        static const unsigned env_cap = [] {
+            const char* e = std::getenv("PANDO_CLASS_JOIN_THREADS");
+            const int v = e && *e ? std::atoi(e) : 0;
+            return v > 0 ? static_cast<unsigned>(v) : std::min(8u, usable_cpus());
+        }();
+        static const size_t per_thread = [] {
+            const char* e = std::getenv("PANDO_CLASS_JOIN_MIN");
+            const long long v = e && *e ? std::atoll(e) : 0;
+            return v > 0 ? static_cast<size_t>(v) : size_t{1} << 19;
+        }();
+        const unsigned cap = thread_budget_ ? std::min(thread_budget_, env_cap) : env_cap;
+        const unsigned nt = static_cast<unsigned>(std::min<size_t>(cap, std::max<size_t>(1, scan_cost / per_thread)));
+        if (nt <= 1 || touched.size() < 2) {
+            read(*this, 0, touched.size(), members);
+        } else {
+            // 4 slices per thread, cut where the members read so far reach the next share of scan_cost
+            const size_t nslices = std::min<size_t>(static_cast<size_t>(nt) * 4, touched.size());
+            std::vector<size_t> cut{0};
+            size_t acc = 0;
+            for (size_t t = 0; t < touched.size() && cut.size() < nslices; ++t) {
+                acc += members_in(touched[t], only);
+                if (acc * nslices >= scan_cost * cut.size()) cut.push_back(t + 1);
+            }
+            if (cut.back() != touched.size()) cut.push_back(touched.size());
+            // the conditions compiled here: compiling writes into their nodes, which the threads share
+            for (const Side& sd : side) compile_conditions(sd.cond);
+            std::vector<std::vector<Member>> parts(cut.size() - 1);
+            std::atomic<bool> cancelled{false};
+            WorkerPool::global().run(parts.size(), nt - 1, [&](size_t i) {
+                if (cancelled.load(std::memory_order_relaxed) || (progress_ && progress_->cancelled())) {
+                    cancelled = true;
+                    return;
+                }
+                QueryExecutor ex(*this, nullptr, progress_);
+                read(ex, cut[i], cut[i + 1], parts[i]);
             });
+            if (cancelled) throw QueryCancelled();
+            size_t n = 0;
+            for (const auto& part : parts) n += part.size();
+            members.reserve(n);
+            for (auto& part : parts) members.insert(members.end(), part.begin(), part.end());
+        }
     }
     // the count per class; a class without both an A and a B member holds no pair and is dropped
     size_t total = 0;
-    std::vector<CorpusPos> sources;   // the first tokens with a partner
+    // the first tokens with a partner: counted, when a token is in one class only (no repeats to drop)
+    const bool single = classes.single();
+    std::vector<CorpusPos> sources;
+    size_t nsources = 0;
     {
         size_t out = 0;
         for (size_t i = 0; i < members.size();) {
@@ -506,8 +574,10 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
             if (na > 0 && nb > 0) {
                 total += na * nb - nab;
                 for (size_t k = i; k < j; ++k) {
-                    if (members[k].in_a && (with_self || nb > static_cast<size_t>(members[k].in_b)))
-                        sources.push_back(members[k].pos);
+                    if (members[k].in_a && (with_self || nb > static_cast<size_t>(members[k].in_b))) {
+                        if (single) ++nsources;
+                        else sources.push_back(members[k].pos);
+                    }
                     members[out++] = members[k];
                 }
             }
@@ -516,10 +586,11 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
         members.resize(out);
         std::sort(sources.begin(), sources.end());
         sources.erase(std::unique(sources.begin(), sources.end()), sources.end());
+        if (!single) nsources = sources.size();
     }
     // a multivalue attribute: a pair sharing k classes was counted k times
     std::unordered_map<CorpusPos, std::vector<size_t>> multi;   // position → its member rows, when in several classes
-    {
+    if (!single) {
         std::unordered_map<CorpusPos, size_t> seen;
         for (size_t i = 0; i < members.size(); ++i) {
             auto [it, fresh] = seen.try_emplace(members[i].pos, i);
@@ -685,12 +756,23 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
         std::vector<size_t> order;
         for (size_t i = 0; i < members.size(); ++i)
             if (members[i].in_a) order.push_back(i);
-        std::sort(order.begin(), order.end(), [&](size_t x, size_t y) { return members[x].pos < members[y].pos; });
+        // only the first of them sorted (a page asks for a few): more when those leave the page short
+        auto by_pos = [&](size_t x, size_t y) { return members[x].pos < members[y].pos; };
+        size_t sorted = std::min(order.size(), max_matches > order.size() / 2 ? order.size() : 2 * max_matches + 64);
+        std::partial_sort(order.begin(), order.begin() + static_cast<std::ptrdiff_t>(sorted), order.end(), by_pos);
+        auto reach = [&](size_t i) {   // order[i] in place
+            if (i < sorted) return;
+            const size_t from = sorted;
+            sorted = std::min(order.size(), 2 * sorted);
+            std::partial_sort(order.begin() + static_cast<std::ptrdiff_t>(from),
+                              order.begin() + static_cast<std::ptrdiff_t>(sorted), order.end(), by_pos);
+        };
         std::vector<CorpusPos> bs;
         for (size_t i = 0; i < order.size() && result.matches.size() < max_matches;) {
+            reach(i);
             const CorpusPos a = members[order[i]].pos;
             bs.clear();
-            for (; i < order.size() && members[order[i]].pos == a; ++i) {
+            for (; i < order.size() && (reach(i), members[order[i]].pos == a); ++i) {
                 const auto [lo, hi] = range_of[members[order[i]].cls];
                 for (size_t k = lo; k < hi; ++k)
                     if (members[k].in_b && (with_self || members[k].pos != a)) bs.push_back(members[k].pos);
@@ -708,7 +790,7 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
     }
     result.total_count = total;
     result.total_exact = true;
-    result.pair_sources = sources.size();
+    result.pair_sources = nsources;
     if (max_total_cap > 0 && result.total_count > max_total_cap) {
         result.total_count = max_total_cap;
         result.total_exact = false;

@@ -27,6 +27,7 @@ without the declarations has them as well). For each query it requires:
   * attributes declared multivalue (`w1|w2` on a token, `s1|s2` on a segment) and nested segments: every path
     (class join, generic, `with`, the cross-statement form) as the reference;
   * `count by` over fields of either token to give the buckets of a brute-force tally, fast and generic.
+The class join reads class members over 4 threads here (PANDO_CLASS_JOIN_THREADS / PANDO_CLASS_JOIN_MIN, unless set).
 Exit status 0 = all as required, 1 = a difference, 2 = a run error.
 """
 
@@ -95,6 +96,9 @@ def generate(rnd):
 
 
 def main():
+    # the class join's member read over threads even on this small corpus (the generic reference runs without)
+    os.environ.setdefault("PANDO_CLASS_JOIN_THREADS", "4")
+    os.environ.setdefault("PANDO_CLASS_JOIN_MIN", "1")
     ap = argparse.ArgumentParser()
     ap.add_argument("--pando", required=True)
     ap.add_argument("--pando-index", required=True)
