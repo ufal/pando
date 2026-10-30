@@ -307,34 +307,35 @@ The question a parallel corpus answers: *find X in one language where the aligne
 In short:
 
 - **Same answers.** All pando forms agree with each other everywhere. Manatee finds up to 0.01 % more, always for the same reason: its alignment files link groups of sentences (beads), so where one sentence was split or merged in translation, a hit is aligned with a neighbour of its translation too (see the counts below).
-- **Full counts: pando-server is faster on every one**, from 2 times (nouns *not* aligned with nouns: 9.7 s → 4.5 s) to 50 times (nouns aligned with a rare word: 266 ms → 5 ms); all nouns aligned with nouns: 16.3 s → 4.5 s, in two languages at once: 27.3 s → 8.2 s, their frequency list: 38.3 s → 7.3 s.
-- **First page: Manatee is instant everywhere** (about 1 ms), as it shows hits while it is still searching. pando-server is as fast for rare words, but for frequent words with *not aligned with* or alignment in two languages it finishes the search first (4.5–8 s).
-- **A frequency list of frequent words limited by a rare word** (F1) is the one count where Manatee is faster (0.3 s against 2.8 s).
+- **First page: both answer at once.** Manatee in about 1 ms, pando-server in 1–7 ms (with Manatee's syntax 3–19 ms). pando tests each hit's aligned sentences when the aligned side is frequent, and computes the aligned sentences first when it is rare.
+- **Full counts: pando-server is faster on every one**, from 2 times (nouns *not* aligned with nouns: 9.7 s → 4.5 s) to 50 times (nouns aligned with a rare word: 266 ms → 5 ms); all nouns aligned with nouns: 16.3 s → 4.5 s, in two languages at once: 27.3 s → 8.2 s, their frequency list: 38.3 s → 7.2 s. Without a total asked, pando-server's background count gives an estimate from a sample first (within 1–5 %, in 0.1–1.4 s).
+- **Written in Manatee's syntax**, as KonText sends it, pando's counts of frequent words are slower than in pando's own forms (nouns aligned with nouns 11.0 s against 4.5 s, a rare word aligned with nouns 6.2 s against 13 ms): that translation computes every aligned sentence in question. Against Manatee it is faster on the large counts, about equal on N2 and W6, and slower on W3 (a rare word aligned with nouns: 6.2 s against 0.3 s).
+- **A frequency list of frequent words limited by a rare word** (F1) is the one count where Manatee is faster in every form (0.3 s against 2.7 s).
 - **Showing the aligned sentence**: pando 1 ms (it reads the aligned sentence for the hits on the page), Manatee 0.01–41 s (`add_aligned` processes every hit of the concordance).
-- **The CLI** needs about 1.7 s more on every aligned query, to build the table of sentences whose `s_tuid` holds several ids (Europarl merges some sentences as `a|b`); a server builds it once. Storing it in the index would remove this.
+- **The CLI** (a new process per query) takes about 30 ms more than the server for every query: it reads the index's lexicons and tables anew each time, where the server keeps them. For long counts the two are equal.
 
-Warm times: median of 3 runs after the first, without process start and corpus open; pando-server times are the client's wall clock (HTTP and JSON included), with no result cache. pando-server column: the fastest of the four forms.
+Warm times: median of 3 runs after the first, without process start and corpus open; pando-server times are the client's wall clock (HTTP and JSON included), with no result cache. Two pando-server columns: the query in Manatee's syntax, and the fastest of pando's four forms.
 
-| | question | Manatee query | hits Manatee | hits pando | first page: Manatee | pando-server | all hits: Manatee | pando-server | pando CLI |
-|---|---|---|---:|---:|---:|---:|---:|---:|---:|
-| W1 | rare word, rare word aligned | `[lemma="fisherman"] within de: [lemma="Fischer"]` | 2,507 | 2,507 | 0.9 ms | 0.5 ms | 18 ms | 3.1 ms | 1.7 s |
-| W2 | all nouns, rare word aligned | `[tree="NN"] within de: [lemma="Fischer"]` | 12,499 | 12,499 | 3.1 ms | 3.6 ms | 266 ms | 4.9 ms | 1.7 s |
-| W3 | rare word, nouns aligned | `[lemma="fisherman"] within de: [tree="NN"]` | 2,720 | 2,720 | 5.7 ms | 0.6 ms | 319 ms | 13 ms | 1.7 s |
-| W4 | nouns, nouns aligned | `[tree="NN"] within de: [tree="NN"]` | 6,921,775 | 6,921,443 | 0.8 ms | 44 ms | 16.3 s | 4.5 s | 6.2 s |
-| W5 | nouns, fr→nl | `[pos="NOM"] within nl: [tree="nounsg"]` | 12,104,352 | 12,104,139 | 0.7 ms | 108 ms | 23.8 s | 2.9 s | 4.5 s |
-| W6 | rare word, en→cs | `[lemma="fisherman"] within cs: [word="rybář\|rybáře\|rybáři\|rybářů\|rybářům\|rybářích\|rybářem\|rybářovi"]` | 692 | 692 | 0.9 ms | 0.8 ms | 4.2 ms | 1.4 ms | 1.7 s |
-| W7 | nouns, en→cs | `[tree="NN"] within cs: [hun="N_N"]` | 2,254,459 | 2,254,459 | 0.7 ms | 63 ms | 3.7 s | 1.2 s | 2.9 s |
-| W8 | rare word, nl→es | `[lemma="visser"] within es: [lemma="pescador"]` | 2,578 | 2,577 | 0.9 ms | 0.7 ms | 23 ms | 3.0 ms | 1.6 s |
-| N1 | not aligned with (rare) | `[lemma="fisherman"] !within de: [lemma="Fischer"]` | 638 | 638 | 1.5 ms | 3.3 ms | 14 ms | 3.7 ms | 1.7 s |
-| N2 | not aligned with (frequent) | `[tree="NN"] !within de: [tree="NN"]` | 1,595,941 | 1,596,273 | 0.9 ms | 4.5 s | 9.7 s | 4.5 s | 6.2 s |
-| C1 | aligned in two languages (rare) | `[lemma="fisherman"] within de: [lemma="Fischer"] within fr: [lemma="pêcheur"]` | 2,387 | 2,387 | 0.9 ms | 5.9 ms | 31 ms | 5.8 ms | 1.7 s |
-| C2 | aligned in two languages (frequent) | `[tree="NN"] within de: [tree="NN"] within fr: [pos="NOM"]` | 6,714,731 | 6,714,188 | 0.8 ms | 8.2 s | 27.3 s | 8.2 s | 10.0 s |
-| S1 | with aligned sentence (rare) | `[lemma="fisherman"]` | — | — | 10 ms | 1.1 ms | — | — | 1.7 s |
-| S2 | with aligned sentence (frequent) | `[tree="NN"]` | — | — | 40.8 s | 1.1 ms | — | — | 1.7 s |
-| F1 | frequency list under alignment (rare B) | `[tree="NN"] within de: [lemma="Fischer"]` | 12,499 | 12,499 | — | — | 310 ms | 2.8 s | 4.4 s |
-| F2 | frequency list under alignment (frequent) | `[tree="NN"] within de: [tree="NN"]` | 6,921,775 | 6,921,443 | — | — | 38.3 s | 7.3 s | 9.0 s |
+| | question | Manatee query | hits Manatee | hits pando | first page: Manatee | pando-server, Manatee syntax | pando-server, fastest | all hits: Manatee | pando-server, Manatee syntax | pando-server, fastest | pando CLI, fastest |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| W1 | rare word, rare word aligned | `[lemma="fisherman"] within de: [lemma="Fischer"]` | 2,507 | 2,507 | 0.9 ms | 10 ms | 1.0 ms | 18 ms | 9.9 ms | 3.7 ms | 36 ms |
+| W2 | all nouns, rare word aligned | `[tree="NN"] within de: [lemma="Fischer"]` | 12,499 | 12,499 | 3.1 ms | 16 ms | 3.8 ms | 266 ms | 15 ms | 4.9 ms | 39 ms |
+| W3 | rare word, nouns aligned | `[lemma="fisherman"] within de: [tree="NN"]` | 2,720 | 2,720 | 5.7 ms | 2.7 ms | 0.7 ms | 319 ms | 6.2 s | 13 ms | 48 ms |
+| W4 | nouns, nouns aligned | `[tree="NN"] within de: [tree="NN"]` | 6,921,775 | 6,921,443 | 0.8 ms | 3.5 ms | 1.8 ms | 16.3 s | 11.0 s | 4.5 s | 4.6 s |
+| W5 | nouns, fr→nl | `[pos="NOM"] within nl: [tree="nounsg"]` | 12,104,352 | 12,104,139 | 0.7 ms | 2.8 ms | 0.8 ms | 23.8 s | 14.0 s | 2.9 s | 2.9 s |
+| W6 | rare word, en→cs | `[lemma="fisherman"] within cs: [word="rybář\|rybáře\|rybáři\|rybářů\|rybářům\|rybářích\|rybářem\|rybářovi"]` | 692 | 692 | 0.9 ms | 4.9 ms | 0.9 ms | 4.2 ms | 4.6 ms | 1.5 ms | 43 ms |
+| W7 | nouns, en→cs | `[tree="NN"] within cs: [hun="N_N"]` | 2,254,459 | 2,254,459 | 0.7 ms | 4.1 ms | 1.7 ms | 3.7 s | 3.7 s | 1.2 s | 1.2 s |
+| W8 | rare word, nl→es | `[lemma="visser"] within es: [lemma="pescador"]` | 2,578 | 2,577 | 0.9 ms | 10 ms | 0.7 ms | 23 ms | 9.8 ms | 3.7 ms | 38 ms |
+| N1 | not aligned with (rare) | `[lemma="fisherman"] !within de: [lemma="Fischer"]` | 638 | 638 | 1.5 ms | 10 ms | 4.3 ms | 14 ms | 11 ms | 3.5 ms | 39 ms |
+| N2 | not aligned with (frequent) | `[tree="NN"] !within de: [tree="NN"]` | 1,595,941 | 1,596,273 | 0.9 ms | 2.7 ms | 1.0 ms | 9.7 s | 9.8 s | 4.5 s | 4.6 s |
+| C1 | aligned in two languages (rare) | `[lemma="fisherman"] within de: [lemma="Fischer"] within fr: [lemma="pêcheur"]` | 2,387 | 2,387 | 0.9 ms | 19 ms | 6.8 ms | 31 ms | 19 ms | 6.5 ms | 45 ms |
+| C2 | aligned in two languages (frequent) | `[tree="NN"] within de: [tree="NN"] within fr: [pos="NOM"]` | 6,714,731 | 6,714,188 | 0.8 ms | 5.4 ms | 1.8 ms | 27.3 s | 20.2 s | 8.2 s | 8.5 s |
+| S1 | with aligned sentence (rare) | `[lemma="fisherman"]` | — | — | 10 ms | — | 1.3 ms | — | — | — | 30 ms |
+| S2 | with aligned sentence (frequent) | `[tree="NN"]` | — | — | 40.8 s | — | 1.1 ms | — | — | — | 29 ms |
+| F1 | frequency list under alignment (rare B) | `[tree="NN"] within de: [lemma="Fischer"]` | 12,499 | 12,499 | — | — | — | 310 ms | — | 2.7 s | 2.8 s |
+| F2 | frequency list under alignment (frequent) | `[tree="NN"] within de: [tree="NN"]` | 6,921,775 | 6,921,443 | — | — | — | 38.3 s | — | 7.2 s | 7.3 s |
 
-Rare = *fisherman*, *Fischer*, *pêcheur*, *visser*, *pescador* (a few thousand hits), frequent = all nouns of the tagger (English `tree="NN"`, German `NN`, French `pos="NOM"`, Dutch `nounsg`, Czech hunpos `N_N`). In pando each query also names the language (`& text_lang="en"`). W6 lists the Czech forms of *rybář*: this manatee-open build (2.225.8, built without PCRE) matches no wildcard pattern (`.*` gives 0 hits); alternatives work. The CLI column is one thread; 8 threads give the same times, since the work is a single pass. Full report with every form and thread count: `dev/bench/parallel/results/europarl/report.md` (local).
+Rare = *fisherman*, *Fischer*, *pêcheur*, *visser*, *pescador* (a few thousand hits), frequent = all nouns of the tagger (English `tree="NN"`, German `NN`, French `pos="NOM"`, Dutch `nounsg`, Czech hunpos `N_N`). In pando each query also names the language (`& text_lang="en"`). W6 lists the Czech forms of *rybář*: this manatee-open build (2.225.8, built without PCRE) matches no wildcard pattern (`.*` gives 0 hits); alternatives work. The CLI column is one thread; 8 threads give the same times, since the work is a single pass. Manatee's times are from the run of 2026-10-30 05:44 (not run again for pando's later build). Full report with every form and thread count: `dev/bench/parallel/results/europarl/report.md` (local).
 
 **The counts that differ** are all Manatee's beads. The 332 nouns Manatee has more in W4 (aligned) are exactly the 332 pando has more in N2 (not aligned): both sum to the same 8,517,716 English nouns. The alignment files keep 99.999 % of the sentence links (de:en: 19 lost of 2.16M) and add 326–1,558 sentence pairs per language pair through beads.
 
