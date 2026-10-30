@@ -790,6 +790,11 @@ static RegionPosMask build_region_eq_position_mask(
     CorpusPos ntok = corpus.size();
     bool any = false;
     for (const auto& gf : filters) {
+        if (gf.test) {                    // tested per hit: no mask
+            out = RegionPosMask{};
+            out.status = RegionMaskStatus::Unsupported;
+            return out;
+        }
         if (gf.positions) {               // P4.14: computed before execution
             std::vector<PosInterval> pre;
             pre.reserve(gf.positions->size());
@@ -3678,9 +3683,10 @@ std::vector<ResolvedRegionFilter> QueryExecutor::resolve_region_filters(
         rf.value = gf.value;
         rf.anchor_name = gf.anchor_name;
         rf.positions = gf.positions;
+        rf.test = gf.test;
         rf.regex = gf.regex;
         rf.regex_full = gf.regex_full;
-        if (rf.positions) {
+        if (rf.positions || rf.test) {
             out.push_back(std::move(rf));
             continue;
         }
@@ -4180,6 +4186,10 @@ bool QueryExecutor::try_fast_aggregate(
                 if (!intervals_contain(*fc.rf->positions, pos)) return false;
                 continue;
             }
+            if (fc.rf && fc.rf->test) {
+                if (!(*fc.rf->test)(pos)) return false;
+                continue;
+            }
             if (!fc.valid) return false;
             int64_t rgn = fc.cursor.find(pos);
             if (rgn < 0) return false;
@@ -4620,7 +4630,7 @@ bool QueryExecutor::match_survives_post_filters_for_aggregate(
 static bool global_region_eq_unsatisfiable(const Corpus& corpus,
                                           const std::vector<GlobalRegionFilter>& filters) {
     for (const auto& gf : filters) {
-        if (gf.op != CompOp::EQ || gf.regex || gf.positions) continue;
+        if (gf.op != CompOp::EQ || gf.regex || gf.computed()) continue;
         size_t us = gf.region_attr.find('_');
         if (us == std::string::npos || us + 1 >= gf.region_attr.size()) continue;
         std::string struct_name = gf.region_attr.substr(0, us);
@@ -8479,7 +8489,13 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
                        aggregate_by_fields, skip_name_validation);
     // relation layers: `>:head` is the basic tree; another layer goes through the generic expansion
     // (for_each_related with the layer, executor_layers.cpp), which every dependency fast path leaves to it
-    if (TokenQuery wq; rewrite_more_withins(query, wq))
+    // a background count of an aligned query: an estimate from a sample first (sampled_total)
+    if (count_total && progress_ && !range_ && progress_->estimate.load() == 0 && sample_size == 0 &&
+        !aggregate_by_fields && query.aligned_parts.empty())
+        if (TokenQuery lq; lazy_aligned_query(query, lq)) progress_->estimate.store(sampled_total(lq));
+    // `within s_tuid having …` for a page without a total: tested per hit (rewrite_within_class)
+    const bool lazy_classes = !count_total && sample_size == 0 && !aggregate_by_fields && max_matches > 0;
+    if (TokenQuery wq; rewrite_more_withins(query, wq, lazy_classes))
         return execute(wq, max_matches, count_total, max_total_cap, sample_size, random_seed, num_threads,
                        aggregate_by_fields, skip_name_validation);
     if (TokenQuery hq; rewrite_head_layer(query, hq))
@@ -8489,7 +8505,7 @@ MatchSet QueryExecutor::execute(const TokenQuery& query,
         return std::move(*ms);
     if (auto ms = execute_manatee(query, max_matches, count_total, max_total_cap, sample_size, aggregate_by_fields))
         return std::move(*ms);
-    if (TokenQuery cq; rewrite_within_class(query, cq))
+    if (TokenQuery cq; rewrite_within_class(query, cq, lazy_classes))
         return execute(cq, max_matches, count_total, max_total_cap, sample_size, random_seed, num_threads,
                        aggregate_by_fields, skip_name_validation);
     if (auto ms = execute_layer_deviations(query, max_matches, count_total, max_total_cap, sample_size,
@@ -10071,6 +10087,10 @@ bool QueryExecutor::match_passes_inline_region_filters(const Match& m, const Tok
             if (!intervals_contain(*gf.positions, m.first_pos())) return false;
             continue;
         }
+        if (gf.test) {
+            if (!(*gf.test)(m.first_pos())) return false;
+            continue;
+        }
         std::string struct_name;
         std::string attr_name;
         const StructuralAttr* sa_ptr = nullptr;
@@ -10605,7 +10625,7 @@ bool QueryExecutor::rewrite_single_token_filters(const TokenQuery& query, TokenQ
     out = query;
     // `:: a.S_attr` with `a` the only token is the match's own filter
     for (auto& gf : out.global_region_filters)
-        if (!gf.positions && !gf.anchor_name.empty() && (gf.anchor_name == name || gf.anchor_name == "match")) {
+        if (!gf.computed() && !gf.anchor_name.empty() && (gf.anchor_name == name || gf.anchor_name == "match")) {
             gf.anchor_name.clear();
             changed = true;
         }
@@ -10613,7 +10633,7 @@ bool QueryExecutor::rewrite_single_token_filters(const TokenQuery& query, TokenQ
     if (!query.within.empty() && !query.not_within && !query.within_having && query.containing_clauses.empty()) {
         const std::string prefix = query.within + "_";
         for (const auto& gf : out.global_region_filters)
-            if (!gf.positions && gf.op == CompOp::EQ && gf.anchor_name.empty()
+            if (!gf.computed() && gf.op == CompOp::EQ && gf.anchor_name.empty()
                 && gf.region_attr.size() > prefix.size() && gf.region_attr.compare(0, prefix.size(), prefix) == 0) {
                 out.within.clear();
                 changed = true;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/types.h"
+#include <functional>
 #include <string>
 #include <vector>
 #include <memory>
@@ -273,6 +274,10 @@ struct GlobalRegionFilter {
     /// When set, region_attr / op / value are unused: a match passes when its first
     /// position lies in one of the intervals.
     std::shared_ptr<const std::vector<std::pair<int64_t, int64_t>>> positions;
+    /// The same restriction tested per hit (`within s_tuid having COND` for a page: the hit's class has a COND
+    /// token), so a page does not wait for the whole restriction; a match passes when test(first position).
+    std::shared_ptr<const std::function<bool(int64_t)>> test;
+    bool computed() const { return positions || test; }
 };
 
 struct GlobalAlignmentFilter {

@@ -736,6 +736,7 @@ struct ResolvedRegionFilter {
     bool regex_full = false;
     /// P4.14: precomputed restriction (GlobalRegionFilter::positions)
     std::shared_ptr<const std::vector<std::pair<int64_t, int64_t>>> positions;
+    std::shared_ptr<const std::function<bool(int64_t)>> test;   // GlobalRegionFilter::test
 };
 
 struct Match;
@@ -807,6 +808,8 @@ struct QueryPlan {
 struct ExecProgress {
     std::atomic<size_t> counted{0};
     std::atomic<int64_t> scanned{-1};
+    /// a total estimated from a sample before counting (aligned queries: sampled_total), 0 = none
+    std::atomic<size_t> estimate{0};
     std::atomic<bool> cancel{false};
     /// P4.1d: a range worker's progress: the query's own progress, whose cancel
     /// (a client's, a time limit's) stops the worker too; `on_tick` (set by
@@ -949,10 +952,16 @@ public:
                                        bool count_total = true) const;
     // `[A] within L [having [C]]` / `not within L …` with L an equivalence layer: rewritten into a position filter
     // (the intervals of the classes in question). false when `within` names no equivalence layer.
-    bool rewrite_within_class(const TokenQuery& q, TokenQuery& out) const;
+    bool rewrite_within_class(const TokenQuery& q, TokenQuery& out, bool lazy = false) const;
     // The second `within` clause and later ones (TokenQuery::more_withins) as position filters; false when there are
     // none. Throws when one cannot be (a region clause on a query of more than one token).
-    bool rewrite_more_withins(const TokenQuery& q, TokenQuery& out) const;
+    bool rewrite_more_withins(const TokenQuery& q, TokenQuery& out, bool lazy = false) const;
+    /// The total of `q` estimated from a sample: `q` with its per-hit tests (GlobalRegionFilter::test) removed is
+    /// counted, its hits in windows spread over the corpus are tested, and the share passing scales the count.
+    /// Exact when the windows hold every hit. For a background count's estimate (ExecProgress::estimate).
+    size_t sampled_total(const TokenQuery& q);
+    /// `within s_tuid having …` / Manatee's `within de: …` as per-hit tests (the lazy rewrites); false otherwise
+    bool lazy_aligned_query(const TokenQuery& q, TokenQuery& out);
     // A relation layer of the query (in its chain or a `::` filter) whose declared scope is wider than the corpus's
     // default_within (scope corpus, or another region): the default does not apply to that query.
     bool layer_crosses_default_within(const TokenQuery& q) const;

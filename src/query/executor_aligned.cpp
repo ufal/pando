@@ -59,12 +59,50 @@ std::vector<size_t> merge_not_in(const Ranges& hits, const std::vector<size_t>& 
     return kept;
 }
 
+// one token and its conditions, nothing else (a hit of it can be tested at a position)
+bool plain_token(const TokenQuery& q) {
+    return q.tokens.size() == 1 && !q.tokens[0].has_repetition() && !q.tokens[0].is_anchor() && q.relations.empty() &&
+           q.within.empty() && !q.within_having && q.more_withins.empty() && q.union_alternatives.empty() &&
+           q.containing_clauses.empty() && q.global_region_filters.empty() && q.global_alignment_filters.empty() &&
+           q.global_function_filters.empty() && q.position_orders.empty();
+}
+
 bool fixed_length(const TokenQuery& q) {
     if (!q.union_alternatives.empty()) return false;
     for (const auto& t : q.tokens)
         if (!t.is_anchor() && t.min_repeat != t.max_repeat) return false;
     return true;
 }
+
+// the alignment segments (Manatee's ALIGNSTRUCT): the classes of the sentence alignment, `s_tuid`, else
+// `seg_tuid`, else another region's `*_tuid` below the document
+bool open_alignment(const Corpus& corpus, EquivalenceClasses& classes) {
+    std::vector<std::string> names{"s_tuid", "seg_tuid"};
+    for (const auto& r : corpus.region_attr_names())
+        if (is_alignment_id_attr(r) && r.rfind("text_", 0) != 0 && r.rfind("doc_", 0) != 0) names.push_back(r);
+    for (const auto& n : names)
+        if (classes.open(corpus, n) && classes.regions()) return true;
+    return false;
+}
+
+// A of `A within c: B …`: outside each aligned corpus named, one token
+bool one_token(const TokenQuery& a) {
+    return a.tokens.size() == 1 && !a.tokens[0].has_repetition() && !a.tokens[0].is_anchor() &&
+           a.union_alternatives.empty();
+}
+
+// Keeps a query's progress (and its cancel) out of the inner queries it runs: they would report their own
+// counts and positions as the query's
+struct InnerProgress {
+    ExecProgress inner;
+    ExecProgress*& slot;
+    ExecProgress* outer;
+    explicit InnerProgress(ExecProgress*& p) : slot(p), outer(p) {
+        inner.parent = outer;
+        if (outer) slot = &inner;
+    }
+    ~InnerProgress() { slot = outer; }
+};
 
 }  // namespace
 
@@ -93,26 +131,28 @@ std::optional<MatchSet> QueryExecutor::execute_aligned(const TokenQuery& q, size
     if (sample_size > 0 || (aggregate_by_fields && !aggregate_by_fields->empty()))
         throw std::runtime_error("within an aligned corpus (…: …) gives hits; sampling or counting them by a field "
                                  "is done on the hits");
-    // the alignment segments (Manatee's ALIGNSTRUCT): the classes of the sentence alignment, `s_tuid`, else
-    // `seg_tuid`, else another region's `*_tuid` below the document
     EquivalenceClasses classes;
-    std::vector<std::string> names{"s_tuid", "seg_tuid"};
-    for (const auto& r : corpus_.region_attr_names())
-        if (is_alignment_id_attr(r) && r.rfind("text_", 0) != 0 && r.rfind("doc_", 0) != 0) names.push_back(r);
-    bool found = false;
-    for (const auto& n : names)
-        if (classes.open(corpus_, n) && classes.regions()) {
-            found = true;
-            break;
-        }
-    if (!found)
+    if (!open_alignment(corpus_, classes))
         throw std::runtime_error("within an aligned corpus (…: …) needs a sentence alignment (s_tuid, seg_tuid, …)");
+    // a background count: an estimate first (sampled_total); the inner queries below do not report as this one
+    if (count_total && progress_ && progress_->estimate.load() == 0)
+        if (TokenQuery lq; lazy_aligned_query(q, lq)) progress_->estimate.store(sampled_total(lq));
+    InnerProgress quiet(progress_);
 
     // A: outside each aligned corpus named
     TokenQuery a = q;
     a.aligned_parts.clear();
     for (const auto& part : q.aligned_parts)
         a.global_region_filters.push_back(aligned_corpus_filter(part.corpus, CompOp::NEQ));
+
+    // a page without a total, A and every B one token: each A hit is tested against its own segments
+    // (lazy_aligned_query), so the page does not wait for every hit of B and A
+    if (TokenQuery lazy; !count_total && max_matches > 0 && lazy_aligned_query(q, lazy)) {
+        MatchSet ms = execute(lazy, max_matches, false, 0, 0, 0, 1, nullptr, true);
+        ms.plan_path = "manatee_aligned";
+        ms.total_exact = false;
+        return ms;
+    }
 
     // per clause, its segments: those aligned with a segment of the corpus holding a hit of B
     std::vector<Ranges> segments;
@@ -191,6 +231,103 @@ std::optional<MatchSet> QueryExecutor::execute_aligned(const TokenQuery& q, size
         result.total_exact = false;
     }
     return result;
+}
+
+}  // namespace pando
+
+namespace pando {
+
+// The per-hit form of an aligned query, as a page reads it: `within s_tuid having …` (and further within clauses)
+// through the lazy rewrites; Manatee's `A within c: B …` with A and every B one token as A outside the aligned
+// corpora, with a test per clause: a B token in one of the hit's segments in corpus c (none for `!within`).
+bool QueryExecutor::lazy_aligned_query(const TokenQuery& q, TokenQuery& out) {
+    if (q.aligned_parts.empty()) {
+        bool any = false;
+        TokenQuery cur = q;
+        for (TokenQuery next;; cur = std::move(next)) {
+            if (rewrite_more_withins(cur, next, true) || rewrite_within_class(cur, next, true)) {
+                any = true;
+                continue;
+            }
+            break;
+        }
+        if (any) out = std::move(cur);
+        return any;
+    }
+    TokenQuery a = q;
+    a.aligned_parts.clear();
+    for (const auto& part : q.aligned_parts)
+        a.global_region_filters.push_back(aligned_corpus_filter(part.corpus, CompOp::NEQ));
+    if (!one_token(a) || !std::all_of(q.aligned_parts.begin(), q.aligned_parts.end(), [](const AlignedPart& part) {
+            return part.query && plain_token(*part.query);
+        }))
+        return false;
+    EquivalenceClasses classes;
+    if (!open_alignment(corpus_, classes)) return false;
+    for (const auto& part : q.aligned_parts) {
+        const ConditionPtr cond = part.query->tokens[0].conditions;
+        if (cond) compile_conditions(cond);
+        TokenQuery lang;
+        lang.global_region_filters.push_back(aligned_corpus_filter(part.corpus, CompOp::EQ));
+        const bool negated = part.negated;
+        auto test = [this, classes, cond, lang, negated](int64_t p) {
+            const NameIndexMap no_names;
+            Match m;
+            m.positions = {0};
+            m.span_ends = {0};
+            bool in = false;
+            classes.for_each_class(static_cast<CorpusPos>(p), [&](LexiconId c) {
+                classes.for_each_region(c, [&](const Region& rg) {
+                    if (in) return;
+                    m.positions[0] = m.span_ends[0] = rg.start;
+                    if (!match_passes_inline_region_filters(m, lang, no_names)) return;   // not the aligned corpus
+                    for (CorpusPos x = rg.start; x <= rg.end && !in; ++x) in = check_conditions(x, cond);
+                });
+            });
+            return in != negated;
+        };
+        GlobalRegionFilter gf;
+        gf.test = std::make_shared<const std::function<bool(int64_t)>>(std::move(test));
+        a.global_region_filters.push_back(std::move(gf));
+    }
+    out = std::move(a);
+    return true;
+}
+
+size_t QueryExecutor::sampled_total(const TokenQuery& q) {
+    constexpr size_t kWant = 4000;     // hits tested, about
+    constexpr int64_t kWindows = 1000;
+    InnerProgress quiet(progress_);
+    TokenQuery base = q;
+    std::vector<std::shared_ptr<const std::function<bool(int64_t)>>> tests;
+    base.global_region_filters.clear();
+    for (const auto& f : q.global_region_filters)
+        if (f.test) tests.push_back(f.test);
+        else base.global_region_filters.push_back(f);
+    const MatchSet all = execute(base, 1, true, 0, 0, 0, 1, nullptr, true);
+    const size_t n = all.total_count;
+    if (n == 0 || tests.empty()) return n;
+    // windows spread evenly over the corpus, together about kWant of base's hits
+    const int64_t size = corpus_.size();
+    const double share = std::min(1.0, static_cast<double>(kWant) / static_cast<double>(n));
+    TokenQuery win = base;
+    if (share < 1.0) {
+        const int64_t step = std::max<int64_t>(1, size / kWindows);
+        const int64_t len = std::max<int64_t>(1, static_cast<int64_t>(share * static_cast<double>(step)));
+        auto iv = std::make_shared<std::vector<std::pair<int64_t, int64_t>>>();
+        for (int64_t s = 0; s < size; s += step) iv->push_back({s, std::min(size, s + len) - 1});
+        GlobalRegionFilter gf;
+        gf.positions = std::move(iv);
+        win.global_region_filters.push_back(std::move(gf));
+    }
+    const MatchSet sample = execute(win, 0, false, 0, 0, 0, 1, nullptr, true);
+    if (sample.matches.empty()) return 0;
+    size_t pass = 0;
+    for (const auto& m : sample.matches)
+        if (std::all_of(tests.begin(), tests.end(), [&](const auto& t) { return (*t)(m.first_pos()); })) ++pass;
+    if (share >= 1.0 && sample.matches.size() == n) return pass;   // every hit tested: the total itself
+    return static_cast<size_t>(static_cast<double>(n) * static_cast<double>(pass) /
+                               static_cast<double>(sample.matches.size()) + 0.5);
 }
 
 }  // namespace pando

@@ -468,6 +468,32 @@ def main():
         total = run("MANATEE " + q, True, "--count-only").split()
         check(got == want and total[-1:] == [str(len(want))],
               f"MANATEE {q}: {total[-1] if total else '?'} hits (Manatee {len(want)})" + ("" if got == want else f" got {got}"))
+        # a page without a total (2026-10-30: a one-token A and B test each hit's own segments): every page as the list
+        pages = []
+        for off in range(0, len(want) + 2, 2):
+            out = run("MANATEE " + q, True, "--json", "--offset", str(off), "--limit", "2")
+            try:
+                pages += [(h["match_start"], h["match_end"]) for h in json.loads(out)["result"]["hits"]]
+            except (ValueError, KeyError):
+                pages.append(out[:200])
+        check(pages == want, f"MANATEE {q}: pages of 2 without a total, as the full list" + ("" if pages == want else f" got {pages}"))
+    # `within s_tuid having …` pages without a total test each hit's own classes (2026-10-30): every page as the full
+    # list (computed with the total), for within, not within, two clauses and the token layer
+    for wq in ['[form="house"] within s_tuid having [text_lang="nld"]', '[] not within s_tuid having [text_lang="ces"]',
+               '[form="house"] within tuid having [form="huis"]', '[] not within tuid having []',
+               '[] within s_tuid having [text_lang="nld"] within s_tuid having [text_lang="ces"]',
+               '[] within s_tuid having [text_lang="nld"] not within tuid having [text_lang="ces"]']:
+        def starts(*extra):
+            out = run(wq, True, "--json", *extra)
+            try:
+                return [h["match_start"] for h in json.loads(out)["result"]["hits"]]
+            except (ValueError, KeyError):
+                return ["ERR " + out[:200]]
+        full = starts("--limit", "100000", "--total")
+        pages = []
+        for off in range(0, len(full) + 3, 3):
+            pages += starts("--offset", str(off), "--limit", "3")
+        check(full and pages == full, f"{wq}: pages of 3 without a total, as the full list ({len(full)} hits)")
     r = subprocess.run([a.pando, "--count-only", d, 'MANATEE [form="house"] within xyz: [form="huis"]'],
                        capture_output=True, text=True)
     check("no aligned corpus 'xyz'" in r.stdout + r.stderr, "an unknown aligned corpus: refused with a message")
@@ -564,6 +590,43 @@ def main():
         strip = lambda ps: [(p["source"]["tokens"], p["target"]["tokens"]) for p in ps]
         check(strip(page(True)) == strip(page(False)), f"CLI pair page without total: {pq} the same pairs")
     del os.environ["PANDO_PAIR_PAGE_MIN"]
+
+    if a.server:   # an aligned query's background count: a sampled estimate from the start (2026-10-30)
+        with socket.socket() as sk:
+            sk.bind(("127.0.0.1", 0))
+            port = sk.getsockname()[1]
+        srv = subprocess.Popen([a.server, d, str(port), "--debug-total-delay", "1500"], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+        def call(path, body=None):
+            req = urllib.request.Request(f"http://127.0.0.1:{port}{path}",
+                                         data=json.dumps(body).encode() if body is not None else None)
+            return json.loads(urllib.request.urlopen(req, timeout=30).read())
+        try:
+            for _ in range(100):
+                try:
+                    call("/health")
+                    break
+                except (ConnectionError, urllib.error.URLError):
+                    time.sleep(0.1)
+            for eq in ['[] within s_tuid having [text_lang="nld"]', '[] not within tuid having [text_lang="ces"]',
+                       'MANATEE [form="house"] within nld: [form="huis"]', 'MANATEE [] !within ces: [form="dům"]']:
+                want = run(eq, True, "--count-only").split()[-1]
+                job = call("/query", {"query": eq, "limit": 1, "total": "async"})["result"]["job"]
+                seen, st = None, {}
+                for _ in range(200):
+                    st = call(f"/status?job={job['id']}")
+                    st = st.get("result", st)
+                    if seen is None and st.get("estimate") is not None and not st.get("finished"):
+                        seen = st["estimate"]
+                    if st.get("finished"):
+                        break
+                    time.sleep(0.02)
+                check(str(seen) == want and str(st.get("total")) == want,
+                      f"{eq}: estimate while counting {seen}, total {st.get('total')} (CLI {want}; a small corpus "
+                      f"is sampled whole)")
+        finally:
+            srv.terminate()
+            srv.wait()
 
     # attributes declared multivalue (as TEITOK settings declare a `tuid` that can hold several ids): a token aligned
     # with two words (`w1|w2`), a segment merging two (`s1|s2`), a segment inside a segment; every path the same

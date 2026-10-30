@@ -125,6 +125,9 @@ QueryJobStatus QueryJobManager::snapshot(const Job& j) const {
                 st.estimate = std::max(st.counted,
                                        static_cast<size_t>(static_cast<double>(st.counted) / st.progress));
         }
+        // an aligned query's sampled estimate, until a tenth of the corpus is scanned
+        const size_t sampled = j.prog.estimate.load(std::memory_order_relaxed);
+        if (sampled > 0 && (st.estimate == 0 || st.progress < 0.1)) st.estimate = std::max(st.counted, sampled);
     }
     if (j.has_started) {
         const auto end = j.has_done ? j.done : Clock::now();
@@ -308,6 +311,7 @@ void QueryJobManager::run_job(Job& j) {
         total = ms.total_count;
         exact = ms.total_exact;
         if (cfg_.debug_delay.count() > 0) {
+            j.prog.estimate.store(hidden.estimate.load());   // a sampled estimate shows during the reveal
             // testing aid: publish the total in steps, like a slow count would
             const int steps = 20;
             const CorpusPos n = corpus_.size();
