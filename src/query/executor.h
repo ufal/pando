@@ -962,8 +962,9 @@ public:
     bool rewrite_more_withins(const TokenQuery& q, TokenQuery& out, bool lazy = false, bool always = false) const;
     /// The total of `q` estimated from a sample: `q` with its per-hit tests (GlobalRegionFilter::test) removed is
     /// counted, its hits in windows spread over the corpus are tested, and the share passing scales the count.
-    /// Exact when the windows hold every hit. For a background count's estimate (ExecProgress::estimate).
-    size_t sampled_total(const TokenQuery& q);
+    /// Exact when the windows hold every hit (*exact says which). For a background count's estimate
+    /// (ExecProgress::estimate), and a page's total where counting every hit would cost more (flexicorp-pando).
+    size_t sampled_total(const TokenQuery& q, bool* exact = nullptr);
     /// `within s_tuid having …` / Manatee's `within de: …` as per-hit tests (the lazy rewrites); false otherwise
     bool lazy_aligned_query(const TokenQuery& q, TokenQuery& out);
     // A relation layer of the query (in its chain or a `::` filter) whose declared scope is wider than the corpus's

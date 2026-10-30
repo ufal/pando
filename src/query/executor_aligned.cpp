@@ -301,7 +301,8 @@ bool QueryExecutor::lazy_aligned_query(const TokenQuery& q, TokenQuery& out) {
     return true;
 }
 
-size_t QueryExecutor::sampled_total(const TokenQuery& q) {
+size_t QueryExecutor::sampled_total(const TokenQuery& q, bool* exact) {
+    if (exact) *exact = false;
     constexpr size_t kWant = 4000;     // hits tested, about
     constexpr int64_t kWindows = 1000;
     InnerProgress quiet(progress_);
@@ -313,7 +314,10 @@ size_t QueryExecutor::sampled_total(const TokenQuery& q) {
         else base.global_region_filters.push_back(f);
     const MatchSet all = execute(base, 1, true, 0, 0, 0, 1, nullptr, true);
     const size_t n = all.total_count;
-    if (n == 0 || tests.empty()) return n;
+    if (n == 0 || tests.empty()) {
+        if (exact) *exact = all.total_exact;
+        return n;
+    }
     // windows spread evenly over the corpus, together about kWant of base's hits
     const int64_t size = corpus_.size();
     const double share = std::min(1.0, static_cast<double>(kWant) / static_cast<double>(n));
@@ -332,7 +336,10 @@ size_t QueryExecutor::sampled_total(const TokenQuery& q) {
     size_t pass = 0;
     for (const auto& m : sample.matches)
         if (std::all_of(tests.begin(), tests.end(), [&](const auto& t) { return (*t)(m.first_pos()); })) ++pass;
-    if (share >= 1.0 && sample.matches.size() == n) return pass;   // every hit tested: the total itself
+    if (share >= 1.0 && sample.matches.size() == n) {   // every hit tested: the total itself
+        if (exact) *exact = true;
+        return pass;
+    }
     return static_cast<size_t>(static_cast<double>(n) * static_cast<double>(pass) /
                                static_cast<double>(sample.matches.size()) + 0.5);
 }
