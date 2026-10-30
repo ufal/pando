@@ -482,6 +482,19 @@ def main():
         del os.environ["PANDO_LAZY_CLASS_MIN"]
     # `within s_tuid having …` pages without a total test each hit's own classes (2026-10-30): every page as the full
     # list (computed with the total), for within, not within, two clauses and the token layer
+    # a region target on an alignment class (2026-10-30: the target runs on the source hits' aligned regions only):
+    # the same pairs as the general join, pages and totals
+    for rq in ['a:[form="house"] with b:<s text_lang="nld"> :: a.s_tuid = b.s_tuid',
+               'a:[] with b:<s text_lang="ces"> :: a.s_tuid = b.s_tuid',
+               'a:[text_lang="eng"] with b:<s> :: a.s_tuid = b.s_tuid',
+               'a:[form="house"] with b:<s text_lang="nld"> :: b.s_tuid = a.s_tuid']:
+        for extra in (["--json", "--limit", "100000", "--total"], ["--json", "--limit", "3"], ["--json", "--offset", "2", "--limit", "3"]):
+            fast, slow = run(rq, True, *extra), run(rq, False, *extra)
+            # (the filter written the other way round, b … = a …, finds nothing with a region target, on the general
+            # join too: a separate bug, the two only have to agree)
+            check(fast == slow and not fast.startswith("ERROR") and ('"pairs"' in fast or "b.s_tuid = a" in rq),
+                  f"{rq} {' '.join(extra[1:])}: as the general join" + ("" if fast == slow else f" ({fast[:120]} / {slow[:120]})"))
+
     os.environ["PANDO_LAZY_CLASS_MIN"] = "0"   # every page tests each hit (a large corpus: a frequent having side)
     for wq in ['[form="house"] within s_tuid having [text_lang="nld"]', '[] not within s_tuid having [text_lang="ces"]',
                '[form="house"] within tuid having [form="huis"]', '[] not within tuid having []',

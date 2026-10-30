@@ -9341,6 +9341,37 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
     // Apply region filters (e.g. :: match.text_lang="en") before joining.
     apply_region_filters(src_exec, src_names, source_set);
 
+    // a region target joined on an alignment class (`with b:<s text_lang="de"> :: a.s_tuid = b.s_tuid`): only the
+    // regions of the source hits' classes can pair, so the target runs on those, not on every region of its kind
+    if (target_is_region && merged_alignment.size() == 1 && !include_empty_alignment_values_ && fastpaths_enabled()) {
+        const GlobalAlignmentFilter& af = merged_alignment[0];
+        const std::string& tn = target_query.tokens[0].name;
+        const bool fwd = af.name2 == tn, bwd = af.name1 == tn;
+        const std::string sa = normalize_attr(fwd ? af.attr1 : af.attr2), ta = normalize_attr(fwd ? af.attr2 : af.attr1);
+        EquivalenceClasses classes;
+        if ((fwd || bwd) && sa == ta && classes.open(corpus_, sa) && classes.regions()) {
+            const std::string& sn = fwd ? af.name1 : af.name2;
+            std::vector<LexiconId> cls;
+            for (const auto& m : source_set.matches) {
+                const CorpusPos p = resolve_name(m, src_names, sn);
+                if (p != NO_HEAD) classes.for_each_class(p, [&](LexiconId c) { cls.push_back(c); });
+            }
+            std::sort(cls.begin(), cls.end());
+            cls.erase(std::unique(cls.begin(), cls.end()), cls.end());
+            std::vector<std::pair<int64_t, int64_t>> spans;
+            for (LexiconId c : cls) classes.for_each_region(c, [&](const Region& r) { spans.emplace_back(r.start, r.end); });
+            std::sort(spans.begin(), spans.end());
+            auto iv = std::make_shared<std::vector<std::pair<int64_t, int64_t>>>();
+            for (const auto& [x, y] : spans) {
+                if (!iv->empty() && x <= iv->back().second + 1) iv->back().second = std::max<int64_t>(iv->back().second, y);
+                else iv->push_back({x, y});
+            }
+            GlobalRegionFilter gf;
+            gf.positions = std::move(iv);
+            tgt_exec.global_region_filters.push_back(std::move(gf));
+        }
+    }
+
     const auto& filters = merged_alignment;
     auto is_anchor_label = [](const TokenQuery& q, const std::string& name) {
         for (const auto& tok : q.tokens)
@@ -10252,7 +10283,29 @@ MatchSet QueryExecutor::execute_region_enumeration(const std::vector<AnchorConst
         }
     };
 
-    for (size_t ri = 0; ri < nreg; ++ri) {
+    // a filter computed before execution (the aligned regions of a `with` source, rewrite_within_class): over flat
+    // regions (in order by start) only those starting in its intervals are candidates; the filter still decides
+    std::vector<size_t> only;
+    bool restricted = false;
+    if (!corpus_.is_nested(enum_ac->region) && !corpus_.is_overlapping(enum_ac->region))
+        for (const auto& gf : q.global_region_filters) {
+            if (!gf.positions || !gf.anchor_name.empty()) continue;
+            restricted = true;
+            for (const auto& [lo, hi] : *gf.positions) {
+                int64_t r0 = sa.find_region(static_cast<CorpusPos>(lo));
+                if (r0 < 0) continue;
+                for (size_t ri = static_cast<size_t>(r0); ri < nreg && sa.get(ri).start <= hi; ++ri)
+                    if (sa.get(ri).start >= lo) only.push_back(ri);
+            }
+            break;
+        }
+    // a region between two intervals' lookups can come twice (an interval inside a region that starts before it)
+    std::sort(only.begin(), only.end());
+    only.erase(std::unique(only.begin(), only.end()), only.end());
+    const size_t ncand = restricted ? only.size() : nreg;
+
+    for (size_t ci = 0; ci < ncand; ++ci) {
+        const size_t ri = restricted ? only[ci] : ci;
         if (reached_total_cap()) break;
 
         bool attr_ok = true;
@@ -10291,7 +10344,7 @@ MatchSet QueryExecutor::execute_region_enumeration(const std::vector<AnchorConst
         if (batch.size() >= kBatch) {
             flush();
             if (page_full()) {
-                stopped_early = ri + 1 < nreg;
+                stopped_early = ci + 1 < ncand;
                 break;
             }
         }
