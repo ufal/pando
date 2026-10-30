@@ -10,30 +10,24 @@
 // A multivalue attribute (as its source declares it: TEITOK settings for a `tuid` holding several ids) puts its
 // token / region in the class of each of its ids ('|', the multivalue separator): a token aligned with two
 // words, a sentence merging two. For a token attribute the multivalue index has the ids; for a region attribute the
-// value → ids table is made once and kept with the attribute (Composite). An attribute not declared multivalue is
+// value → ids table (equivalence_composite.h) is written into the index when the layer is measured, else made once per
+// process, and kept with the attribute. An attribute not declared multivalue is
 // read as it is: its whole values are the classes.
 // The class join (executor_classes.cpp), the generic expansion and the declaration's measurement read these.
 
 #include "core/types.h"
 #include "corpus/corpus.h"
+#include "corpus/equivalence_composite.h"
 #include "index/positional_attr.h"
 #include "index/structural_attr.h"
 
 #include <algorithm>
-#include <functional>
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace pando {
-
-// The ids of an attribute whose values hold several of them: value (lexicon id) → its classes, class → its values
-struct EquivalenceComposite {
-    std::vector<std::vector<LexiconId>> value_classes;   // per lexicon id
-    std::vector<std::vector<LexiconId>> class_values;    // per class id
-};
 
 // `tuid` and `*_tuid`: translation unit ids, multivalue
 inline bool is_alignment_id_attr(const std::string& name) {
@@ -42,50 +36,6 @@ inline bool is_alignment_id_attr(const std::string& name) {
 
 // the multivalue separator
 inline const char* id_separators(const std::string&) { return "|"; }
-
-namespace equivalence_detail {
-
-inline bool is_separator(char c, const char* seps) {
-    for (const char* s = seps; *s; ++s)
-        if (c == *s) return true;
-    return false;
-}
-
-// nullptr when no value holds a separator (the classes are the values themselves)
-inline std::shared_ptr<const EquivalenceComposite> build_composite(LexiconId n,
-                                                                    const std::function<std::string_view(LexiconId)>& get,
-                                                                    const char* seps) {
-    bool any = false;
-    for (LexiconId v = 0; v < n && !any; ++v)
-        for (char c : get(v))
-            if (is_separator(c, seps)) { any = true; break; }
-    if (!any) return nullptr;
-    auto comp = std::make_shared<EquivalenceComposite>();
-    comp->value_classes.resize(static_cast<size_t>(n));
-    std::unordered_map<std::string, LexiconId> ids;
-    for (LexiconId v = 0; v < n; ++v) {
-        const std::string_view s = get(v);
-        size_t a = 0;
-        while (a <= s.size()) {
-            size_t b = a;
-            while (b < s.size() && !is_separator(s[b], seps)) ++b;
-            const std::string_view part = s.substr(a, b - a);
-            if (!part.empty() && part != "_") {
-                auto [it, fresh] = ids.try_emplace(std::string(part), static_cast<LexiconId>(comp->class_values.size()));
-                if (fresh) comp->class_values.emplace_back();
-                auto& vc = comp->value_classes[static_cast<size_t>(v)];
-                if (std::find(vc.begin(), vc.end(), it->second) == vc.end()) {
-                    vc.push_back(it->second);
-                    comp->class_values[static_cast<size_t>(it->second)].push_back(v);
-                }
-            }
-            a = b + 1;
-        }
-    }
-    return comp;
-}
-
-}  // namespace equivalence_detail
 
 class EquivalenceClasses {
 public:
@@ -106,9 +56,10 @@ public:
     }
 
     // A region attribute `key` of `regions` (with its reverse index); `stacked`: the regions nest or overlap, so a
-    // token can be in several (TEITOK sentences inside sentences); `multivalue`: a value's ids ('|') are its classes
+    // token can be in several (TEITOK sentences inside sentences); `multivalue`: a value's ids ('|') are its classes,
+    // read from `stored` (base path of the index's `.mvc` / `.lex`) when given and current
     bool open(const StructuralAttr& regions, const std::string& key, bool stacked = false, bool multivalue = false,
-              const char* seps = "|") {
+              const char* seps = "|", const std::string& stored = "") {
         attr_ = nullptr;
         regions_ = &regions;
         mv_ = false;
@@ -123,12 +74,14 @@ public:
         if (!multivalue) return true;
         const LexiconId n = nclasses_;
         comp_ = regions.cache().get<EquivalenceComposite>("equivalence-composite:" + key + ":" + seps,
-                                                          [&regions, &key, n, seps] {
-            return equivalence_detail::build_composite(n, [&regions, &key](LexiconId v) {
+                                                          [&regions, &key, n, seps, &stored] {
+            if (!stored.empty())
+                if (auto c = EquivalenceComposite::load(stored + ".mvc", stored + ".lex", n)) return c;
+            return EquivalenceComposite::build(n, [&regions, &key](LexiconId v) {
                 return regions.region_attr_lex_get(key, v);
             }, seps);
         });
-        if (comp_) nclasses_ = static_cast<LexiconId>(comp_->class_values.size());
+        if (comp_) nclasses_ = static_cast<LexiconId>(comp_->class_count());
         return true;
     }
 
@@ -142,7 +95,7 @@ public:
         const auto key = resolve_region_attr_key(sa, parts.struct_name, parts.attr_name);
         return key && sa.has_region_value_reverse(*key) &&
                open(sa, *key, corpus.is_nested(parts.struct_name) || corpus.is_overlapping(parts.struct_name),
-                    corpus.is_multivalue(name), id_separators(name));
+                    corpus.is_multivalue(name), id_separators(name), corpus.dir() + "/" + name);
     }
 
     bool regions() const { return regions_ != nullptr; }
@@ -150,6 +103,8 @@ public:
     bool single() const { return !mv_ && !comp_ && !(regions_ && stacked_); }
     // a multivalue region attribute: the classes are the ids of its values
     bool composite() const { return comp_ != nullptr; }
+    // that table, to store in the index (equivalence_composite.h); nullptr when there is none
+    const EquivalenceComposite* composite_table() const { return comp_.get(); }
 
     // the class ids are 0 … class_count() - 1 (some of them not a class: is_class)
     LexiconId class_count() const { return nclasses_; }
@@ -170,9 +125,8 @@ public:
             regions_->for_each_region_at(pos, [&](size_t r) {
                 const LexiconId rv = (*region_lex_)[r];
                 if (comp_) {
-                    if (rv >= 0 && static_cast<size_t>(rv) < comp_->value_classes.size())
-                        cls.insert(cls.end(), comp_->value_classes[static_cast<size_t>(rv)].begin(),
-                                   comp_->value_classes[static_cast<size_t>(rv)].end());
+                    const auto ids = comp_->classes_of(rv);
+                    cls.insert(cls.end(), ids.begin(), ids.end());
                 } else if (is_class(rv)) {
                     cls.push_back(rv);
                 }
@@ -197,8 +151,7 @@ public:
             v = attr_->id_at(pos);
         }
         if (comp_) {
-            if (v >= 0 && static_cast<size_t>(v) < comp_->value_classes.size())
-                for (LexiconId c : comp_->value_classes[static_cast<size_t>(v)]) f(c);
+            for (LexiconId c : comp_->classes_of(v)) f(c);
             return;
         }
         if (is_class(v)) f(v);
@@ -213,7 +166,7 @@ public:
         }
         if (comp_) {
             size_t n = 0;
-            for (LexiconId v : comp_->class_values[static_cast<size_t>(cls)]) n += attr_->rev_span_of_id(v).count;
+            for (LexiconId v : comp_->values_of(cls)) n += attr_->rev_span_of_id(v).count;
             return n;
         }
         return mv_ ? attr_->mv_count_of_id(cls) : attr_->rev_span_of_id(cls).count;
@@ -236,7 +189,7 @@ public:
             return;
         }
         if (comp_) {
-            const auto& vals = comp_->class_values[static_cast<size_t>(cls)];
+            const auto vals = comp_->values_of(cls);
             if (vals.size() == 1) {
                 const RevSpan span = attr_->rev_span_of_id(vals[0]);
                 for (size_t i = 0; i < span.count; ++i) f(span.at(i));
@@ -266,7 +219,7 @@ public:
         };
         std::vector<int64_t> idx;
         if (comp_) {
-            for (LexiconId v : comp_->class_values[static_cast<size_t>(cls)]) regions_of_value(v, idx);
+            for (LexiconId v : comp_->values_of(cls)) regions_of_value(v, idx);
             std::sort(idx.begin(), idx.end());
         } else {
             regions_of_value(cls, idx);

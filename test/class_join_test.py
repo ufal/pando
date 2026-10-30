@@ -609,6 +609,29 @@ def main():
         fast, slow = cnt(q), cnt(q, False)
         check(fast == slow == str(want), f"multivalue ids: {q}: {fast} (generic {slow}, reference {want})")
 
+    # the value → ids table of a multivalue region attribute is written into the index when the layer is measured
+    # (seg_tuid.mvc) and read from there; a damaged one is not read, and --upgrade writes a missing one
+    mvq = [('a:[] =:seg_tuid b:[]', s_pairs(lambda i: True, lambda i: True)),
+           ('a:[text_lang="eng"] =:seg_tuid b:[text_lang="nld"]', s_pairs(ENG, NLD)),
+           ('[text_lang="eng"] within seg_tuid having [text_lang="nld"]',
+            sum(1 for i in range(len(words)) if ENG(i) and any(NLD(j) and sids[i] & sids[j] for j in range(len(words)))))]
+    mvc = os.path.join(d2, "seg_tuid.mvc")
+    r = subprocess.run([a.pando_index, "--relation", "seg_tuid=equivalence,attr=seg_tuid", d2], capture_output=True,
+                       text=True)
+    check(r.returncode == 0 and os.path.exists(mvc), f"multivalue table: written by --relation ({r.stderr[-200:]})")
+    for q, want in mvq:
+        check(cnt(q) == str(want), f"multivalue table: {q} read from seg_tuid.mvc: {cnt(q)} (reference {want})")
+    with open(mvc, "r+b") as f:
+        f.truncate(20)
+    for q, want in mvq:
+        check(cnt(q) == str(want), f"multivalue table: {q} with a damaged seg_tuid.mvc: {cnt(q)} (reference {want})")
+    os.remove(mvc)
+    r = subprocess.run([a.pando_index, "--upgrade", d2], capture_output=True, text=True)
+    check(r.returncode == 0 and os.path.exists(mvc) and os.path.getsize(mvc) > 20,
+          f"multivalue table: --upgrade writes a missing one ({r.stderr[-200:]})")
+    for q, want in mvq:
+        check(cnt(q) == str(want), f"multivalue table: {q} after --upgrade: {cnt(q)} (reference {want})")
+
     print("class join: " + ("as required" if not failures else f"{failures} problem(s)"))
     return 1 if failures else 0
 

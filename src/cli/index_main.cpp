@@ -288,13 +288,16 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             if (pando::upgrade_index(pub.building_dir(), false, pairs, bitmaps, packed, drop_rev, head_attrs, compact_deps,
-                              packed_dat, drop_dat) != 0)
+                              packed_dat, drop_dat) != 0 ||
+                pando::measure_declared_equivalences(pub.building_dir(), false) != 0)
                 return 1;
             return report_publish(pub, keep);
         }
         if (refuse_published_in_place(argv[2], true)) return 1;
-        return pando::upgrade_index(argv[2], false, pairs, bitmaps, packed, drop_rev, head_attrs, compact_deps,
-                             packed_dat, drop_dat);
+        if (pando::upgrade_index(argv[2], false, pairs, bitmaps, packed, drop_rev, head_attrs, compact_deps,
+                                 packed_dat, drop_dat) != 0)
+            return 1;
+        return pando::measure_declared_equivalences(argv[2], false);
     }
     bool split_feats = false;
     std::optional<std::vector<std::string>> misc_keys;   // --misc-keys

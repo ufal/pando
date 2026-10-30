@@ -17,6 +17,10 @@ RelationDecl measure_equivalence(const Corpus& corpus, RelationDecl decl, Equiva
     if (!classes.open(corpus, decl.attr))
         throw std::runtime_error("relation." + decl.name + ": the corpus has no attribute '" + decl.attr +
                                  "' (a token attribute, or a region attribute such as s_tuid)");
+    // a multivalue region attribute's value → ids table goes into the index, so a query does not build it again
+    if (const EquivalenceComposite* comp = classes.composite_table();
+        comp && !comp->save(corpus.dir() + "/" + decl.attr + ".mvc"))
+        throw std::runtime_error("relation." + decl.name + ": cannot write " + corpus.dir() + "/" + decl.attr + ".mvc");
     const StructuralAttr* sents = corpus.has_structure("s") ? &corpus.structure("s") : nullptr;
     // the document regions: TEITOK / VRT `text`, CoNLL-U `# newdoc` (`doc`); with both (UD files holding several
     // documents), the scope is the narrower one that holds every class

@@ -274,14 +274,21 @@ bool record_relation(const std::string& dir, const RelationDecl& r) {
 }
 
 // Equivalence layers declared without a measurement (span unknown, e.g. `coref` from CorefUD `Entity=`): measure
-// scope and span from the data (equivalence_layer.h) and record them.
+// scope and span from the data (equivalence_layer.h) and record them. A layer on a multivalue region attribute
+// (`s_tuid` holding `a|b`) whose value → ids table is not in the index (an index from before .mvc) is measured
+// again, which writes the table.
 int measure_declared_equivalences(const std::string& dir, bool quiet) {
     std::vector<RelationDecl> todo;
     {
         Corpus corpus;
         corpus.open(dir);
+        auto lacks_table = [&](const RelationDecl& r) {
+            std::error_code ec;
+            return !corpus.has_attr(r.attr) && corpus.is_multivalue(r.attr) &&
+                   !fs::exists(dir + "/" + r.attr + ".mvc", ec);
+        };
         for (const auto& r : corpus.relations())
-            if (r.kind == RelationDecl::Kind::Equivalence && r.span < 0) {
+            if (r.kind == RelationDecl::Kind::Equivalence && (r.span < 0 || lacks_table(r))) {
                 EquivalenceStats st;
                 todo.push_back(measure_equivalence(corpus, r, &st));
                 if (!quiet)
