@@ -952,10 +952,14 @@ public:
                                        bool count_total = true) const;
     // `[A] within L [having [C]]` / `not within L …` with L an equivalence layer: rewritten into a position filter
     // (the intervals of the classes in question). false when `within` names no equivalence layer.
-    bool rewrite_within_class(const TokenQuery& q, TokenQuery& out, bool lazy = false) const;
+    /// `lazy`: a page; tested per hit when the having side is frequent (lazy_class_min), or `always` (a sample)
+    bool rewrite_within_class(const TokenQuery& q, TokenQuery& out, bool lazy = false, bool always = false) const;
+    /// the having side's estimated hits from which a page tests each hit (fewer: computing their classes is cheaper);
+    /// 50,000, PANDO_LAZY_CLASS_MIN for tests
+    static size_t lazy_class_min();
     // The second `within` clause and later ones (TokenQuery::more_withins) as position filters; false when there are
     // none. Throws when one cannot be (a region clause on a query of more than one token).
-    bool rewrite_more_withins(const TokenQuery& q, TokenQuery& out, bool lazy = false) const;
+    bool rewrite_more_withins(const TokenQuery& q, TokenQuery& out, bool lazy = false, bool always = false) const;
     /// The total of `q` estimated from a sample: `q` with its per-hit tests (GlobalRegionFilter::test) removed is
     /// counted, its hits in windows spread over the corpus are tested, and the share passing scales the count.
     /// Exact when the windows hold every hit. For a background count's estimate (ExecProgress::estimate).

@@ -901,13 +901,21 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
     return result;
 }
 
+size_t QueryExecutor::lazy_class_min() {
+    static const size_t n = [] {
+        const char* e = std::getenv("PANDO_LAZY_CLASS_MIN");
+        return e && *e ? static_cast<size_t>(std::strtoull(e, nullptr, 10)) : size_t{50000};
+    }();
+    return n;
+}
+
 // `[A] within L [having [C]]` / `[A] not within L [having [C]]` with L an equivalence layer (`s_tuid`, `tuid`): a class
 // as the region. The hit lies in a class (that has a C token); `not within`: it does not (an unaligned token is in no
 // class). Rewritten as P4.14 rewrites `within R having C`: the classes in question give position intervals (their
 // regions, or their tokens), a filter on the hit's position the other paths read. A one-token query; two tokens in
-// one class are `a:[A] =:L b:[B]`. `lazy` (a page, no total): the filter tests each hit's own classes instead, so the
-// first hits come without computing every class in question.
-bool QueryExecutor::rewrite_within_class(const TokenQuery& q, TokenQuery& out, bool lazy) const {
+// one class are `a:[A] =:L b:[B]`. `lazy` (a page, no total) with a frequent C (lazy_class_min), or `always`: the
+// filter tests each hit's own classes instead, so the first hits come without computing every class in question.
+bool QueryExecutor::rewrite_within_class(const TokenQuery& q, TokenQuery& out, bool lazy, bool always) const {
     if (q.within.empty() || corpus_.has_structure(q.within)) return false;
     const RelationDecl* decl = corpus_.relation(q.within);
     if (!decl || decl->kind != RelationDecl::Kind::Equivalence) return false;
@@ -917,9 +925,9 @@ bool QueryExecutor::rewrite_within_class(const TokenQuery& q, TokenQuery& out, b
     EquivalenceClasses classes;
     if (!classes.open(corpus_, decl->attr))
         throw std::runtime_error("within " + q.within + ": the corpus has no attribute '" + decl->attr + "'");
-    if (lazy) {
+    if (q.within_having) compile_conditions(q.within_having);
+    if (lazy && (always || !q.within_having || estimate_cardinality(q.within_having) >= lazy_class_min())) {
         // per hit: one of its classes has a C token (or: it has a class); `not within`: none
-        if (q.within_having) compile_conditions(q.within_having);
         const ConditionPtr having = q.within_having;
         const bool negated = q.not_within;
         auto test = [this, classes, having, negated](int64_t p) {
@@ -994,7 +1002,7 @@ bool QueryExecutor::rewrite_within_class(const TokenQuery& q, TokenQuery& out, b
 // `… within L1 having [A] within L2 having [B]`: every clause restricts the hits. The first stays as it is; each
 // later one becomes a filter on the hit's position: an equivalence layer as rewrite_within_class has it, a region
 // (one-token queries: the token lies in such a region) through its regions with a C token, or all of them.
-bool QueryExecutor::rewrite_more_withins(const TokenQuery& q, TokenQuery& out, bool lazy) const {
+bool QueryExecutor::rewrite_more_withins(const TokenQuery& q, TokenQuery& out, bool lazy, bool always) const {
     if (q.more_withins.empty()) return false;
     out = q;
     out.more_withins.clear();
@@ -1005,7 +1013,7 @@ bool QueryExecutor::rewrite_more_withins(const TokenQuery& q, TokenQuery& out, b
         one.not_within = w.not_within;
         one.within_having = w.having;
         TokenQuery cq;
-        if (rewrite_within_class(one, cq, lazy)) {
+        if (rewrite_within_class(one, cq, lazy, always)) {
             out.global_region_filters.push_back(std::move(cq.global_region_filters.back()));
             continue;
         }

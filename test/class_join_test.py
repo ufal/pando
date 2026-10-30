@@ -468,7 +468,9 @@ def main():
         total = run("MANATEE " + q, True, "--count-only").split()
         check(got == want and total[-1:] == [str(len(want))],
               f"MANATEE {q}: {total[-1] if total else '?'} hits (Manatee {len(want)})" + ("" if got == want else f" got {got}"))
-        # a page without a total (2026-10-30: a one-token A and B test each hit's own segments): every page as the list
+        # a page without a total (2026-10-30: a one-token A and a frequent B test each hit's own segments; here every
+        # B, PANDO_LAZY_CLASS_MIN=0): every page as the list
+        os.environ["PANDO_LAZY_CLASS_MIN"] = "0"
         pages = []
         for off in range(0, len(want) + 2, 2):
             out = run("MANATEE " + q, True, "--json", "--offset", str(off), "--limit", "2")
@@ -477,8 +479,10 @@ def main():
             except (ValueError, KeyError):
                 pages.append(out[:200])
         check(pages == want, f"MANATEE {q}: pages of 2 without a total, as the full list" + ("" if pages == want else f" got {pages}"))
+        del os.environ["PANDO_LAZY_CLASS_MIN"]
     # `within s_tuid having …` pages without a total test each hit's own classes (2026-10-30): every page as the full
     # list (computed with the total), for within, not within, two clauses and the token layer
+    os.environ["PANDO_LAZY_CLASS_MIN"] = "0"   # every page tests each hit (a large corpus: a frequent having side)
     for wq in ['[form="house"] within s_tuid having [text_lang="nld"]', '[] not within s_tuid having [text_lang="ces"]',
                '[form="house"] within tuid having [form="huis"]', '[] not within tuid having []',
                '[] within s_tuid having [text_lang="nld"] within s_tuid having [text_lang="ces"]',
@@ -494,6 +498,7 @@ def main():
         for off in range(0, len(full) + 3, 3):
             pages += starts("--offset", str(off), "--limit", "3")
         check(full and pages == full, f"{wq}: pages of 3 without a total, as the full list ({len(full)} hits)")
+    del os.environ["PANDO_LAZY_CLASS_MIN"]
     r = subprocess.run([a.pando, "--count-only", d, 'MANATEE [form="house"] within xyz: [form="huis"]'],
                        capture_output=True, text=True)
     check("no aligned corpus 'xyz'" in r.stdout + r.stderr, "an unknown aligned corpus: refused with a message")

@@ -147,7 +147,14 @@ std::optional<MatchSet> QueryExecutor::execute_aligned(const TokenQuery& q, size
 
     // a page without a total, A and every B one token: each A hit is tested against its own segments
     // (lazy_aligned_query), so the page does not wait for every hit of B and A
-    if (TokenQuery lazy; !count_total && max_matches > 0 && lazy_aligned_query(q, lazy)) {
+    // (only when a B is frequent: for rare ones their segments are quickly computed, below)
+    const bool frequent_b = std::any_of(q.aligned_parts.begin(), q.aligned_parts.end(), [&](const AlignedPart& part) {
+        if (!part.query || !plain_token(*part.query)) return false;
+        const ConditionPtr& c = part.query->tokens[0].conditions;
+        if (c) compile_conditions(c);
+        return estimate_cardinality(c) >= lazy_class_min();
+    });
+    if (TokenQuery lazy; !count_total && max_matches > 0 && frequent_b && lazy_aligned_query(q, lazy)) {
         MatchSet ms = execute(lazy, max_matches, false, 0, 0, 0, 1, nullptr, true);
         ms.plan_path = "manatee_aligned";
         ms.total_exact = false;
@@ -245,7 +252,7 @@ bool QueryExecutor::lazy_aligned_query(const TokenQuery& q, TokenQuery& out) {
         bool any = false;
         TokenQuery cur = q;
         for (TokenQuery next;; cur = std::move(next)) {
-            if (rewrite_more_withins(cur, next, true) || rewrite_within_class(cur, next, true)) {
+            if (rewrite_more_withins(cur, next, true, true) || rewrite_within_class(cur, next, true, true)) {
                 any = true;
                 continue;
             }
