@@ -5575,8 +5575,24 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
         result.seed_token = 0;
         result.plan_path = "single";
 
+        // Explicit `within S`: the hit's span has to lie inside one region of S (some
+        // row of S when S is nested= / overlapping=). The paths below that cannot check
+        // this are skipped; the flat-S bitmap path (P3.2) checks it itself. The default
+        // within is not applied to a single token.
+        const StructuralAttr* single_wsa =
+            (!q.within.empty() && !q.not_within && corpus_.has_structure(q.within))
+                ? &corpus_.structure(q.within) : nullptr;
+        const bool single_wspan = single_wsa
+            && (corpus_.is_nested(q.within) || corpus_.is_overlapping(q.within));
+        auto in_within = [&](CorpusPos a, CorpusPos b) -> bool {
+            if (!single_wsa) return true;
+            if (single_wspan) return within_span_in_some_region(*single_wsa, a, b);
+            const int64_t r = single_wsa->find_region(a);
+            return r >= 0 && single_wsa->get(static_cast<size_t>(r)).end >= b;
+        };
+
         // ── Try fast aggregation path (no Match construction) ────────────
-        if (agg_ptr && !agg_fast_path_blocked) {
+        if (agg_ptr && !agg_fast_path_blocked && !single_wsa) {
             auto resolved_filters = resolve_region_filters(q);
             if (try_fast_aggregate(q, *agg_ptr, resolved_filters,
                                    token_anchor_constraints,
@@ -5596,7 +5612,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
         // condition a SlidingBitset of the heads of its tokens (as dep_not), a count a
         // counter per head, instead of collecting the children of every A token (D7 on
         // ParlaMint, 1.55B tokens: 76 s).
-        if (fastpath_mode() == FastPathMode::On && sample_size == 0 && !agg_ptr
+        if (fastpath_mode() == FastPathMode::On && sample_size == 0 && !agg_ptr && !single_wsa
             && min_rep == 1 && max_rep == 1 && token_anchor_constraints.empty()
             && !q.within_having && !q.not_within && q.containing_clauses.empty()
             && q.position_orders.empty() && q.global_alignment_filters.empty()
@@ -5814,7 +5830,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
 
         // ── Single EQ token: first page straight from `.rev`, the rest only counted
         // (optionally through the EQ region mask). Avoids one Match per hit.
-        if (fastpath_mode() == FastPathMode::On && sample_size == 0 && !agg_ptr
+        if (fastpath_mode() == FastPathMode::On && sample_size == 0 && !agg_ptr && !single_wsa
             && !q.tokens[0].has_repetition() && token_anchor_constraints.empty()
             && !q.within_having && !q.not_within && q.containing_clauses.empty()
             && q.position_orders.empty() && q.global_alignment_filters.empty()
@@ -6018,6 +6034,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
                     }
                 }
                 if (!valid) break;
+                if (!in_within(p, end)) continue;
                 std::vector<CorpusPos> pm = {p, end};
                 add_match(std::move(pm));
                 if (reached_limit() || reached_total_cap()) return false;
@@ -6034,7 +6051,7 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
         // counted (tiles per run) when nothing else has to see each hit.
         bool runs_done = false;
         if (q.tokens[0].has_repetition() && fastpath_mode() == FastPathMode::On
-            && bitmap_mode() != BitmapMode::Off && !q.tokens[0].is_dep_subtree) {
+            && bitmap_mode() != BitmapMode::Off && !q.tokens[0].is_dep_subtree && !single_wsa) {
             bool dense = false;
             std::unique_ptr<BmExpr> e = tok_cond ? compile_bm(tok_cond, &dense) : nullptr;
             if (e || !tok_cond) {
@@ -6135,11 +6152,13 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
         } else if (q.tokens[0].has_repetition()) {
             CorpusPos i = 0;
             const CorpusPos n = corpus_.size();
+            // under `within S` a run starts inside S and ends where it would leave the
+            // region(s) of S holding it
             while (i < n) {
-                while (i < n && !check_conditions(i, tok_cond)) ++i;
+                while (i < n && !(check_conditions(i, tok_cond) && in_within(i, i))) ++i;
                 if (i >= n) break;
                 const CorpusPos s = i;
-                while (i + 1 < n && check_conditions(i + 1, tok_cond)) ++i;
+                while (i + 1 < n && check_conditions(i + 1, tok_cond) && in_within(s, i + 1)) ++i;
                 const CorpusPos e = i;
                 const int64_t L = static_cast<int64_t>(e - s + 1);
                 if (L < min_rep) {

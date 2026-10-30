@@ -406,6 +406,10 @@ if(BUILD_TESTING)
         add_test(NAME date_func
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/date_func_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
+        # explicit `within S` on single-token queries (flat, nested=, overlapping= S)
+        add_test(NAME within_multi
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/within_multi_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
         # named region anchors in /query hits: span, id, token ids per region group
         add_test(NAME region_groups
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/region_groups_test.py
