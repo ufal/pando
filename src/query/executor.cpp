@@ -9283,6 +9283,18 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
     merged_alignment.insert(merged_alignment.end(),
                               target_query.global_alignment_filters.begin(),
                               target_query.global_alignment_filters.end());
+    // `:: b.X = a.Y` is `:: a.Y = b.X`: the joins below read name1 on the source side and name2 on the target side
+    {
+        std::unordered_set<std::string> src_labels, tgt_labels;
+        collect_token_and_region_labels(source_query, &src_labels, &src_labels);
+        collect_token_and_region_labels(target_query, &tgt_labels, &tgt_labels);
+        for (auto& af : merged_alignment)
+            if (tgt_labels.count(af.name1) && !src_labels.count(af.name1) && src_labels.count(af.name2)
+                && !tgt_labels.count(af.name2)) {
+                std::swap(af.name1, af.name2);
+                std::swap(af.attr1, af.attr2);
+            }
+    }
 
     // one token either side over one attribute: the class join (executor_classes.cpp)
     if (auto ms = execute_parallel_class_join(source_query, target_query, merged_alignment, max_matches, count_total))
@@ -9462,6 +9474,88 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
         }
     }
 
+    // nothing links the sides and a page is asked: the targets are counted, not collected; the page reads the first
+    // ones, the self pairs (a source's own token, or the flat region holding it) come from the target query on the
+    // sources' own places. Pages and totals as the general join gives them (sort_parallel_pairs' order).
+    if (merged_alignment.empty() && fastpaths_enabled() && max_matches > 0 && tgt_exec.global_region_filters.empty()
+        && source_query.global_function_filters.empty() && target_query.global_function_filters.empty()) {
+        const std::string treg = target_is_region ? target_query.tokens[0].anchor_region : std::string();
+        const bool flat = !target_is_region || (corpus_.has_structure(treg) && !corpus_.is_nested(treg)
+                                                && !corpus_.is_overlapping(treg));
+        if (flat) {
+            const auto& S = source_set.matches;
+            auto key = [](const Match& m) {
+                return std::make_pair(m.positions.empty() ? CorpusPos{0} : m.first_pos(),
+                                      m.positions.empty() ? CorpusPos{0} : m.last_pos());
+            };
+            const size_t nT = execute(tgt_exec, 1, true, 0, 0, 0, 1, nullptr, true).total_count;
+            const size_t K = std::min(nT, max_matches + 2);
+            MatchSet first = execute(tgt_exec, K, false, 0, 0, 0, 1, nullptr, true);
+            auto& T = first.matches;
+            std::stable_sort(T.begin(), T.end(), [&](const Match& x, const Match& y) { return key(x) < key(y); });
+            // the self targets: the target query on each source's own place
+            size_t self_pairs = 0;
+            if (count_total && !S.empty()) {
+                auto iv = std::make_shared<std::vector<std::pair<int64_t, int64_t>>>();
+                for (const auto& m : S) {
+                    int64_t a = m.first_pos(), b = m.last_pos();
+                    if (target_is_region) {
+                        const auto& sa = corpus_.structure(treg);
+                        const int64_t r = sa.find_region(m.first_pos());
+                        if (r < 0) continue;
+                        a = b = sa.get(static_cast<size_t>(r)).start;
+                    }
+                    iv->push_back({a, b});
+                }
+                std::sort(iv->begin(), iv->end());
+                auto merged = std::make_shared<std::vector<std::pair<int64_t, int64_t>>>();
+                for (const auto& [x, y] : *iv) {
+                    if (!merged->empty() && x <= merged->back().second + 1)
+                        merged->back().second = std::max<int64_t>(merged->back().second, y);
+                    else
+                        merged->push_back({x, y});
+                }
+                TokenQuery own = tgt_exec;
+                GlobalRegionFilter gf;
+                gf.positions = std::move(merged);
+                own.global_region_filters.push_back(std::move(gf));
+                MatchSet mine = execute(own, 0, true, 0, 0, 0, 1, nullptr, true);
+                for (const auto& m : S)
+                    for (const auto& t : mine.matches)
+                        if (parallel_pair_is_self(m, t, target_is_region)) ++self_pairs;
+            }
+            std::vector<size_t> si(S.size());
+            for (size_t i = 0; i < si.size(); ++i) si[i] = i;
+            std::stable_sort(si.begin(), si.end(), [&](size_t x, size_t y) { return key(S[x]) < key(S[y]); });
+            bool full = false, short_of_targets = false;
+            for (size_t g = 0; g < si.size() && !full;) {
+                size_t g2 = g + 1;
+                while (g2 < si.size() && key(S[si[g2]]) == key(S[si[g]])) ++g2;
+                for (size_t h = 0; h < T.size() && !full;) {
+                    size_t h2 = h + 1;
+                    while (h2 < T.size() && key(T[h2]) == key(T[h])) ++h2;
+                    for (size_t x = g; x < g2 && !full; ++x)
+                        for (size_t y = h; y < h2 && !full; ++y) {
+                            if (parallel_pair_is_self(S[si[x]], T[y], target_is_region)) continue;
+                            result.parallel_matches.emplace_back(S[si[x]], T[y]);
+                            full = result.parallel_matches.size() >= max_matches;
+                        }
+                    h = h2;
+                }
+                // a source reached the end of the targets read while more follow: the general join instead
+                if (!full && T.size() < nT) short_of_targets = true;
+                g = g2;
+                if (short_of_targets) break;
+            }
+            if (!short_of_targets) {
+                result.total_count = count_total ? S.size() * nT - self_pairs : result.parallel_matches.size();
+                result.total_exact = count_total || !full;
+                return result;
+            }
+            result.parallel_matches.clear();
+        }
+    }
+
     MatchSet target_set = execute(tgt_exec, 0, true, 0, 0, 0, 1, nullptr, true);
     apply_region_filters(tgt_exec, tgt_names, target_set);
 
@@ -9531,6 +9625,73 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
             }
             goto done;
         }
+    }
+    // nothing links the sides: every combination, less a source with itself. Built only as far as the page goes,
+    // in the order sort_parallel_pairs gives (source key, target key; equal keys in emission order: source, then
+    // target); the total counted as sources x targets less the self pairs, without building the pairs
+    if (filters.empty() && fastpaths_enabled()) {
+        const auto& S = source_set.matches;
+        const auto& T = target_set.matches;
+        auto key = [](const Match& m) {
+            return std::make_pair(m.positions.empty() ? CorpusPos{0} : m.first_pos(),
+                                  m.positions.empty() ? CorpusPos{0} : m.last_pos());
+        };
+        std::vector<size_t> si(S.size()), ti(T.size());
+        for (size_t i = 0; i < si.size(); ++i) si[i] = i;
+        for (size_t j = 0; j < ti.size(); ++j) ti[j] = j;
+        std::stable_sort(si.begin(), si.end(), [&](size_t x, size_t y) { return key(S[x]) < key(S[y]); });
+        std::stable_sort(ti.begin(), ti.end(), [&](size_t x, size_t y) { return key(T[x]) < key(T[y]); });
+        // the targets that are a source itself: its own token(s), or a region holding it (the widest region bounds
+        // how far back such a region can start)
+        CorpusPos widest = 0;
+        if (target_is_region)
+            for (const auto& t : T) widest = std::max<CorpusPos>(widest, t.last_pos() - t.first_pos());
+        auto selfs = [&](const Match& m) {
+            size_t n = 0;
+            const CorpusPos a = m.first_pos();
+            size_t lo = 0, hi = ti.size();   // the first target starting after a
+            while (lo < hi) {
+                const size_t mid = lo + (hi - lo) / 2;
+                if (T[ti[mid]].first_pos() <= a) lo = mid + 1;
+                else hi = mid;
+            }
+            for (size_t k = lo; k-- > 0;) {
+                const Match& t = T[ti[k]];
+                if (t.first_pos() < a - widest) break;
+                if (parallel_pair_is_self(m, t, target_is_region)) ++n;
+            }
+            return n;
+        };
+        const size_t want = (max_matches > 0 && !count_total) ? max_matches : (max_matches > 0 ? max_matches : SIZE_MAX);
+        size_t total = 0;
+        bool page_done = false;
+        for (size_t g = 0; g < si.size();) {
+            size_t g2 = g + 1;
+            while (g2 < si.size() && key(S[si[g2]]) == key(S[si[g]])) ++g2;
+            if (count_total || max_matches == 0)
+                for (size_t x = g; x < g2; ++x) total += T.size() - selfs(S[si[x]]);
+            for (size_t h = 0; h < ti.size() && !page_done;) {
+                size_t h2 = h + 1;
+                while (h2 < ti.size() && key(T[ti[h2]]) == key(T[ti[h]])) ++h2;
+                for (size_t x = g; x < g2 && !page_done; ++x)
+                    for (size_t y = h; y < h2; ++y) {
+                        const Match& sm = S[si[x]];
+                        const Match& tm = T[ti[y]];
+                        if (parallel_pair_is_self(sm, tm, target_is_region)) continue;
+                        result.parallel_matches.emplace_back(sm, tm);
+                        if (result.parallel_matches.size() >= want) {
+                            page_done = true;
+                            break;
+                        }
+                    }
+                h = h2;
+            }
+            if (page_done && !count_total && max_matches > 0) break;
+            g = g2;
+        }
+        result.total_count = (count_total || max_matches == 0) ? total : result.parallel_matches.size();
+        result.total_exact = count_total || max_matches == 0 || !page_done;
+        return result;
     }
     for (const auto& s : source_set.matches) {
         for (const auto& t : target_set.matches) {

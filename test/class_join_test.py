@@ -487,13 +487,21 @@ def main():
     for rq in ['a:[form="house"] with b:<s text_lang="nld"> :: a.s_tuid = b.s_tuid',
                'a:[] with b:<s text_lang="ces"> :: a.s_tuid = b.s_tuid',
                'a:[text_lang="eng"] with b:<s> :: a.s_tuid = b.s_tuid',
-               'a:[form="house"] with b:<s text_lang="nld"> :: b.s_tuid = a.s_tuid']:
+               'a:[form="house"] with b:<s text_lang="nld"> :: b.s_tuid = a.s_tuid']:   # either order
         for extra in (["--json", "--limit", "100000", "--total"], ["--json", "--limit", "3"], ["--json", "--offset", "2", "--limit", "3"]):
             fast, slow = run(rq, True, *extra), run(rq, False, *extra)
-            # (the filter written the other way round, b … = a …, finds nothing with a region target, on the general
-            # join too: a separate bug, the two only have to agree)
-            check(fast == slow and not fast.startswith("ERROR") and ('"pairs"' in fast or "b.s_tuid = a" in rq),
+            check(fast == slow and not fast.startswith("ERROR") and '"pairs"' in fast,
                   f"{rq} {' '.join(extra[1:])}: as the general join" + ("" if fast == slow else f" ({fast[:120]} / {slow[:120]})"))
+
+    # `with` and nothing linking the sides (2026-10-30: the targets counted, only the page's pairs built): pages and
+    # totals as the general join, with a token or a region target, the source's own token or sentence left out
+    for xq in ['a:[form="house"] with b:[text_lang="nld"]', 'a:[form="house"] with b:[]', 'a:[] with b:<s text_lang="ces">',
+               'a:[form="the"] with b:<s>', 'a:[form="house"] with b:[form="house"]']:
+        for extra in (["--json", "--limit", "5", "--total"], ["--json", "--offset", "7", "--limit", "4", "--total"],
+                      ["--json", "--limit", "3"]):
+            fast, slow = run(xq, True, *extra), run(xq, False, *extra)
+            check(fast == slow and not fast.startswith("ERROR") and '"pairs"' in fast,
+                  f"{xq} {' '.join(extra[1:])}: as the general join" + ("" if fast == slow else f" ({fast[:120]} / {slow[:120]})"))
 
     os.environ["PANDO_LAZY_CLASS_MIN"] = "0"   # every page tests each hit (a large corpus: a frequent having side)
     for wq in ['[form="house"] within s_tuid having [text_lang="nld"]', '[] not within s_tuid having [text_lang="ces"]',
