@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.16)
 # toolchain targets the build host's own macOS version, which older Macs can't run).
 # Override with -DCMAKE_OSX_DEPLOYMENT_TARGET=…
 set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
-project(pando VERSION 0.3.0 LANGUAGES C CXX)
+project(pando VERSION 0.3.1 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -281,7 +281,7 @@ endif()
 if(BUILD_TESTING AND PANDO_PMLTQ_DIALECT)
     add_executable(pmltq_dialect_test src/query/dialect/pmltq/pmltq_dialect_test.cpp)
     target_link_libraries(pmltq_dialect_test PRIVATE pando_pmltq_dialect)
-    add_test(NAME pmltq_dialect COMMAND pmltq_dialect_test WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME pmltq_dialect COMMAND pmltq_dialect_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 if(BUILD_TESTING)
@@ -365,22 +365,22 @@ if(BUILD_TESTING)
         # Equivalence layers (equivalence_layer.*): =:coref over an attribute's classes, declared with --relation
         if(PANDO_MANATEE_DIALECT)
         add_test(NAME manatee_dialect_corpus
-            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/manatee_dialect_corpus_test.py
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/manatee_dialect_corpus_test.py
                     --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
     endif()
     add_test(NAME relation_events
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/discourse_layer_test.py
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/discourse_layer_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
     # CoNLL-U read by pando-index and the same data as JSONL (deps, bare newpar/newdoc, meta::): the same index
     # `with`: an unknown linking attribute is an error with a hint; nothing linking the sides: a warning
     add_test(NAME with_conditions
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/with_conditions_test.py
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/with_conditions_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
     add_test(NAME conllu_jsonl_parity
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/conllu_jsonl_parity_test.py
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/conllu_jsonl_parity_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
     add_test(NAME class_join
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/class_join_test.py
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/class_join_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
                 --server $<TARGET_FILE:pando-server>)
     add_test(NAME equivalence_layer

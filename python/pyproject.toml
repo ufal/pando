@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pando-cql"
-version = "0.3.0"
+version = "0.3.1"
 description = "Python client for pando CQL: run queries, hit tables and counts for pandas; geolinguistic map layers (pando_geo)"
 readme = "README.md"
 requires-python = ">=3.9"
