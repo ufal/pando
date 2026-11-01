@@ -363,7 +363,7 @@ const char* date_precision_name(DatePrecision p) {
         case DatePrecision::Decade: return "decade";
         case DatePrecision::Century: return "century";
         case DatePrecision::Millennium: return "millennium";
-        case DatePrecision::Range: return "range";
+        case DatePrecision::Range: return "interval";
         case DatePrecision::None: break;
     }
     return "";

@@ -259,7 +259,7 @@ ends `../1734`, `1712/..`, `/1734`.
   so `earliest(d) <= 1750 & latest(d) >= 1700` is "could be from 1700–1750" and
   `earliest(d) >= 1700 & latest(d) <= 1750` "certainly from 1700–1750".
 - `precision()` gives `day`, `month`, `season`, `year`, `decade`, `century`, `millennium` or
-  `range` (an interval).
+  `interval` (`A/B`), the names flexiconv's date conversion uses too.
 - `century()` counts ordinally: 1501–1600 is the 16th, so `16XX` (1600–1699) has no century; before
   year 1 it is negative (`-1`: the 1st century BC). `decade()` rounds down (`-44` → -50).
 - A value that is not EDTF is read as before: a leading four-digit year, and `YYYY-MM-DD` or

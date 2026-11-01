@@ -20,7 +20,7 @@ namespace pando {
 
 enum class DateSource { None, Edtf, Legacy };   // Legacy: not EDTF, read the old way
 
-/// How precise the value is as written. Range: an interval (A/B).
+/// How precise the value is as written. Range: an interval (A/B), named "interval" as in EDTF.
 enum class DatePrecision { None, Day, Month, Season, Year, Decade, Century, Millennium, Range };
 
 struct DateValue {
@@ -54,7 +54,7 @@ const char* date_part_function_name(DatePart part);
 std::optional<int64_t> date_part_value(const DateValue& date, DatePart part);
 
 /// The part as a grouping or table value: the number, or for Precision the precision's name
-/// ("day", "month", "season", "year", "decade", "century", "millennium", "range"); nullopt when
+/// ("day", "month", "season", "year", "decade", "century", "millennium", "interval"); nullopt when
 /// the value has none.
 std::optional<std::string> date_part_label(std::string_view text, DatePart part);
 

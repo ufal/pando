@@ -57,8 +57,8 @@ int main() {
     eq("timestamp", describe("1945-12-02T13:02:45Z"), "edtf day | 1945 20 1940 12 48 2 | 1945 1945");
     eq("offset", describe("1945-12-02T23:30:00-05:00"), "edtf day | 1945 20 1940 12 48 2 | 1945 1945");
     eq("0945", describe("0945"), "edtf year | 945 10 940 - - - | 945 945");
-    eq("interval", describe("1712-11-23/1734"), "edtf range | - 18 - - - - | 1712 1734");
-    eq("interval in one year", describe("1712-03/1712-05"), "edtf range | 1712 18 1710 - - - | 1712 1712");
+    eq("interval", describe("1712-11-23/1734"), "edtf interval | - 18 - - - - | 1712 1734");
+    eq("interval in one year", describe("1712-03/1712-05"), "edtf interval | 1712 18 1710 - - - | 1712 1712");
     // level 1
     eq("uncertain", describe("1945?"), "edtf year | 1945 20 1940 - - - | 1945 1945 ?");
     eq("approximate", describe("1945~"), "edtf year | 1945 20 1940 - - - | 1945 1945 ~");
@@ -72,10 +72,10 @@ int main() {
     eq("winter: into the next year", describe("1985-24"), "edtf season | - 20 1980 - - - | 1985 1986");
     eq("negative year", describe("-0044"), "edtf year | -44 -1 -50 - - - | -44 -44");
     eq("long year", describe("Y170000"), "edtf year | 170000 1700 170000 - - - | 170000 170000");
-    eq("open end", describe("1712/.."), "edtf range | - - - - - - | 1712 -");
-    eq("open start", describe("../1734"), "edtf range | - - - - - - | - 1734");
-    eq("unknown start", describe("/1734"), "edtf range | - - - - - - | - 1734");
-    eq("uncertain end", describe("1712/1734?"), "edtf range | - 18 - - - - | 1712 1734 ?");
+    eq("open end", describe("1712/.."), "edtf interval | - - - - - - | 1712 -");
+    eq("open start", describe("../1734"), "edtf interval | - - - - - - | - 1734");
+    eq("unknown start", describe("/1734"), "edtf interval | - - - - - - | - 1734");
+    eq("uncertain end", describe("1712/1734?"), "edtf interval | - 18 - - - - | 1712 1734 ?");
 
     // not EDTF: the old reading, as before
     eq("slashes", describe("1945/12/02"), "legacy day | 1945 20 1940 12 48 2 | 1945 1945");
@@ -97,7 +97,7 @@ int main() {
     // labels for grouping and tables
     eq("label year", date_part_label("1945-12-02", DatePart::Year).value_or("-"), "1945");
     eq("label precision", date_part_label("196X", DatePart::Precision).value_or("-"), "decade");
-    eq("label precision range", date_part_label("1712/1734", DatePart::Precision).value_or("-"), "range");
+    eq("label precision interval", date_part_label("1712/1734", DatePart::Precision).value_or("-"), "interval");
     eq("label precision legacy", date_part_label("1945/12/02", DatePart::Precision).value_or("-"), "day");
     eq("label none", date_part_label("XVI", DatePart::Year).value_or("-"), "-");
     eq("cached twice", date_part_label("1712/1734", DatePart::Century).value_or("-")
