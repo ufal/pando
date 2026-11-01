@@ -85,7 +85,7 @@ Pages are cut by pair.
 | `operation` | `result` | items |
 |---|---|---|
 | `count` (one field) | `total_matches, groups, groups_returned, fields[], rows[]` | `{key, count, pct}` |
-| `count` (several fields) | `total_matches, groups, top_groups, groups_returned, child_limit, fields[], hierarchy[]` | `{field, value, count, pct, pct_of_parent?, groups?, children[]?}` |
+| `count` (several fields) | `total_matches, groups, top_groups, groups_returned, child_limit, fields[], hierarchy[]` | a tree: see [Grouped counts](#grouped-counts-count--group-by-several-fields) |
 | `freq` | `corpus_size, total_matches, freq_mode: "single", source_query, per_subcorpus_ipm, fields[], rows[]` | `{key, count, pct, ipm, rf_pct?, subcorpus_size?}` |
 | `freq` (`freq A, B by …`) | `compare_queries[], corpus_size, freq_mode: "compare", per_subcorpus_ipm, fields[], totals_per_query{}, rows[]` | `{key, subcorpus_size?, queries: {Q: {count, pct, ipm, q_ipm, rf_pct?}}}` |
 | `stats` | `by[], metrics[], rows[]` | `{key, n_total, values[{n_valid, value}]}` |
@@ -106,6 +106,47 @@ Pages are cut by pair.
 | `show_settings` | the settings | |
 | `set` | no `result`; `setting, value` | |
 | `drop` | no `result` | |
+
+### Grouped counts (`count` / `group` by several fields)
+
+`count by A, B, C` answers a **tree**, not a table: the values of `A`, under each the values of `B`
+that occur with it, and so on. The tree is the result, because it answers what was asked: how the
+hits divide over `A`, and within each value of `A` over `B`. The same counts as a flat table come
+from `freq by A, B, C`.
+
+`result`:
+
+| key | |
+|---|---|
+| `fields[]` | `A, B, C`, in the order of the query; level *n* of the tree is `fields[n]` |
+| `total_matches` | the hits counted |
+| `groups` | the distinct combinations of all fields |
+| `top_groups` | the distinct values of the first field |
+| `groups_returned` | the top-level nodes in `hierarchy` |
+| `child_limit` | the most children a node has in this answer (`0`: all) |
+| `hierarchy[]` | the top-level nodes |
+
+A node:
+
+| key | |
+|---|---|
+| `field`, `value` | the field (`fields[level]`) and its value |
+| `count` | hits with this value and the values of the nodes above it |
+| `pct` | `count` as a percentage of `total_matches` |
+| `pct_of_parent` | `count` as a percentage of the parent's `count` (not on the top level) |
+| `groups` | the distinct values of the next field under this node, **before** any cut (not on the last level) |
+| `children[]` | those values as nodes, at most `child_limit` of them (not on the last level) |
+
+- **Order:** on every level, count descending, then value (numbers and Roman numerals numerically,
+  other values bytewise).
+- **Cuts:** the top level holds the first `group_limit` values (`/run` request; `0`: all), each
+  node the first `child_limit` children (default 20). A level was cut where `groups_returned <
+  top_groups`, or where a node has fewer `children` than its `groups`: the values not shown are
+  the ones with the lowest counts. Ask for `group_limit` / `child_limit` `0` for the whole tree.
+- **Counts add up:** a node's `count` is the sum of its children's counts only when nothing was
+  cut below it.
+- `contract/answers/run_count_hierarchy.json` is a whole tree,
+  `run_count_hierarchy_cut.json` a cut one.
 
 ### Other routes
 

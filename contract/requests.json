@@ -18,6 +18,7 @@
 
     {"name": "run_count", "method": "POST", "path": "/run", "body": {"cql": "a:[upos=\"NOUN\"]; count by a.lemma", "limit": 5}},
     {"name": "run_count_hierarchy", "method": "POST", "path": "/run", "body": {"cql": "a:[upos=\"VERB\"] > b:[upos=\"NOUN\"]; count by a.lemma, b.lemma", "limit": 5}},
+    {"name": "run_count_hierarchy_cut", "method": "POST", "path": "/run", "body": {"cql": "a:[]; count by a.text_lang, a.upos", "limit": 5, "group_limit": 1, "child_limit": 2}},
     {"name": "run_freq", "method": "POST", "path": "/run", "body": {"cql": "[upos=\"NOUN\"]; freq by lemma", "limit": 5}},
     {"name": "run_freq_compare", "method": "POST", "path": "/run", "body": {"cql": "A = [upos=\"NOUN\"]; B = [upos=\"VERB\"]; freq A, B by text_lang", "limit": 5}},
     {"name": "run_stats", "method": "POST", "path": "/run", "body": {"cql": "a:[]; stats avg(strlen(a.form)) by a.text_lang", "limit": 5}},

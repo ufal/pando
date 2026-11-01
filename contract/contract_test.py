@@ -2,7 +2,7 @@
 """The result-format contract: pando-server's answer to every request in requests.json, on
 corpus.jsonl, must have the shape stored in answers/NAME.json, and the status it names.
 
-    contract/contract_test.py --server build/pando-server --pando-index build/pando-index [--write]
+    contract/contract_test.py --server build/pando-server --pando-index build/pando-index [--write [--only NAMES]]
 
 A shape is the keys of every object and the type of every value: str, number (integers and
 decimals alike), bool, null, object, list. A list's shape is the union of its elements'; null and
@@ -132,6 +132,7 @@ def main():
     ap.add_argument("--server", required=True)
     ap.add_argument("--pando-index", required=True)
     ap.add_argument("--write", action="store_true", help="store the answers as the contract")
+    ap.add_argument("--only", default="", help="with --write: store only these answers (comma-separated names)")
     a = ap.parse_args()
     spec = json.load(open(os.path.join(HERE, "requests.json"), encoding="utf-8"))
     version = spec["format_version"]
@@ -176,7 +177,10 @@ def main():
             if not isinstance(answer, dict) or answer.get("format_version") != version:
                 problems.append(f"format_version {answer.get('format_version') if isinstance(answer, dict) else '-'}, expected {version}")
             stored_file = os.path.join(HERE, "answers", f"{name}.json")
-            if a.write:
+            only = {n for n in a.only.split(",") if n}
+            if a.write and only and name not in only:
+                pass
+            elif a.write:
                 os.makedirs(os.path.dirname(stored_file), exist_ok=True)
                 with open(stored_file, "w", encoding="utf-8") as f:
                     json.dump({"request": {"method": r["method"], "path": r["path"], "body": r.get("body")},
@@ -189,7 +193,7 @@ def main():
                 problems += differences(shape(stored), shape(answer))
             fails += [f"{name}: {x}" for x in problems]
             print(("FAIL " if problems else "ok   ") + name + ("" if not problems else ": " + "; ".join(problems[:6])))
-        if a.write:
+        if a.write and not a.only:
             for f in os.listdir(os.path.join(HERE, "answers")):
                 if f.endswith(".json") and f[:-5] not in names:
                     os.remove(os.path.join(HERE, "answers", f))
