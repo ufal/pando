@@ -234,16 +234,42 @@ Used after `::`, mostly with named tokens:
 | `distabs` | `distabs(a,b) < 5` | a and b are less than 5 tokens apart |
 | `strlen` | `strlen(a.lemma) = 3` | length of the value (characters) |
 | `f` | `f(a.form) >= 100` | corpus frequency of the value |
-| `year`, `century`, `decade` | `year(text_date) >= 2000` | from a date-like value (4-digit year prefix; century of 2001 = 21; decade = `(year/10)*10`) |
-| `month`, `week`, `day` | `month(a.text_date) = 5` | from `YYYY-MM[-DD]` values (ISO week) |
+| `year`, `century`, `decade` | `year(text_date) >= 2000` | of a date (see **Dates** below), when the date determines it; century of 2001 = 21 |
+| `month`, `week`, `day` | `month(a.text_date) = 5` | the same, for a date of that precision (ISO week) |
+| `earliest`, `latest` | `earliest(text_date) <= 1750 & latest(text_date) >= 1700` | the year of a date's first / last day (a range: its ends) |
 | `lat`, `lon` | `lat(a.text_geo) > 50.5` | latitude / longitude of a location value (decimal degrees) |
 | `geodist` | `geodist(a.text_geo, 50.08, 14.42) < 30` | distance in km to a point, or between two locations: `geodist(a.text_geo, b.text_geo)` |
 | `nchildren`, `ndescendants`, `depth` | `nchildren(a) > 3` | dependency tree of token a (not regions) |
 | `tcnt`, `gaps`, `contains`, `rchild`, `rcontains` | `tcnt(np) > 5` | regions and subtrees, see above |
 | `nvals` | `nvals(a.wsd) > 1` | number of values of a multivalue attribute |
 
-Date functions accept `name.attr` or a region attribute directly (`text_date`); they also work as
-`tabulate` fields.
+Date functions accept `name.attr`, `match.attr` or a region attribute directly (`text_date`); they
+also work as `count` / `group` / `freq` / `tabulate` fields, where `precision(text_date)` gives how
+precise each date is.
+
+**Dates.** A date is read as **EDTF** (ISO 8601-2, levels 0 and 1): `1945`, `1945-12`, `1945-12-02`
+(a time after it is allowed: the date is the date as written, not converted to UTC), `1945?`
+(uncertain), `1945~` (approximate), `1945%` (both), `196X` (a decade), `19XX` (a century),
+`1985-04-XX`, seasons (`1985-21` spring … `1985-24` winter), years before 1 (`-0044` is 45 BC: year 0
+is 1 BC) and of more than four digits (`Y170000`), and intervals `1712/1734`, with open or unknown
+ends `../1734`, `1712/..`, `/1734`.
+- Each date is the range of days it covers. A function gives a value only when the date determines
+  it: `year(1712/1734)` has none, `century(1712/1734)` is 18, `year(196X)` has none,
+  `decade(196X)` is 1960. `earliest()` and `latest()` give the range's years (none at an open end),
+  so `earliest(d) <= 1750 & latest(d) >= 1700` is "could be from 1700–1750" and
+  `earliest(d) >= 1700 & latest(d) <= 1750` "certainly from 1700–1750".
+- `precision()` gives `day`, `month`, `season`, `year`, `decade`, `century`, `millennium` or
+  `range` (an interval).
+- `century()` counts ordinally: 1501–1600 is the 16th, so `16XX` (1600–1699) has no century; before
+  year 1 it is negative (`-1`: the 1st century BC). `decade()` rounds down (`-44` → -50).
+- A value that is not EDTF is read as before: a leading four-digit year, and `YYYY-MM-DD` or
+  `YYYY/MM/DD` (so `1945/12/02`, `1550s`, `1712-1734` give 1945-12-02, 1550 and 1712). Anything else
+  (`02-12-1945`, `[1945]`, `XVI`, prose) is no date. Nothing else is guessed: other formats,
+  calendars and written-out dates are converted to EDTF before indexing (flexiconv), where the
+  conventions can be declared and checked.
+- An answer whose date functions read such values says so in its warnings (`result.warnings`): per
+  attribute, how many of its distinct values were read as before, how many are no date, and per
+  function how many do not give what it asks, each with examples.
 
 **Locations.** `lat`, `lon` and `geodist` read a location the way the date functions read a date:
 from an attribute (`text_geo`, `a.text_geo`) holding `50.087,14.421` or `50.087 14.421` (latitude

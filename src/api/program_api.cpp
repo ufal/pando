@@ -2,7 +2,9 @@
 // Runs a complete CQL program (queries + commands) and returns JSON output.
 // Lives in the pando_api library so both pando CLI and pando-server can use it.
 
+#include "core/dates.h"
 #include "query/dialect/dialect.h"
+#include "query/date_notes.h"
 #include "api/query_json.h"
 #include "query/keyness_select.h"
 #include "api/coll_counts.h"
@@ -743,128 +745,25 @@ static std::unordered_set<LexiconId> build_stoplist_ids(const PositionalAttr& pa
     return out;
 }
 
-enum class FreqDateTransform { None, Year, Century, Decade, Month, Week, Day };
 
 struct FreqSubcorpusSpec {
     const StructuralAttr* sa = nullptr;
     struct FieldSpec {
         std::string region_attr;
-        FreqDateTransform transform = FreqDateTransform::None;
+        std::optional<DatePart> part;   // a date function (core/dates), or the value itself
     };
     std::vector<FieldSpec> fields;
 };
 
-static std::optional<std::string> apply_date_bucket(std::string_view raw, FreqDateTransform t) {
-    if (t == FreqDateTransform::None) return std::string(raw);
-    struct ParsedDateParts {
-        int64_t year = 0;
-        int month = 0;
-        int day = 0;
-        bool has_month = false;
-        bool has_day = false;
-    };
-    auto is_leap_year = [](int64_t y) {
-        return (y % 4 == 0) && ((y % 100 != 0) || (y % 400 == 0));
-    };
-    auto days_in_month = [&](int64_t y, int m) {
-        static const int kDays[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
-        if (m == 2) return is_leap_year(y) ? 29 : 28;
-        return kDays[m - 1];
-    };
-    auto parse_date_parts_prefix = [&](std::string_view text) -> std::optional<ParsedDateParts> {
-        size_t i = 0;
-        while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) ++i;
-        if (i + 4 > text.size()) return std::nullopt;
-        for (size_t k = 0; k < 4; ++k) {
-            if (!std::isdigit(static_cast<unsigned char>(text[i + k])))
-                return std::nullopt;
-        }
-        ParsedDateParts out;
-        for (size_t k = 0; k < 4; ++k)
-            out.year = out.year * 10 + static_cast<int64_t>(text[i + k] - '0');
-        i += 4;
-        if (i >= text.size() || (text[i] != '-' && text[i] != '/'))
-            return out;
-        char sep = text[i++];
-        if (i + 2 > text.size()) return std::nullopt;
-        if (!std::isdigit(static_cast<unsigned char>(text[i]))
-            || !std::isdigit(static_cast<unsigned char>(text[i + 1])))
-            return std::nullopt;
-        out.month = static_cast<int>((text[i] - '0') * 10 + (text[i + 1] - '0'));
-        if (out.month < 1 || out.month > 12) return std::nullopt;
-        out.has_month = true;
-        i += 2;
-        if (i >= text.size() || text[i] != sep)
-            return out;
-        ++i;
-        if (i + 2 > text.size()) return std::nullopt;
-        if (!std::isdigit(static_cast<unsigned char>(text[i]))
-            || !std::isdigit(static_cast<unsigned char>(text[i + 1])))
-            return std::nullopt;
-        out.day = static_cast<int>((text[i] - '0') * 10 + (text[i + 1] - '0'));
-        if (out.day < 1 || out.day > days_in_month(out.year, out.month))
-            return std::nullopt;
-        out.has_day = true;
-        return out;
-    };
-    auto weekday_iso = [](int64_t y, int m, int d) {
-        static const int tt[12] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
-        int64_t yy = y;
-        if (m < 3) --yy;
-        int w = static_cast<int>((yy + yy/4 - yy/100 + yy/400 + tt[m - 1] + d) % 7);
-        if (w < 0) w += 7;
-        return w == 0 ? 7 : w;
-    };
-    auto iso_weeks_in_year = [&](int64_t y) {
-        int jan1 = weekday_iso(y, 1, 1);
-        if (jan1 == 4) return 53;
-        if (jan1 == 3 && is_leap_year(y)) return 53;
-        return 52;
-    };
-    auto day_of_year = [&](int64_t y, int m, int d) {
-        int doy = d;
-        for (int mm = 1; mm < m; ++mm)
-            doy += days_in_month(y, mm);
-        return doy;
-    };
-    auto iso_week_number = [&](int64_t y, int m, int d) {
-        int doy = day_of_year(y, m, d);
-        int dow = weekday_iso(y, m, d);
-        int week = (doy - dow + 10) / 7;
-        if (week < 1) return iso_weeks_in_year(y - 1);
-        int wiy = iso_weeks_in_year(y);
-        if (week > wiy) return 1;
-        return week;
-    };
-    auto p = parse_date_parts_prefix(raw);
-    if (!p) return std::nullopt;
-    switch (t) {
-        case FreqDateTransform::Year:
-            return std::to_string(p->year);
-        case FreqDateTransform::Century:
-            if (p->year <= 0) return std::nullopt;
-            return std::to_string(((p->year - 1) / 100) + 1);
-        case FreqDateTransform::Decade:
-            return std::to_string((p->year / 10) * 10);
-        case FreqDateTransform::Month:
-            if (!p->has_month) return std::nullopt;
-            return std::to_string(p->month);
-        case FreqDateTransform::Week:
-            if (!p->has_day) return std::nullopt;
-            return std::to_string(iso_week_number(p->year, p->month, p->day));
-        case FreqDateTransform::Day:
-            if (!p->has_day) return std::nullopt;
-            return std::to_string(p->day);
-        case FreqDateTransform::None:
-            break;
-    }
-    return std::nullopt;
+static std::optional<std::string> apply_date_bucket(std::string_view raw, std::optional<DatePart> part) {
+    if (!part) return std::string(raw);
+    return date_part_label(raw, *part);
 }
 
 static std::optional<FreqSubcorpusSpec> resolve_freq_subcorpus_spec(
         const Corpus& corpus, const std::vector<std::string>& fields) {
     if (fields.empty()) return std::nullopt;
-    auto resolve_region = [&](const std::string& attr_spec, FreqDateTransform tr,
+    auto resolve_region = [&](const std::string& attr_spec, std::optional<DatePart> part,
                               const StructuralAttr** expected_sa)
             -> std::optional<FreqSubcorpusSpec::FieldSpec> {
         RegionAttrParts parts;
@@ -877,7 +776,7 @@ static std::optional<FreqSubcorpusSpec> resolve_freq_subcorpus_spec(
         if (!rkey) return std::nullopt;
         FreqSubcorpusSpec::FieldSpec fs;
         fs.region_attr = *rkey;
-        fs.transform = tr;
+        fs.part = part;
         return fs;
     };
     auto parse_wrapped = [&](const std::string& f, const char* name)
@@ -892,19 +791,14 @@ static std::optional<FreqSubcorpusSpec> resolve_freq_subcorpus_spec(
     };
     auto parse_field = [&](const std::string& f, const StructuralAttr** expected_sa)
             -> std::optional<FreqSubcorpusSpec::FieldSpec> {
-        if (auto base = resolve_region(f, FreqDateTransform::None, expected_sa)) return base;
-        if (auto inner = parse_wrapped(f, "year"))
-            return resolve_region(*inner, FreqDateTransform::Year, expected_sa);
-        if (auto inner = parse_wrapped(f, "century"))
-            return resolve_region(*inner, FreqDateTransform::Century, expected_sa);
-        if (auto inner = parse_wrapped(f, "decade"))
-            return resolve_region(*inner, FreqDateTransform::Decade, expected_sa);
-        if (auto inner = parse_wrapped(f, "month"))
-            return resolve_region(*inner, FreqDateTransform::Month, expected_sa);
-        if (auto inner = parse_wrapped(f, "week"))
-            return resolve_region(*inner, FreqDateTransform::Week, expected_sa);
-        if (auto inner = parse_wrapped(f, "day"))
-            return resolve_region(*inner, FreqDateTransform::Day, expected_sa);
+        if (auto base = resolve_region(f, std::nullopt, expected_sa)) return base;
+        const size_t open = f.find('(');
+        if (open != std::string::npos && open > 0) {
+            const std::string fname = f.substr(0, open);
+            if (auto part = date_part_of_function(fname))
+                if (auto inner = parse_wrapped(f, fname.c_str()))
+                    return resolve_region(*inner, part, expected_sa);
+        }
         return std::nullopt;
     };
 
@@ -927,7 +821,7 @@ static std::unordered_map<std::string, double> build_freq_subcorpus_sizes(
     std::unordered_map<std::string, double> out;
     if (!spec.sa) return out;
 
-    if (spec.fields.size() == 1 && spec.fields[0].transform == FreqDateTransform::None) {
+    if (spec.fields.size() == 1 && !spec.fields[0].part) {
         const auto& f0 = spec.fields[0];
         for (const auto& key : keys) {
             size_t span = spec.sa->token_span_sum_for_attr_eq(f0.region_attr, key);
@@ -942,7 +836,7 @@ static std::unordered_map<std::string, double> build_freq_subcorpus_sizes(
         bool ok = true;
         for (size_t i = 0; i < spec.fields.size(); ++i) {
             const auto& fs = spec.fields[i];
-            auto bucket = apply_date_bucket(spec.sa->region_value(fs.region_attr, ri), fs.transform);
+            auto bucket = apply_date_bucket(spec.sa->region_value(fs.region_attr, ri), fs.part);
             if (!bucket) { ok = false; break; }
             if (i) key.push_back('\t');
             key += *bucket;
@@ -2574,6 +2468,9 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
         const size_t brace = result.find('{');
         if (brace != std::string::npos) result.insert(brace + 1, m + "], ");
     }
+    // dates read by its date functions: values read the old way, no date, or not giving what was asked
+    if (result.find("\"ok\": false") == std::string::npos && result.find("\"ok\":false") == std::string::npos)
+        result = with_result_warnings(std::move(result), date_value_notes(corpus, date_uses(*prog)));
     return result;
 }
 

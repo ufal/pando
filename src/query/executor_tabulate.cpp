@@ -12,159 +12,21 @@ std::string read_tabulate_field(const Corpus& corpus, const Match& m,
                                 const std::string& field) {
     // lat(), lon(), geodist(), geocell() of a location attribute (query/geo_fields.cpp)
     if (auto geo = evaluate_geo_tabulate_field(corpus, m, name_map, field)) return *geo;
-    enum class DatePartKind { None, Year, Century, Decade, Month, Week, Day };
-    DatePartKind date_part = DatePartKind::None;
+    // a date part (core/dates): year(text_date) … day(), earliest(), latest(), precision()
+    std::optional<DatePart> date_part;
     std::string requested = field;
-    if (field.size() > 6 && field.back() == ')') {
-        if (field.rfind("year(", 0) == 0) {
-            date_part = DatePartKind::Year;
-            requested = field.substr(5, field.size() - 6);
-        } else if (field.rfind("century(", 0) == 0) {
-            date_part = DatePartKind::Century;
-            requested = field.substr(8, field.size() - 9);
-        } else if (field.rfind("decade(", 0) == 0) {
-            date_part = DatePartKind::Decade;
-            requested = field.substr(7, field.size() - 8);
-        } else if (field.rfind("month(", 0) == 0) {
-            date_part = DatePartKind::Month;
-            requested = field.substr(6, field.size() - 7);
-        } else if (field.rfind("week(", 0) == 0) {
-            date_part = DatePartKind::Week;
-            requested = field.substr(5, field.size() - 6);
-        } else if (field.rfind("day(", 0) == 0) {
-            date_part = DatePartKind::Day;
-            requested = field.substr(4, field.size() - 5);
+    if (!field.empty() && field.back() == ')') {
+        const size_t open = field.find('(');
+        if (open != std::string::npos && open > 0 && open + 2 < field.size()) {
+            if (auto p = date_part_of_function(std::string_view(field).substr(0, open))) {
+                date_part = p;
+                requested = field.substr(open + 1, field.size() - open - 2);
+            }
         }
     }
-
-    auto parse_year_prefix = [](std::string_view text) -> std::optional<int64_t> {
-        size_t i = 0;
-        while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) ++i;
-        if (i >= text.size()) return std::nullopt;
-        bool neg = false;
-        if (text[i] == '+' || text[i] == '-') {
-            neg = text[i] == '-';
-            ++i;
-        }
-        if (i + 4 > text.size()) return std::nullopt;
-        for (size_t k = 0; k < 4; ++k) {
-            if (!std::isdigit(static_cast<unsigned char>(text[i + k])))
-                return std::nullopt;
-        }
-        if (i + 4 < text.size() && std::isdigit(static_cast<unsigned char>(text[i + 4])))
-            return std::nullopt;
-        int64_t y = 0;
-        for (size_t k = 0; k < 4; ++k)
-            y = y * 10 + static_cast<int64_t>(text[i + k] - '0');
-        if (neg) y = -y;
-        return y;
-    };
     auto render_date_part = [&](const std::string& raw) -> std::string {
-        if (date_part == DatePartKind::None) return raw;
-        struct ParsedDateParts {
-            int64_t year = 0;
-            int month = 0;
-            int day = 0;
-            bool has_month = false;
-            bool has_day = false;
-        };
-        auto is_leap_year = [](int64_t y) {
-            return (y % 4 == 0) && ((y % 100 != 0) || (y % 400 == 0));
-        };
-        auto days_in_month = [&](int64_t y, int m) {
-            static const int kDays[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
-            if (m == 2) return is_leap_year(y) ? 29 : 28;
-            return kDays[m - 1];
-        };
-        auto parse_date_parts_prefix = [&](std::string_view text) -> std::optional<ParsedDateParts> {
-            size_t i = 0;
-            while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) ++i;
-            if (i + 4 > text.size()) return std::nullopt;
-            for (size_t k = 0; k < 4; ++k) {
-                if (!std::isdigit(static_cast<unsigned char>(text[i + k])))
-                    return std::nullopt;
-            }
-            ParsedDateParts out;
-            for (size_t k = 0; k < 4; ++k)
-                out.year = out.year * 10 + static_cast<int64_t>(text[i + k] - '0');
-            i += 4;
-            if (i >= text.size() || (text[i] != '-' && text[i] != '/'))
-                return out;
-            char sep = text[i++];
-            if (i + 2 > text.size()) return std::nullopt;
-            if (!std::isdigit(static_cast<unsigned char>(text[i]))
-                || !std::isdigit(static_cast<unsigned char>(text[i + 1])))
-                return std::nullopt;
-            out.month = static_cast<int>((text[i] - '0') * 10 + (text[i + 1] - '0'));
-            if (out.month < 1 || out.month > 12) return std::nullopt;
-            out.has_month = true;
-            i += 2;
-            if (i >= text.size() || text[i] != sep)
-                return out;
-            ++i;
-            if (i + 2 > text.size()) return std::nullopt;
-            if (!std::isdigit(static_cast<unsigned char>(text[i]))
-                || !std::isdigit(static_cast<unsigned char>(text[i + 1])))
-                return std::nullopt;
-            out.day = static_cast<int>((text[i] - '0') * 10 + (text[i + 1] - '0'));
-            if (out.day < 1 || out.day > days_in_month(out.year, out.month))
-                return std::nullopt;
-            out.has_day = true;
-            return out;
-        };
-        auto weekday_iso = [](int64_t y, int m, int d) {
-            static const int t[12] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
-            int64_t yy = y;
-            if (m < 3) --yy;
-            int w = static_cast<int>((yy + yy/4 - yy/100 + yy/400 + t[m - 1] + d) % 7);
-            if (w < 0) w += 7;
-            return w == 0 ? 7 : w;
-        };
-        auto iso_weeks_in_year = [&](int64_t y) {
-            const int jan1 = weekday_iso(y, 1, 1);
-            if (jan1 == 4) return 53;
-            if (jan1 == 3 && is_leap_year(y)) return 53;
-            return 52;
-        };
-        auto day_of_year = [&](int64_t y, int m, int d) {
-            int doy = d;
-            for (int mm = 1; mm < m; ++mm)
-                doy += days_in_month(y, mm);
-            return doy;
-        };
-        auto iso_week_number = [&](int64_t y, int m, int d) {
-            int doy = day_of_year(y, m, d);
-            int dow = weekday_iso(y, m, d);
-            int week = (doy - dow + 10) / 7;
-            if (week < 1) return iso_weeks_in_year(y - 1);
-            int wiy = iso_weeks_in_year(y);
-            if (week > wiy) return 1;
-            return week;
-        };
-
-        auto y = parse_year_prefix(raw);
-        if (!y) return "";
-        if (date_part == DatePartKind::Year) return std::to_string(*y);
-        if (*y <= 0) return "";
-        if (date_part == DatePartKind::Century)
-            return std::to_string(((*y - 1) / 100) + 1);
-        if (date_part == DatePartKind::Decade)
-            return std::to_string((*y / 10) * 10);
-        auto p = parse_date_parts_prefix(raw);
-        if (!p) return "";
-        if (date_part == DatePartKind::Month) {
-            if (!p->has_month) return "";
-            return std::to_string(p->month);
-        }
-        if (date_part == DatePartKind::Day) {
-            if (!p->has_day) return "";
-            return std::to_string(p->day);
-        }
-        if (date_part == DatePartKind::Week) {
-            if (!p->has_day) return "";
-            return std::to_string(iso_week_number(p->year, p->month, p->day));
-        }
-        return "";
+        if (!date_part) return raw;
+        return date_part_label(raw, *date_part).value_or("");
     };
 
     if (auto tc = evaluate_tcnt_tabulate_field(corpus, m, name_map, field))

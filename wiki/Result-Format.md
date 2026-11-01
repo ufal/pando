@@ -39,6 +39,7 @@ Two other emitters exist and are **not yet** under this contract. They are being
 | `last_command` | for programs: the command whose output this is |
 | `result` | the body: an object, or for some kinds a list or a number |
 | `reused` | for programs: named queries that were reused instead of run again |
+| `result.warnings` | notes worth reading, only when there are any: on hits (a `with` without a linking condition), and on any answer whose date functions read values that are not EDTF, are no date, or do not give what was asked ([Dates](PANDO-CQL-Reference.md)); when `result` is no object, `warnings` is the answer's own |
 | `session_id`, `hitset` | with a client session |
 | `format_version` | this page's version |
 

@@ -1,4 +1,5 @@
 #include "query/parser.h"
+#include "core/dates.h"
 #include "query/condition_negate.h"
 #include "query/quoted_string_pattern.h"
 #include <cctype>
@@ -416,8 +417,7 @@ GroupCommand Parser::parse_command() {
                     continue;
                 }
                 if ((low == "tcnt" || low == "gaps" || low == "forms" || low == "spellout"
-                     || low == "year" || low == "century" || low == "decade"
-                     || low == "month" || low == "week" || low == "day")
+                     || date_part_of_function(low))
                     && lexer_.peek().type == TokType::LPAREN) {
                     lexer_.consume();
                     std::string inner = lexer_.expect(TokType::IDENT).text;
@@ -464,8 +464,7 @@ GroupCommand Parser::parse_command() {
                     return cmd;
                 }
                 if ((low == "tcnt" || low == "gaps" || low == "forms" || low == "spellout"
-                     || low == "year" || low == "century" || low == "decade"
-                     || low == "month" || low == "week" || low == "day")
+                     || date_part_of_function(low))
                     && lexer_.peek().type == TokType::LPAREN) {
                     lexer_.consume();
                     std::string inner = lexer_.expect(TokType::IDENT).text;
@@ -518,8 +517,7 @@ GroupCommand Parser::parse_command() {
                         return cmd;
                     }
                     if ((low2 == "tcnt" || low2 == "gaps" || low2 == "forms" || low2 == "spellout"
-                         || low2 == "year" || low2 == "century" || low2 == "decade"
-                         || low2 == "month" || low2 == "week" || low2 == "day")
+                         || date_part_of_function(low2))
                         && lexer_.peek().type == TokType::LPAREN) {
                         cmd.query_name = first;
                         lexer_.consume();
@@ -693,8 +691,7 @@ GroupCommand Parser::parse_command() {
         if (is_geo_field_function(low) && lexer_.peek().type == TokType::LPAREN)
             return read_geo_field_call(lexer_, low);
         if ((low == "tcnt" || low == "gaps" || low == "forms" || low == "spellout"
-             || low == "year" || low == "century" || low == "decade"
-             || low == "month" || low == "week" || low == "day"
+             || date_part_of_function(low)
              || low == "strlen")
             && lexer_.peek().type == TokType::LPAREN) {
             lexer_.consume();
@@ -1641,6 +1638,8 @@ void Parser::parse_global_filters(TokenQuery& tq) {
                 else if (name == "month")        fc.func = GlobalFunctionType::MONTH;
                 else if (name == "week")         fc.func = GlobalFunctionType::WEEK;
                 else if (name == "day")          fc.func = GlobalFunctionType::DAY;
+                else if (name == "earliest")     fc.func = GlobalFunctionType::EARLIEST;
+                else if (name == "latest")       fc.func = GlobalFunctionType::LATEST;
                 else if (name == "nchildren")    fc.func = GlobalFunctionType::NCHILDREN;
                 else if (name == "depth")        fc.func = GlobalFunctionType::DEPTH;
                 else if (name == "ndescendants") fc.func = GlobalFunctionType::NDESCENDANTS;

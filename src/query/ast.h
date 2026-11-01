@@ -297,6 +297,8 @@ enum class GlobalFunctionType {
     MONTH,
     WEEK,
     DAY,
+    EARLIEST,   // the year of a date's first day (core/dates)
+    LATEST,     // the year of its last day
     NCHILDREN,
     DEPTH,
     NDESCENDANTS,

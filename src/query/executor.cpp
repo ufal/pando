@@ -1,5 +1,6 @@
 #include "query/executor.h"
 #include "corpus/equivalence_classes.h"
+#include "core/dates.h"
 #include "core/geo.h"
 #include "core/regex_engine.h"
 #include "query/bitmap_expr.h"
@@ -30,6 +31,22 @@
 #include <condition_variable>
 
 namespace pando {
+
+// The date part a global-filter function asks for (core/dates), or nullopt for other functions.
+static std::optional<DatePart> global_date_part(GlobalFunctionType f) {
+    switch (f) {
+        case GlobalFunctionType::YEAR: return DatePart::Year;
+        case GlobalFunctionType::CENTURY: return DatePart::Century;
+        case GlobalFunctionType::DECADE: return DatePart::Decade;
+        case GlobalFunctionType::MONTH: return DatePart::Month;
+        case GlobalFunctionType::WEEK: return DatePart::Week;
+        case GlobalFunctionType::DAY: return DatePart::Day;
+        case GlobalFunctionType::EARLIEST: return DatePart::Earliest;
+        case GlobalFunctionType::LATEST: return DatePart::Latest;
+        default: return std::nullopt;
+    }
+}
+
 
 static bool compare_value_maybe_mv(CompOp op, std::string_view stored,
                                    const std::string& query_value, bool is_multivalue_attr);
@@ -1117,6 +1134,8 @@ static void append_func_call_token_args(const GlobalFuncCall& fc, std::vector<st
         case GlobalFunctionType::MONTH:
         case GlobalFunctionType::WEEK:
         case GlobalFunctionType::DAY:
+        case GlobalFunctionType::EARLIEST:
+        case GlobalFunctionType::LATEST:
         case GlobalFunctionType::NVALS:
             if (!fc.args.empty()) {
                 auto dot = fc.args[0].find('.');
@@ -1188,27 +1207,16 @@ static void validate_global_func_filter_token_labels(const GlobalFunctionFilter&
             }
             return;
         }
-        if (fc.func == GlobalFunctionType::YEAR || fc.func == GlobalFunctionType::CENTURY
-            || fc.func == GlobalFunctionType::DECADE || fc.func == GlobalFunctionType::MONTH
-            || fc.func == GlobalFunctionType::WEEK || fc.func == GlobalFunctionType::DAY) {
-            if (fc.args.size() != 1) {
-                const char* msg = "date function in global filter requires exactly one argument";
-                switch (fc.func) {
-                    case GlobalFunctionType::YEAR:    msg = "year(...) in global filter requires exactly one argument"; break;
-                    case GlobalFunctionType::CENTURY: msg = "century(...) in global filter requires exactly one argument"; break;
-                    case GlobalFunctionType::DECADE:  msg = "decade(...) in global filter requires exactly one argument"; break;
-                    case GlobalFunctionType::MONTH:   msg = "month(...) in global filter requires exactly one argument"; break;
-                    case GlobalFunctionType::WEEK:    msg = "week(...) in global filter requires exactly one argument"; break;
-                    case GlobalFunctionType::DAY:     msg = "day(...) in global filter requires exactly one argument"; break;
-                    default: break;
-                }
-                throw std::runtime_error(msg);
-            }
+        if (auto dpart = global_date_part(fc.func)) {
+            if (fc.args.size() != 1)
+                throw std::runtime_error(std::string(date_part_function_name(*dpart))
+                                         + "(...) in global filter requires exactly one argument");
             const std::string& spec = fc.args[0];
             auto dot = spec.find('.');
             if (dot != std::string::npos && dot > 0) {
                 const std::string prefix = spec.substr(0, dot);
-                if (!token_labels.count(prefix) && !region_labels.count(prefix)) {
+                // match.text_date: the hit's own value, as in count by / tabulate
+                if (prefix != "match" && !token_labels.count(prefix) && !region_labels.count(prefix)) {
                     throw std::runtime_error(
                             "Global filter (:: ...): unknown name '" + prefix + "' in date function");
                 }
@@ -1249,131 +1257,6 @@ static void validate_global_func_filter_token_labels(const GlobalFunctionFilter&
 /// True iff `inner`'s inclusive token span lies inside `outer`'s (Layer A geometry).
 static bool region_span_contains(const Region& outer, const Region& inner) {
     return inner.start >= outer.start && inner.end <= outer.end;
-}
-
-static std::optional<int64_t> parse_year_prefix(std::string_view text) {
-    size_t i = 0;
-    while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) ++i;
-    if (i >= text.size()) return std::nullopt;
-
-    bool neg = false;
-    if (text[i] == '+' || text[i] == '-') {
-        neg = text[i] == '-';
-        ++i;
-    }
-
-    if (i + 4 > text.size()) return std::nullopt;
-    for (size_t k = 0; k < 4; ++k) {
-        if (!std::isdigit(static_cast<unsigned char>(text[i + k])))
-            return std::nullopt;
-    }
-    if (i + 4 < text.size() && std::isdigit(static_cast<unsigned char>(text[i + 4])))
-        return std::nullopt;
-
-    int64_t year = 0;
-    for (size_t k = 0; k < 4; ++k)
-        year = year * 10 + static_cast<int64_t>(text[i + k] - '0');
-    if (neg) year = -year;
-    return year;
-}
-
-static std::optional<int64_t> century_from_year(int64_t year) {
-    if (year <= 0) return std::nullopt;
-    return ((year - 1) / 100) + 1;
-}
-
-static int64_t decade_from_year(int64_t year) {
-    return (year / 10) * 10;
-}
-
-struct ParsedDateParts {
-    int64_t year = 0;
-    int month = 0;
-    int day = 0;
-    bool has_month = false;
-    bool has_day = false;
-};
-
-static bool is_leap_year(int64_t y) {
-    return (y % 4 == 0) && ((y % 100 != 0) || (y % 400 == 0));
-}
-
-static int days_in_month(int64_t y, int m) {
-    static const int kDays[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
-    if (m == 2) return is_leap_year(y) ? 29 : 28;
-    return kDays[m - 1];
-}
-
-static std::optional<ParsedDateParts> parse_date_parts_prefix(std::string_view text) {
-    size_t i = 0;
-    while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) ++i;
-    if (i + 4 > text.size()) return std::nullopt;
-    for (size_t k = 0; k < 4; ++k) {
-        if (!std::isdigit(static_cast<unsigned char>(text[i + k])))
-            return std::nullopt;
-    }
-    ParsedDateParts out;
-    out.year = 0;
-    for (size_t k = 0; k < 4; ++k)
-        out.year = out.year * 10 + static_cast<int64_t>(text[i + k] - '0');
-    i += 4;
-    if (i >= text.size() || (text[i] != '-' && text[i] != '/'))
-        return out;
-    char sep = text[i++];
-    if (i + 2 > text.size()) return std::nullopt;
-    if (!std::isdigit(static_cast<unsigned char>(text[i]))
-        || !std::isdigit(static_cast<unsigned char>(text[i + 1])))
-        return std::nullopt;
-    out.month = static_cast<int>((text[i] - '0') * 10 + (text[i + 1] - '0'));
-    if (out.month < 1 || out.month > 12) return std::nullopt;
-    out.has_month = true;
-    i += 2;
-    if (i >= text.size() || text[i] != sep)
-        return out;
-    ++i;
-    if (i + 2 > text.size()) return std::nullopt;
-    if (!std::isdigit(static_cast<unsigned char>(text[i]))
-        || !std::isdigit(static_cast<unsigned char>(text[i + 1])))
-        return std::nullopt;
-    out.day = static_cast<int>((text[i] - '0') * 10 + (text[i + 1] - '0'));
-    if (out.day < 1 || out.day > days_in_month(out.year, out.month))
-        return std::nullopt;
-    out.has_day = true;
-    return out;
-}
-
-static int weekday_iso(int64_t y, int m, int d) {
-    // Sakamoto: 0=Sunday..6=Saturday
-    static const int t[12] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
-    int64_t yy = y;
-    if (m < 3) --yy;
-    int w = static_cast<int>((yy + yy/4 - yy/100 + yy/400 + t[m - 1] + d) % 7);
-    if (w < 0) w += 7;
-    return w == 0 ? 7 : w; // Monday=1..Sunday=7
-}
-
-static int iso_weeks_in_year(int64_t y) {
-    const int jan1 = weekday_iso(y, 1, 1);
-    if (jan1 == 4) return 53;
-    if (jan1 == 3 && is_leap_year(y)) return 53;
-    return 52;
-}
-
-static int day_of_year(int64_t y, int m, int d) {
-    int doy = d;
-    for (int mm = 1; mm < m; ++mm)
-        doy += days_in_month(y, mm);
-    return doy;
-}
-
-static int iso_week_number(int64_t y, int m, int d) {
-    int doy = day_of_year(y, m, d);
-    int dow = weekday_iso(y, m, d); // Mon=1..Sun=7
-    int week = (doy - dow + 10) / 7;
-    if (week < 1) return iso_weeks_in_year(y - 1);
-    int wiy = iso_weeks_in_year(y);
-    if (week > wiy) return 1;
-    return week;
 }
 
 static std::optional<Region> named_region_span(const Corpus& corpus, const Match& m,
@@ -4331,6 +4214,9 @@ static std::optional<AggregateBucketData::Column::DateTransform> parse_date_tran
         {"month(", AggregateBucketData::Column::DateTransform::Month},
         {"week(", AggregateBucketData::Column::DateTransform::Week},
         {"day(", AggregateBucketData::Column::DateTransform::Day},
+        {"earliest(", AggregateBucketData::Column::DateTransform::Earliest},
+        {"latest(", AggregateBucketData::Column::DateTransform::Latest},
+        {"precision(", AggregateBucketData::Column::DateTransform::Precision},
         {"strlen(", AggregateBucketData::Column::DateTransform::Strlen},
     };
     if (field.size() < 7 || field.back() != ')')
@@ -4357,49 +4243,10 @@ static std::string apply_date_transform_bucket(
             if ((c & 0xC0) != 0x80) ++cp_count;
         return std::to_string(cp_count);
     }
-    auto parse_year_prefix = [](std::string_view text) -> std::optional<int64_t> {
-        size_t i = 0;
-        while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) ++i;
-        if (i >= text.size()) return std::nullopt;
-        bool neg = false;
-        if (text[i] == '+' || text[i] == '-') {
-            neg = text[i] == '-';
-            ++i;
-        }
-        if (i + 4 > text.size()) return std::nullopt;
-        for (size_t k = 0; k < 4; ++k) {
-            if (!std::isdigit(static_cast<unsigned char>(text[i + k])))
-                return std::nullopt;
-        }
-        if (i + 4 < text.size() && std::isdigit(static_cast<unsigned char>(text[i + 4])))
-            return std::nullopt;
-        int64_t y = 0;
-        for (size_t k = 0; k < 4; ++k)
-            y = y * 10 + static_cast<int64_t>(text[i + k] - '0');
-        return neg ? -y : y;
-    };
-
-    auto y = parse_year_prefix(raw);
-    if (!y) return "";
-    switch (transform) {
-        case AggregateBucketData::Column::DateTransform::Year:
-            return std::to_string(*y);
-        case AggregateBucketData::Column::DateTransform::Century:
-            return (*y > 0) ? std::to_string(((*y - 1) / 100) + 1) : "";
-        case AggregateBucketData::Column::DateTransform::Decade:
-            return (*y > 0) ? std::to_string((*y / 10) * 10) : "";
-        case AggregateBucketData::Column::DateTransform::Month:
-        case AggregateBucketData::Column::DateTransform::Week:
-        case AggregateBucketData::Column::DateTransform::Day:
-            return "";
-        case AggregateBucketData::Column::DateTransform::Strlen:
-            return std::to_string(std::count_if(
-                    raw.begin(), raw.end(),
-                    [](unsigned char c) { return (c & 0xC0) != 0x80; }));
-        case AggregateBucketData::Column::DateTransform::None:
-            return std::string(raw);
-    }
-    return "";
+    // a date part (core/dates); a value without one groups as ""
+    auto part = aggregate_date_part(transform);
+    if (!part) return "";
+    return date_part_label(raw, *part).value_or("");
 }
 
 bool build_aggregate_plan(const Corpus& corpus, const std::vector<std::string>& fields,
@@ -9805,7 +9652,9 @@ void QueryExecutor::apply_global_filters(const TokenQuery& query, const NameInde
             // Evaluate a single GlobalFuncCall against a match.
             // Returns {true, value} on success, {false, 0} on failure (match rejected).
             // an attribute's value for this hit (a.text_date, text_geo, a region binding's attribute)
-            auto resolve_date_spec = [&](const std::string& spec) -> std::optional<std::string> {
+            auto resolve_date_spec = [&](const std::string& spec_in) -> std::optional<std::string> {
+                // match.text_date: the hit's own value (as without a prefix), as in count by / tabulate
+                const std::string spec = spec_in.rfind("match.", 0) == 0 ? spec_in.substr(6) : spec_in;
                 auto dot = spec.find('.');
                 if (dot != std::string::npos) {
                     if (dot == 0 || dot + 1 >= spec.size()) return std::nullopt;
@@ -9896,55 +9745,22 @@ void QueryExecutor::apply_global_filters(const TokenQuery& query, const NameInde
                     if (lid == UNKNOWN_LEX) return {false, 0};
                     return {true, static_cast<int64_t>(pa.count_of_id(lid))};
                 }
-                case GlobalFunctionType::YEAR: {
+                // dates (core/dates): EDTF or the old reading; a part the value does not determine
+                // (year() of 1712/1734) is no value, and the hit does not pass
+                case GlobalFunctionType::YEAR:
+                case GlobalFunctionType::CENTURY:
+                case GlobalFunctionType::DECADE:
+                case GlobalFunctionType::MONTH:
+                case GlobalFunctionType::DAY:
+                case GlobalFunctionType::WEEK:
+                case GlobalFunctionType::EARLIEST:
+                case GlobalFunctionType::LATEST: {
                     if (fc.args.size() != 1) return {false, 0};
                     auto val = resolve_date_spec(fc.args[0]);
                     if (!val) return {false, 0};
-                    auto y = parse_year_prefix(*val);
-                    if (!y) return {false, 0};
-                    return {true, *y};
-                }
-                case GlobalFunctionType::CENTURY: {
-                    if (fc.args.size() != 1) return {false, 0};
-                    auto val = resolve_date_spec(fc.args[0]);
-                    if (!val) return {false, 0};
-                    auto y = parse_year_prefix(*val);
-                    if (!y) return {false, 0};
-                    auto c = century_from_year(*y);
-                    if (!c) return {false, 0};
-                    return {true, *c};
-                }
-                case GlobalFunctionType::DECADE: {
-                    if (fc.args.size() != 1) return {false, 0};
-                    auto val = resolve_date_spec(fc.args[0]);
-                    if (!val) return {false, 0};
-                    auto y = parse_year_prefix(*val);
-                    if (!y) return {false, 0};
-                    return {true, decade_from_year(*y)};
-                }
-                case GlobalFunctionType::MONTH: {
-                    if (fc.args.size() != 1) return {false, 0};
-                    auto val = resolve_date_spec(fc.args[0]);
-                    if (!val) return {false, 0};
-                    auto p = parse_date_parts_prefix(*val);
-                    if (!p || !p->has_month) return {false, 0};
-                    return {true, static_cast<int64_t>(p->month)};
-                }
-                case GlobalFunctionType::DAY: {
-                    if (fc.args.size() != 1) return {false, 0};
-                    auto val = resolve_date_spec(fc.args[0]);
-                    if (!val) return {false, 0};
-                    auto p = parse_date_parts_prefix(*val);
-                    if (!p || !p->has_day) return {false, 0};
-                    return {true, static_cast<int64_t>(p->day)};
-                }
-                case GlobalFunctionType::WEEK: {
-                    if (fc.args.size() != 1) return {false, 0};
-                    auto val = resolve_date_spec(fc.args[0]);
-                    if (!val) return {false, 0};
-                    auto p = parse_date_parts_prefix(*val);
-                    if (!p || !p->has_day) return {false, 0};
-                    return {true, static_cast<int64_t>(iso_week_number(p->year, p->month, p->day))};
+                    auto v = date_part_value(parse_date_cached(*val), *global_date_part(fc.func));
+                    if (!v) return {false, 0};
+                    return {true, *v};
                 }
                 case GlobalFunctionType::NCHILDREN: {
                     if (fc.args.empty() || !corpus_.has_deps()) return {false, 0};

@@ -327,6 +327,9 @@ static std::optional<AggregateBucketData::Column::DateTransform> parse_date_tran
         {"month(", AggregateBucketData::Column::DateTransform::Month},
         {"week(", AggregateBucketData::Column::DateTransform::Week},
         {"day(", AggregateBucketData::Column::DateTransform::Day},
+        {"earliest(", AggregateBucketData::Column::DateTransform::Earliest},
+        {"latest(", AggregateBucketData::Column::DateTransform::Latest},
+        {"precision(", AggregateBucketData::Column::DateTransform::Precision},
         {"strlen(", AggregateBucketData::Column::DateTransform::Strlen},
     };
     if (field.size() < 7 || field.back() != ')')
@@ -353,49 +356,10 @@ static std::string apply_date_transform_bucket(
             if ((c & 0xC0) != 0x80) ++cp_count;
         return std::to_string(cp_count);
     }
-    auto parse_year_prefix = [](std::string_view text) -> std::optional<int64_t> {
-        size_t i = 0;
-        while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) ++i;
-        if (i >= text.size()) return std::nullopt;
-        bool neg = false;
-        if (text[i] == '+' || text[i] == '-') {
-            neg = text[i] == '-';
-            ++i;
-        }
-        if (i + 4 > text.size()) return std::nullopt;
-        for (size_t k = 0; k < 4; ++k) {
-            if (!std::isdigit(static_cast<unsigned char>(text[i + k])))
-                return std::nullopt;
-        }
-        if (i + 4 < text.size() && std::isdigit(static_cast<unsigned char>(text[i + 4])))
-            return std::nullopt;
-        int64_t y = 0;
-        for (size_t k = 0; k < 4; ++k)
-            y = y * 10 + static_cast<int64_t>(text[i + k] - '0');
-        return neg ? -y : y;
-    };
-
-    auto y = parse_year_prefix(raw);
-    if (!y) return "";
-    switch (transform) {
-        case AggregateBucketData::Column::DateTransform::Year:
-            return std::to_string(*y);
-        case AggregateBucketData::Column::DateTransform::Century:
-            return (*y > 0) ? std::to_string(((*y - 1) / 100) + 1) : "";
-        case AggregateBucketData::Column::DateTransform::Decade:
-            return (*y > 0) ? std::to_string((*y / 10) * 10) : "";
-        case AggregateBucketData::Column::DateTransform::Month:
-        case AggregateBucketData::Column::DateTransform::Week:
-        case AggregateBucketData::Column::DateTransform::Day:
-            return "";
-        case AggregateBucketData::Column::DateTransform::Strlen:
-            return std::to_string(std::count_if(
-                    raw.begin(), raw.end(),
-                    [](unsigned char c) { return (c & 0xC0) != 0x80; }));
-        case AggregateBucketData::Column::DateTransform::None:
-            return std::string(raw);
-    }
-    return "";
+    // a date part (core/dates); a value without one groups as ""
+    auto part = aggregate_date_part(transform);
+    if (!part) return "";
+    return date_part_label(raw, *part).value_or("");
 }
 
 bool build_aggregate_plan_impl(const Corpus& corpus, const std::vector<std::string>& fields,

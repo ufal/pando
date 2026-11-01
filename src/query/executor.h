@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/dates.h"
 #include "core/worker_pool.h"
 #include "core/types.h"
 #include "query/ast.h"
@@ -596,7 +597,7 @@ struct AggregateBucketData {
         /// read_tabulate_field (named region before positional when both exist).
         enum class Kind { Positional, Region, RegionFromBinding, FeatsComposite } kind =
                 Kind::Positional;
-        enum class DateTransform { None, Year, Century, Decade, Month, Week, Day, Strlen } date_transform =
+        enum class DateTransform { None, Year, Century, Decade, Month, Week, Day, Earliest, Latest, Precision, Strlen } date_transform =
                 DateTransform::None;
         const PositionalAttr* pa = nullptr;
         const StructuralAttr* sa = nullptr;
@@ -657,6 +658,23 @@ struct AggregateBucketData {
     /// Parallel to columns; only used when column.kind == Region.
     std::vector<RegionInternCol> region_intern;
 };
+
+/// The date part an aggregate column's date transform asks for (core/dates); nullopt for None / Strlen.
+inline std::optional<DatePart> aggregate_date_part(AggregateBucketData::Column::DateTransform t) {
+    using T = AggregateBucketData::Column::DateTransform;
+    switch (t) {
+        case T::Year: return DatePart::Year;
+        case T::Century: return DatePart::Century;
+        case T::Decade: return DatePart::Decade;
+        case T::Month: return DatePart::Month;
+        case T::Week: return DatePart::Week;
+        case T::Day: return DatePart::Day;
+        case T::Earliest: return DatePart::Earliest;
+        case T::Latest: return DatePart::Latest;
+        case T::Precision: return DatePart::Precision;
+        default: return std::nullopt;
+    }
+}
 
 /// Decode one bucket key to the same tab-separated string as make_key/read_field.
 std::string decode_aggregate_bucket_key(const AggregateBucketData& data,

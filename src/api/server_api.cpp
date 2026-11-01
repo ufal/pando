@@ -1,4 +1,5 @@
 #include "query/dialect/dialect.h"
+#include "query/date_notes.h"
 #include "api/server_api.h"
 
 #include "core/build_info.h"
@@ -827,8 +828,15 @@ ServerResponse ServerApi::query(const std::string& body) {
         }
         return r;
     };
+    // dates read by the query's date functions (query/date_notes): said in result.warnings
+    std::vector<std::string> date_notes;
+    try {
+        date_notes = date_value_notes(corpus_, date_uses(parse_in_dialect(query_text, opts.dialect,
+                                                                         ParserOptions{opts.strict_quoted_strings}, &corpus_)));
+    } catch (const std::exception&) {}   // a query that does not parse is reported where it runs
     auto ok = [&](const MatchSet& ms, double elapsed, std::string_view extra = {}) {
-        std::string js = to_query_result_json(corpus_, query_text, ms, opts, elapsed, extra);
+        std::string js = with_result_warnings(to_query_result_json(corpus_, query_text, ms, opts, elapsed, extra),
+                                              date_notes);
         if (lease) {
             lease.lock();
             lease.ps().store_query(corpus_, set_name, query_text, opts, ms);

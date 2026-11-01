@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.16)
 # toolchain targets the build host's own macOS version, which older Macs can't run).
 # Override with -DCMAKE_OSX_DEPLOYMENT_TARGET=…
 set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
-project(pando VERSION 0.3.4 LANGUAGES C CXX)
+project(pando VERSION 0.4.0 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -158,6 +158,7 @@ add_library(pando_core STATIC
     src/core/worker_pool.cpp
     src/core/count_hierarchy_json.cpp
     src/core/geo.cpp
+    src/core/dates.cpp
     src/index/lexicon.cpp
     src/index/fold_map.cpp
     src/index/fold_index.cpp
@@ -191,6 +192,7 @@ add_library(pando_core STATIC
     src/query/executor_sort.cpp
     src/query/sort_field.cpp
     src/query/executor_tabulate.cpp
+    src/query/date_notes.cpp
     src/query/geo_fields.cpp
     src/api/index_api.cpp
 )
@@ -297,6 +299,10 @@ if(BUILD_TESTING)
     add_executable(worker_pool_test src/core/worker_pool_test.cpp)
     target_link_libraries(worker_pool_test PRIVATE pando_core)
     add_test(NAME worker_pool COMMAND worker_pool_test)
+    # dates: EDTF levels 0 and 1, the old reading, the date functions (core/dates)
+    add_executable(dates_test src/core/dates_test.cpp)
+    target_link_libraries(dates_test PRIVATE pando_core)
+    add_test(NAME dates COMMAND dates_test)
     # keyness lists keep both sides (focus and reference keywords)
     add_executable(keyness_select_test src/query/keyness_select_test.cpp)
     target_include_directories(keyness_select_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -548,6 +554,10 @@ if(BUILD_TESTING)
         # stored shape and format_version; consumers test their readers on the stored answers
         add_test(NAME contract
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/contract/contract_test.py
+                --server $<TARGET_FILE:pando-server> --pando-index $<TARGET_FILE:pando-index>)
+        # dates (core/dates): every date function agrees on tabulate, count by, freq by and :: filters
+        add_test(NAME dates_functions
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/dates_functions_test.py
                 --server $<TARGET_FILE:pando-server> --pando-index $<TARGET_FILE:pando-index>)
         # P6.1: client sessions (stored hit sets, sort / count / pages without re-running)
         add_test(NAME server_sessions
