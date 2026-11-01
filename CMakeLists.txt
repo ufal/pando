@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.16)
 # toolchain targets the build host's own macOS version, which older Macs can't run).
 # Override with -DCMAKE_OSX_DEPLOYMENT_TARGET=…
 set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
-project(pando VERSION 0.3.3 LANGUAGES C CXX)
+project(pando VERSION 0.3.4 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -515,6 +515,9 @@ endif()
 # HTTP API server (optional: requires FetchContent to get cpp-httplib)
 add_executable(pando-server src/cli/server_main.cpp)
 target_include_directories(pando-server PRIVATE ${httplib_SOURCE_DIR})
+# httplib's listen backlog is 5: on a busy machine the connections beyond it were reset
+# ("broken pipe") instead of waiting for a worker
+target_compile_definitions(pando-server PRIVATE CPPHTTPLIB_LISTEN_BACKLOG=256)
 target_link_libraries(pando-server PRIVATE pando_api)
 
 if(BUILD_TESTING)
