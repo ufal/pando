@@ -1,0 +1,40 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/run",
+  "body": {
+   "cql": "set min-freq 1; A = [upos=\"NOUN\"] :: match.text_lang = \"en\"; keyness A by lemma",
+   "limit": 5
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "operation": "keyness",
+  "last_command": "keyness",
+  "result": {
+   "attribute": "lemma",
+   "focus_size": 3,
+   "ref_size": 21,
+   "corpus_size": 24,
+   "stoplist": 0,
+   "rows": [
+    {
+     "word": "cat",
+     "focus_freq": 2,
+     "ref_freq": 0,
+     "keyness": 8.32,
+     "effect": "+"
+    },
+    {
+     "word": "dog",
+     "focus_freq": 1,
+     "ref_freq": 0,
+     "keyness": 4.16,
+     "effect": "+"
+    }
+   ]
+  },
+  "format_version": 1
+ }
+}

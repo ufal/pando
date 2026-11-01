@@ -1,0 +1,133 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/run",
+  "body": {
+   "cql": "set min-freq 1; [upos=\"VERB\"]; coll by lemma",
+   "limit": 5
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "operation": "coll",
+  "last_command": "coll",
+  "result": {
+   "attribute": "lemma",
+   "window": [
+    5,
+    5
+   ],
+   "matches": 4,
+   "stoplist": 0,
+   "measures": [
+    "logdice"
+   ],
+   "collocates": [
+    {
+     "word": ".",
+     "obs": 7,
+     "freq": 4,
+     "logdice": 12.45
+    },
+    {
+     "word": "cat",
+     "obs": 4,
+     "freq": 2,
+     "logdice": 11.715
+    },
+    {
+     "word": "de",
+     "obs": 3,
+     "freq": 2,
+     "logdice": 11.3
+    },
+    {
+     "word": "kat",
+     "obs": 3,
+     "freq": 2,
+     "logdice": 11.3
+    },
+    {
+     "word": "a",
+     "obs": 2,
+     "freq": 1,
+     "logdice": 10.752
+    },
+    {
+     "word": "at",
+     "obs": 2,
+     "freq": 1,
+     "logdice": 10.752
+    },
+    {
+     "word": "dog",
+     "obs": 2,
+     "freq": 1,
+     "logdice": 10.752
+    },
+    {
+     "word": "een",
+     "obs": 2,
+     "freq": 1,
+     "logdice": 10.752
+    },
+    {
+     "word": "hond",
+     "obs": 2,
+     "freq": 1,
+     "logdice": 10.752
+    },
+    {
+     "word": "naar",
+     "obs": 2,
+     "freq": 1,
+     "logdice": 10.752
+    },
+    {
+     "word": "the",
+     "obs": 2,
+     "freq": 2,
+     "logdice": 10.715
+    },
+    {
+     "word": "bark",
+     "obs": 1,
+     "freq": 1,
+     "logdice": 9.752
+    },
+    {
+     "word": "black",
+     "obs": 1,
+     "freq": 1,
+     "logdice": 9.752
+    },
+    {
+     "word": "blaffen",
+     "obs": 1,
+     "freq": 1,
+     "logdice": 9.752
+    },
+    {
+     "word": "slapen",
+     "obs": 1,
+     "freq": 1,
+     "logdice": 9.752
+    },
+    {
+     "word": "sleep",
+     "obs": 1,
+     "freq": 1,
+     "logdice": 9.752
+    },
+    {
+     "word": "zwart",
+     "obs": 1,
+     "freq": 1,
+     "logdice": 9.752
+    }
+   ]
+  },
+  "format_version": 1
+ }
+}

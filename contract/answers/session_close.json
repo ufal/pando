@@ -1,0 +1,16 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/session/close",
+  "body": {
+   "session_id": "{session}"
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "session_id": "s3858a3d172d5b6044b8b2f570245c658",
+  "closed": true,
+  "format_version": 1
+ }
+}

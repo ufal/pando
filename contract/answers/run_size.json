@@ -1,0 +1,18 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/run",
+  "body": {
+   "cql": "[upos=\"NOUN\"]; size",
+   "limit": 5
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "operation": "size",
+  "last_command": "size",
+  "result": 6,
+  "format_version": 1
+ }
+}

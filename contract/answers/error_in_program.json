@@ -1,0 +1,16 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/run",
+  "body": {
+   "cql": "[upos=\"NOUN\"]; freq",
+   "limit": 5
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": false,
+  "error": "freq requires 'by' clause",
+  "format_version": 1
+ }
+}

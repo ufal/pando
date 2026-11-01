@@ -1,0 +1,15 @@
+{
+ "request": {
+  "method": "GET",
+  "path": "/session?session_id=no-such-session",
+  "body": null
+ },
+ "status": 404,
+ "answer": {
+  "ok": false,
+  "error": "unknown session (expired, closed or never created): no-such-session",
+  "unknown_session": true,
+  "session_id": "no-such-session",
+  "format_version": 1
+ }
+}

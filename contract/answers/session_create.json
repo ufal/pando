@@ -1,0 +1,15 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/session",
+  "body": {}
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "session_id": "s3858a3d172d5b6044b8b2f570245c658",
+  "created": true,
+  "ttl_s": 1800,
+  "format_version": 1
+ }
+}

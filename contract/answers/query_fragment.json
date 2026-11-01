@@ -1,0 +1,220 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/query",
+  "body": {
+   "query": "n:<np> [upos=\"DET\"]",
+   "limit": 2,
+   "fragment": true
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "backend": "pando",
+  "operation": "query",
+  "last_command": "query",
+  "result": {
+   "query": {
+    "language": "pando-cql",
+    "text": "n:<np> [upos=\"DET\"]"
+   },
+   "page": {
+    "start": 0,
+    "size": 2,
+    "returned": 2,
+    "total": 2,
+    "total_exact": false
+   },
+   "hits": [
+    {
+     "doc_id": "en",
+     "match_start": 0,
+     "match_end": 0,
+     "context": {
+      "left": "",
+      "match": "The",
+      "right": "black cat sleeps . A"
+     },
+     "named_regions": {
+      "n": {
+       "struct": "np",
+       "region_idx": 0,
+       "start": 0,
+       "end": 2,
+       "attrs": {
+        "type": "subj"
+       }
+      }
+     },
+     "tokens": [
+      {
+       "pos": 0,
+       "id": "w-1",
+       "group": 0,
+       "deprel": "det",
+       "form": "The",
+       "lemma": "the",
+       "upos": "DET"
+      }
+     ],
+     "groups": [
+      {
+       "index": 0,
+       "id": "t1",
+       "name": "t1",
+       "start": 0,
+       "end": 0
+      },
+      {
+       "id": "n",
+       "name": "n",
+       "region": "np",
+       "start": 0,
+       "end": 2,
+       "attrs": {
+        "type": "subj"
+       },
+       "tok_ids": [
+        "w-1",
+        "w-2",
+        "w-3"
+       ]
+      }
+     ],
+     "fragment": "<s id=\"s-1\"><tok id=\"w-1\" deprel=\"det\" lemma=\"the\" upos=\"DET\" head=\"w-3\">The</tok> <tok id=\"w-2\" deprel=\"amod\" lemma=\"black\" upos=\"ADJ\" head=\"w-3\">black</tok> <tok id=\"w-3\" deprel=\"nsubj\" lemma=\"cat\" upos=\"NOUN\" head=\"w-4\">cat</tok> <tok id=\"w-4\" deprel=\"root\" lemma=\"sleep\" upos=\"VERB\">sleeps</tok> <tok id=\"w-5\" deprel=\"punct\" lemma=\".\" upos=\"PUNCT\" head=\"w-4\">.</tok></s> <s id=\"s-2\"><tok id=\"w-6\" deprel=\"det\" lemma=\"a\" upos=\"DET\" head=\"w-7\">A</tok></s>",
+     "highlight_map": {
+      "default": {
+       "tok_ids": [
+        "w-1"
+       ]
+      },
+      "match": [
+       "w-1"
+      ],
+      "groups": [
+       {
+        "id": "n",
+        "tok_ids": [
+         "w-1",
+         "w-2",
+         "w-3"
+        ]
+       },
+       {
+        "id": "t1",
+        "tok_ids": [
+         "w-1"
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "doc_id": "en",
+     "match_start": 5,
+     "match_end": 5,
+     "context": {
+      "left": "The black cat sleeps .",
+      "match": "A",
+      "right": "dog barks at the cat"
+     },
+     "named_regions": {
+      "n": {
+       "struct": "np",
+       "region_idx": 1,
+       "start": 5,
+       "end": 6,
+       "attrs": {
+        "type": "subj"
+       }
+      }
+     },
+     "tokens": [
+      {
+       "pos": 5,
+       "id": "w-6",
+       "group": 0,
+       "deprel": "det",
+       "form": "A",
+       "lemma": "a",
+       "upos": "DET"
+      }
+     ],
+     "groups": [
+      {
+       "index": 0,
+       "id": "t1",
+       "name": "t1",
+       "start": 5,
+       "end": 5
+      },
+      {
+       "id": "n",
+       "name": "n",
+       "region": "np",
+       "start": 5,
+       "end": 6,
+       "attrs": {
+        "type": "subj"
+       },
+       "tok_ids": [
+        "w-6",
+        "w-7"
+       ]
+      }
+     ],
+     "fragment": "<s id=\"s-1\"><tok id=\"w-1\" deprel=\"det\" lemma=\"the\" upos=\"DET\" head=\"w-3\">The</tok> <tok id=\"w-2\" deprel=\"amod\" lemma=\"black\" upos=\"ADJ\" head=\"w-3\">black</tok> <tok id=\"w-3\" deprel=\"nsubj\" lemma=\"cat\" upos=\"NOUN\" head=\"w-4\">cat</tok> <tok id=\"w-4\" deprel=\"root\" lemma=\"sleep\" upos=\"VERB\">sleeps</tok> <tok id=\"w-5\" deprel=\"punct\" lemma=\".\" upos=\"PUNCT\" head=\"w-4\">.</tok></s> <s id=\"s-2\"><tok id=\"w-6\" deprel=\"det\" lemma=\"a\" upos=\"DET\" head=\"w-7\">A</tok> <tok id=\"w-7\" deprel=\"nsubj\" lemma=\"dog\" upos=\"NOUN\" head=\"w-8\">dog</tok> <tok id=\"w-8\" deprel=\"root\" lemma=\"bark\" upos=\"VERB\">barks</tok> <tok id=\"w-9\" deprel=\"case\" lemma=\"at\" upos=\"ADP\" head=\"w-11\">at</tok> <tok id=\"w-10\" deprel=\"det\" lemma=\"the\" upos=\"DET\" head=\"w-11\">the</tok> <tok id=\"w-11\" deprel=\"obl\" lemma=\"cat\" upos=\"NOUN\" head=\"w-8\">cat</tok></s>",
+     "highlight_map": {
+      "default": {
+       "tok_ids": [
+        "w-6"
+       ]
+      },
+      "match": [
+       "w-6"
+      ],
+      "groups": [
+       {
+        "id": "n",
+        "tok_ids": [
+         "w-6",
+         "w-7"
+        ]
+       },
+       {
+        "id": "t1",
+        "tok_ids": [
+         "w-6"
+        ]
+       }
+      ]
+     }
+    }
+   ],
+   "groups": [
+    {
+     "index": 0,
+     "id": "t1",
+     "name": "t1"
+    },
+    {
+     "id": "n",
+     "name": "n",
+     "region": "np"
+    }
+   ],
+   "legend": [
+    {
+     "id": "n",
+     "name": "n"
+    },
+    {
+     "id": "t1",
+     "name": "t1"
+    }
+   ]
+  },
+  "format_version": 1
+ }
+}

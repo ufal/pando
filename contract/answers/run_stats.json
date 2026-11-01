@@ -1,0 +1,47 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/run",
+  "body": {
+   "cql": "a:[]; stats avg(strlen(a.form)) by a.text_lang",
+   "limit": 5
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "operation": "stats",
+  "last_command": "stats",
+  "result": {
+   "by": [
+    "a.text_lang"
+   ],
+   "metrics": [
+    "avg(strlen(a.form))"
+   ],
+   "rows": [
+    {
+     "key": "en",
+     "n_total": 12,
+     "values": [
+      {
+       "n_valid": 12,
+       "value": 3
+      }
+     ]
+    },
+    {
+     "key": "nl",
+     "n_total": 12,
+     "values": [
+      {
+       "n_valid": 12,
+       "value": 3.33333
+      }
+     ]
+    }
+   ]
+  },
+  "format_version": 1
+ }
+}

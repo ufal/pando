@@ -428,8 +428,22 @@ std::optional<ServerResponse> ServerApi::check_denied(const std::string& text, b
 
 // ── dispatch ─────────────────────────────────────────────────────────────
 
-ServerResponse ServerApi::handle(std::string_view method_in, std::string_view path,
+// The answer with "format_version" as its last top-level member, when it is a JSON object.
+ServerResponse ServerApi::handle(std::string_view method, std::string_view path,
                                  const std::map<std::string, std::string>& params, const std::string& body) {
+    ServerResponse r = dispatch(method, path, params, body);
+    const size_t open = r.body.find_first_not_of(" \t\r\n");
+    const size_t close = r.body.find_last_not_of(" \t\r\n");
+    if (open != std::string::npos && r.body[open] == '{' && close > open && r.body[close] == '}') {
+        const bool empty = r.body.find_first_not_of(" \t\r\n", open + 1) == close;
+        r.body.insert(close, std::string(empty ? "" : ", ") + "\"format_version\": "
+                                 + std::to_string(kFormatVersion));
+    }
+    return r;
+}
+
+ServerResponse ServerApi::dispatch(std::string_view method_in, std::string_view path,
+                                   const std::map<std::string, std::string>& params, const std::string& body) {
     // method case-insensitive; "/query/" == "/query"
     std::string method_up(method_in);
     for (char& c : method_up) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));

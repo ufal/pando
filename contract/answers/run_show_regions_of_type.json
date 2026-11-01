@@ -1,0 +1,65 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/run",
+  "body": {
+   "cql": "show regions np",
+   "limit": 5
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "operation": "regions",
+  "result": {
+   "type": "np",
+   "total": 6,
+   "returned": 6,
+   "regions": [
+    {
+     "index": 0,
+     "start": 0,
+     "end": 2,
+     "tokens": 3,
+     "np_type": "subj"
+    },
+    {
+     "index": 1,
+     "start": 5,
+     "end": 6,
+     "tokens": 2,
+     "np_type": "subj"
+    },
+    {
+     "index": 2,
+     "start": 9,
+     "end": 10,
+     "tokens": 2,
+     "np_type": "obl"
+    },
+    {
+     "index": 3,
+     "start": 12,
+     "end": 14,
+     "tokens": 3,
+     "np_type": "subj"
+    },
+    {
+     "index": 4,
+     "start": 17,
+     "end": 18,
+     "tokens": 2,
+     "np_type": "subj"
+    },
+    {
+     "index": 5,
+     "start": 21,
+     "end": 22,
+     "tokens": 2,
+     "np_type": "obl"
+    }
+   ]
+  },
+  "format_version": 1
+ }
+}

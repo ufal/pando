@@ -1,0 +1,21 @@
+{
+ "request": {
+  "method": "GET",
+  "path": "/warm",
+  "body": null
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "warm": {
+   "state": "idle",
+   "level": "none",
+   "files": 0,
+   "files_done": 0,
+   "bytes": 0,
+   "bytes_done": 0,
+   "seconds": 0.0
+  },
+  "format_version": 1
+ }
+}

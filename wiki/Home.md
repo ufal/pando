@@ -44,6 +44,7 @@ Use `pando --help` for the current option list. Important query options include 
 - [Contributing](Contributing.md)
 - [TEITOK integration](TEITOK-Integration.md) — project layout, `tuid`, flexicorp pipeline
 - [Embedding the server](Embedding-the-Server.md) — the pando-server API in-process (C ABI for FQS, FFI hosts)
+- [Result format](Result-Format.md) — the JSON contract of every answer (`format_version`), tested in `contract/`
 
 ## Releases and scope
 

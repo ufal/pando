@@ -1,0 +1,108 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/run",
+  "body": {
+   "cql": "a:[upos=\"VERB\"] > b:[upos=\"NOUN\"]; count by a.lemma, b.lemma",
+   "limit": 5
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "operation": "count",
+  "last_command": "count",
+  "result": {
+   "total_matches": 6,
+   "groups": 6,
+   "top_groups": 4,
+   "groups_returned": 4,
+   "child_limit": 20,
+   "fields": [
+    "a.lemma",
+    "b.lemma"
+   ],
+   "hierarchy": [
+    {
+     "field": "a.lemma",
+     "value": "bark",
+     "count": 2,
+     "pct": 33.3333,
+     "groups": 2,
+     "children": [
+      {
+       "field": "b.lemma",
+       "value": "cat",
+       "count": 1,
+       "pct": 16.6667,
+       "pct_of_parent": 50
+      },
+      {
+       "field": "b.lemma",
+       "value": "dog",
+       "count": 1,
+       "pct": 16.6667,
+       "pct_of_parent": 50
+      }
+     ]
+    },
+    {
+     "field": "a.lemma",
+     "value": "blaffen",
+     "count": 2,
+     "pct": 33.3333,
+     "groups": 2,
+     "children": [
+      {
+       "field": "b.lemma",
+       "value": "hond",
+       "count": 1,
+       "pct": 16.6667,
+       "pct_of_parent": 50
+      },
+      {
+       "field": "b.lemma",
+       "value": "kat",
+       "count": 1,
+       "pct": 16.6667,
+       "pct_of_parent": 50
+      }
+     ]
+    },
+    {
+     "field": "a.lemma",
+     "value": "slapen",
+     "count": 1,
+     "pct": 16.6667,
+     "groups": 1,
+     "children": [
+      {
+       "field": "b.lemma",
+       "value": "kat",
+       "count": 1,
+       "pct": 16.6667,
+       "pct_of_parent": 100
+      }
+     ]
+    },
+    {
+     "field": "a.lemma",
+     "value": "sleep",
+     "count": 1,
+     "pct": 16.6667,
+     "groups": 1,
+     "children": [
+      {
+       "field": "b.lemma",
+       "value": "cat",
+       "count": 1,
+       "pct": 16.6667,
+       "pct_of_parent": 100
+      }
+     ]
+    }
+   ]
+  },
+  "format_version": 1
+ }
+}

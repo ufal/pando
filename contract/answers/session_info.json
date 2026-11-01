@@ -1,0 +1,49 @@
+{
+ "request": {
+  "method": "GET",
+  "path": "/session?session_id={session}",
+  "body": null
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "session_id": "s3858a3d172d5b6044b8b2f570245c658",
+  "ttl_s": 1800,
+  "age_s": 0.0,
+  "requests": 4,
+  "bytes": 0,
+  "sets": [
+   {
+    "name": "Last",
+    "query": "[upos=\"NOUN\"]",
+    "materialised": false,
+    "hits": 0,
+    "total": 6,
+    "total_exact": true,
+    "bytes": 0,
+    "sorts": [],
+    "aliases": [
+     "N"
+    ],
+    "parallel": false,
+    "idle_s": 0.0
+   },
+   {
+    "name": "N",
+    "query": "[upos=\"NOUN\"]",
+    "materialised": false,
+    "hits": 0,
+    "total": 6,
+    "total_exact": true,
+    "bytes": 0,
+    "sorts": [],
+    "aliases": [
+     "Last"
+    ],
+    "parallel": false,
+    "idle_s": 0.0
+   }
+  ],
+  "format_version": 1
+ }
+}

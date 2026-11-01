@@ -1,0 +1,75 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/run",
+  "body": {
+   "cql": "A = [upos=\"NOUN\"]; B = [upos=\"VERB\"]; freq A, B by text_lang",
+   "limit": 5
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "operation": "freq",
+  "last_command": "freq",
+  "result": {
+   "compare_queries": [
+    "A",
+    "B"
+   ],
+   "corpus_size": 24,
+   "freq_mode": "compare",
+   "per_subcorpus_ipm": true,
+   "fields": [
+    "text_lang"
+   ],
+   "totals_per_query": {
+    "A": 6,
+    "B": 4
+   },
+   "rows": [
+    {
+     "key": "en",
+     "subcorpus_size": 12,
+     "queries": {
+      "A": {
+       "count": 3,
+       "pct": 50,
+       "ipm": 250000.0,
+       "q_ipm": 500000.0,
+       "rf_pct": 25.0
+      },
+      "B": {
+       "count": 2,
+       "pct": 50.0,
+       "ipm": 166666.67,
+       "q_ipm": 500000.0,
+       "rf_pct": 16.6667
+      }
+     }
+    },
+    {
+     "key": "nl",
+     "subcorpus_size": 12,
+     "queries": {
+      "A": {
+       "count": 3,
+       "pct": 50.0,
+       "ipm": 250000.0,
+       "q_ipm": 500000.0,
+       "rf_pct": 25.0
+      },
+      "B": {
+       "count": 2,
+       "pct": 50.0,
+       "ipm": 166666.67,
+       "q_ipm": 500000.0,
+       "rf_pct": 16.6667
+      }
+     }
+    }
+   ]
+  },
+  "format_version": 1
+ }
+}

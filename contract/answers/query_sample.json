@@ -1,0 +1,136 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/query",
+  "body": {
+   "query": "[]",
+   "limit": 5,
+   "sample": 3,
+   "seed": 1
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "backend": "pando",
+  "operation": "query",
+  "last_command": "query",
+  "result": {
+   "query": {
+    "language": "pando-cql",
+    "text": "[]"
+   },
+   "page": {
+    "start": 0,
+    "size": 5,
+    "returned": 3,
+    "total": 3,
+    "total_exact": true
+   },
+   "hits": [
+    {
+     "doc_id": "en",
+     "match_start": 11,
+     "match_end": 11,
+     "context": {
+      "left": "dog barks at the cat",
+      "match": ".",
+      "right": "De zwarte kat slaapt ."
+     },
+     "tokens": [
+      {
+       "pos": 11,
+       "group": 0,
+       "deprel": "punct",
+       "form": ".",
+       "lemma": ".",
+       "upos": "PUNCT"
+      }
+     ],
+     "groups": [
+      {
+       "index": 0,
+       "id": "t1",
+       "name": "t1",
+       "start": 11,
+       "end": 11
+      }
+     ]
+    },
+    {
+     "doc_id": "nl",
+     "match_start": 17,
+     "match_end": 17,
+     "context": {
+      "left": "De zwarte kat slaapt .",
+      "match": "Een",
+      "right": "hond blaft naar de kat"
+     },
+     "tokens": [
+      {
+       "pos": 17,
+       "group": 0,
+       "deprel": "det",
+       "form": "Een",
+       "lemma": "een",
+       "upos": "DET"
+      }
+     ],
+     "groups": [
+      {
+       "index": 0,
+       "id": "t1",
+       "name": "t1",
+       "start": 17,
+       "end": 17
+      }
+     ]
+    },
+    {
+     "doc_id": "nl",
+     "match_start": 20,
+     "match_end": 20,
+     "context": {
+      "left": "slaapt . Een hond blaft",
+      "match": "naar",
+      "right": "de kat ."
+     },
+     "tokens": [
+      {
+       "pos": 20,
+       "group": 0,
+       "deprel": "case",
+       "form": "naar",
+       "lemma": "naar",
+       "upos": "ADP"
+      }
+     ],
+     "groups": [
+      {
+       "index": 0,
+       "id": "t1",
+       "name": "t1",
+       "start": 20,
+       "end": 20
+      }
+     ]
+    }
+   ],
+   "groups": [
+    {
+     "index": 0,
+     "id": "t1",
+     "name": "t1"
+    }
+   ],
+   "sample": {
+    "size": 3,
+    "population": 24,
+    "requested": 3,
+    "shuffled": false,
+    "seed": 1
+   }
+  },
+  "format_version": 1
+ }
+}

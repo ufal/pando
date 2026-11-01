@@ -1,0 +1,67 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/run",
+  "body": {
+   "cql": "[upos=\"NOUN\"]; raw",
+   "limit": 5
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "operation": "raw",
+  "last_command": "raw",
+  "result": [
+   {
+    "positions": [
+     2
+    ],
+    "tokens": [
+     "cat"
+    ]
+   },
+   {
+    "positions": [
+     6
+    ],
+    "tokens": [
+     "dog"
+    ]
+   },
+   {
+    "positions": [
+     10
+    ],
+    "tokens": [
+     "cat"
+    ]
+   },
+   {
+    "positions": [
+     14
+    ],
+    "tokens": [
+     "kat"
+    ]
+   },
+   {
+    "positions": [
+     18
+    ],
+    "tokens": [
+     "hond"
+    ]
+   },
+   {
+    "positions": [
+     22
+    ],
+    "tokens": [
+     "kat"
+    ]
+   }
+  ],
+  "format_version": 1
+ }
+}

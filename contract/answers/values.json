@@ -1,0 +1,33 @@
+{
+ "request": {
+  "method": "GET",
+  "path": "/values/lemma?limit=3",
+  "body": null
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "operation": "values",
+  "result": {
+   "attr": "lemma",
+   "type": "positional",
+   "unique": 17,
+   "returned": 3,
+   "values": [
+    {
+     "value": ".",
+     "count": 4
+    },
+    {
+     "value": "de",
+     "count": 2
+    },
+    {
+     "value": "kat",
+     "count": 2
+    }
+   ]
+  },
+  "format_version": 1
+ }
+}

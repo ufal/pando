@@ -1,0 +1,19 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/run",
+  "body": {
+   "cql": "A = [upos=\"NOUN\"]; drop A",
+   "limit": 5
+  }
+ },
+ "status": 200,
+ "answer": {
+  "reused": [
+   "A"
+  ],
+  "ok": true,
+  "operation": "drop",
+  "format_version": 1
+ }
+}

@@ -1,0 +1,99 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/query",
+  "body": {
+   "query": "[lemma=\"cat\"]",
+   "limit": 5,
+   "dialect": "cwb"
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "backend": "pando",
+  "operation": "query",
+  "last_command": "query",
+  "result": {
+   "query": {
+    "language": "cwb-cql",
+    "text": "[lemma=\"cat\"]"
+   },
+   "page": {
+    "start": 0,
+    "size": 5,
+    "returned": 2,
+    "total": 2,
+    "total_exact": true
+   },
+   "hits": [
+    {
+     "doc_id": "en",
+     "match_start": 2,
+     "match_end": 2,
+     "context": {
+      "left": "The black",
+      "match": "cat",
+      "right": "sleeps . A dog barks"
+     },
+     "tokens": [
+      {
+       "pos": 2,
+       "group": 0,
+       "deprel": "nsubj",
+       "form": "cat",
+       "lemma": "cat",
+       "upos": "NOUN"
+      }
+     ],
+     "groups": [
+      {
+       "index": 0,
+       "id": "t1",
+       "name": "t1",
+       "start": 2,
+       "end": 2
+      }
+     ]
+    },
+    {
+     "doc_id": "en",
+     "match_start": 10,
+     "match_end": 10,
+     "context": {
+      "left": "A dog barks at the",
+      "match": "cat",
+      "right": ". De zwarte kat slaapt"
+     },
+     "tokens": [
+      {
+       "pos": 10,
+       "group": 0,
+       "deprel": "obl",
+       "form": "cat",
+       "lemma": "cat",
+       "upos": "NOUN"
+      }
+     ],
+     "groups": [
+      {
+       "index": 0,
+       "id": "t1",
+       "name": "t1",
+       "start": 10,
+       "end": 10
+      }
+     ]
+    }
+   ],
+   "groups": [
+    {
+     "index": 0,
+     "id": "t1",
+     "name": "t1"
+    }
+   ]
+  },
+  "format_version": 1
+ }
+}

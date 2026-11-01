@@ -119,8 +119,13 @@ public:
     /// Dispatch one request. `method` "GET" / "POST"; `path` without the query
     /// string; `params` the decoded query parameters; `body` the request body
     /// (JSON for POST routes). Never throws: engine errors become 4xx / 5xx JSON.
+    /// Every JSON object answer carries "format_version": kFormatVersion.
     ServerResponse handle(std::string_view method, std::string_view path,
                           const std::map<std::string, std::string>& params, const std::string& body);
+
+    /// The version of the answers' JSON format (contract/ and wiki/Result-Format.md): within a
+    /// version, changes are additive only (new keys, new result kinds); anything else raises it.
+    static constexpr int kFormatVersion = 1;
 
     /// The routes and methods handle() knows, for transports that register routes.
     struct Route { const char* method; const char* path; };   // path "/values/*": one \w+ segment
@@ -139,6 +144,8 @@ public:
     const Corpus& corpus() const { return corpus_; }
 
 private:
+    ServerResponse dispatch(std::string_view method, std::string_view path,
+                            const std::map<std::string, std::string>& params, const std::string& body);
     ServerResponse health();
     ServerResponse version();
     ServerResponse info();

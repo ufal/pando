@@ -1,0 +1,385 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/query",
+  "body": {
+   "query": "a:[lemma=\"cat\"] with b:[] :: a.s_tuid = b.s_tuid",
+   "limit": 5
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "backend": "pando",
+  "operation": "query",
+  "last_command": "query",
+  "result": {
+   "parallel": true,
+   "query": {
+    "language": "pando-cql",
+    "text": "a:[lemma=\"cat\"] with b:[] :: a.s_tuid = b.s_tuid"
+   },
+   "page": {
+    "start": 0,
+    "size": 5,
+    "returned": 5,
+    "total": 5,
+    "returned_pairs": 5,
+    "total_pairs": 5,
+    "total_sources": 1,
+    "total_exact": false
+   },
+   "hits": [],
+   "pairs": [
+    {
+     "aligned": true,
+     "alignment": {
+      "kind": "with",
+      "pair_index": 0
+     },
+     "source": {
+      "doc_id": "en",
+      "match_start": 2,
+      "match_end": 2,
+      "context": {
+       "left": "The black",
+       "match": "cat",
+       "right": "sleeps . A dog barks"
+      },
+      "tokens": [
+       {
+        "pos": 2,
+        "group": 0,
+        "deprel": "nsubj",
+        "form": "cat",
+        "lemma": "cat",
+        "upos": "NOUN"
+       }
+      ],
+      "groups": [
+       {
+        "index": 0,
+        "id": "t1",
+        "name": "a",
+        "start": 2,
+        "end": 2
+       }
+      ]
+     },
+     "target": {
+      "doc_id": "en",
+      "match_start": 0,
+      "match_end": 0,
+      "context": {
+       "left": "",
+       "match": "The",
+       "right": "black cat sleeps . A"
+      },
+      "tokens": [
+       {
+        "pos": 0,
+        "group": 0,
+        "deprel": "det",
+        "form": "The",
+        "lemma": "the",
+        "upos": "DET"
+       }
+      ],
+      "groups": [
+       {
+        "index": 0,
+        "id": "t2",
+        "name": "b",
+        "start": 0,
+        "end": 0
+       }
+      ]
+     },
+     "source_text_id": "en",
+     "target_text_id": "en"
+    },
+    {
+     "aligned": true,
+     "alignment": {
+      "kind": "with",
+      "pair_index": 1
+     },
+     "source": {
+      "doc_id": "en",
+      "match_start": 2,
+      "match_end": 2,
+      "context": {
+       "left": "The black",
+       "match": "cat",
+       "right": "sleeps . A dog barks"
+      },
+      "tokens": [
+       {
+        "pos": 2,
+        "group": 0,
+        "deprel": "nsubj",
+        "form": "cat",
+        "lemma": "cat",
+        "upos": "NOUN"
+       }
+      ],
+      "groups": [
+       {
+        "index": 0,
+        "id": "t1",
+        "name": "a",
+        "start": 2,
+        "end": 2
+       }
+      ]
+     },
+     "target": {
+      "doc_id": "en",
+      "match_start": 1,
+      "match_end": 1,
+      "context": {
+       "left": "The",
+       "match": "black",
+       "right": "cat sleeps . A dog"
+      },
+      "tokens": [
+       {
+        "pos": 1,
+        "group": 0,
+        "deprel": "amod",
+        "form": "black",
+        "lemma": "black",
+        "upos": "ADJ"
+       }
+      ],
+      "groups": [
+       {
+        "index": 0,
+        "id": "t2",
+        "name": "b",
+        "start": 1,
+        "end": 1
+       }
+      ]
+     },
+     "source_text_id": "en",
+     "target_text_id": "en"
+    },
+    {
+     "aligned": true,
+     "alignment": {
+      "kind": "with",
+      "pair_index": 2
+     },
+     "source": {
+      "doc_id": "en",
+      "match_start": 2,
+      "match_end": 2,
+      "context": {
+       "left": "The black",
+       "match": "cat",
+       "right": "sleeps . A dog barks"
+      },
+      "tokens": [
+       {
+        "pos": 2,
+        "group": 0,
+        "deprel": "nsubj",
+        "form": "cat",
+        "lemma": "cat",
+        "upos": "NOUN"
+       }
+      ],
+      "groups": [
+       {
+        "index": 0,
+        "id": "t1",
+        "name": "a",
+        "start": 2,
+        "end": 2
+       }
+      ]
+     },
+     "target": {
+      "doc_id": "en",
+      "match_start": 3,
+      "match_end": 3,
+      "context": {
+       "left": "The black cat",
+       "match": "sleeps",
+       "right": ". A dog barks at"
+      },
+      "tokens": [
+       {
+        "pos": 3,
+        "group": 0,
+        "deprel": "root",
+        "form": "sleeps",
+        "lemma": "sleep",
+        "upos": "VERB"
+       }
+      ],
+      "groups": [
+       {
+        "index": 0,
+        "id": "t2",
+        "name": "b",
+        "start": 3,
+        "end": 3
+       }
+      ]
+     },
+     "source_text_id": "en",
+     "target_text_id": "en"
+    },
+    {
+     "aligned": true,
+     "alignment": {
+      "kind": "with",
+      "pair_index": 3
+     },
+     "source": {
+      "doc_id": "en",
+      "match_start": 2,
+      "match_end": 2,
+      "context": {
+       "left": "The black",
+       "match": "cat",
+       "right": "sleeps . A dog barks"
+      },
+      "tokens": [
+       {
+        "pos": 2,
+        "group": 0,
+        "deprel": "nsubj",
+        "form": "cat",
+        "lemma": "cat",
+        "upos": "NOUN"
+       }
+      ],
+      "groups": [
+       {
+        "index": 0,
+        "id": "t1",
+        "name": "a",
+        "start": 2,
+        "end": 2
+       }
+      ]
+     },
+     "target": {
+      "doc_id": "en",
+      "match_start": 4,
+      "match_end": 4,
+      "context": {
+       "left": "The black cat sleeps",
+       "match": ".",
+       "right": "A dog barks at the"
+      },
+      "tokens": [
+       {
+        "pos": 4,
+        "group": 0,
+        "deprel": "punct",
+        "form": ".",
+        "lemma": ".",
+        "upos": "PUNCT"
+       }
+      ],
+      "groups": [
+       {
+        "index": 0,
+        "id": "t2",
+        "name": "b",
+        "start": 4,
+        "end": 4
+       }
+      ]
+     },
+     "source_text_id": "en",
+     "target_text_id": "en"
+    },
+    {
+     "aligned": true,
+     "alignment": {
+      "kind": "with",
+      "pair_index": 4
+     },
+     "source": {
+      "doc_id": "en",
+      "match_start": 2,
+      "match_end": 2,
+      "context": {
+       "left": "The black",
+       "match": "cat",
+       "right": "sleeps . A dog barks"
+      },
+      "tokens": [
+       {
+        "pos": 2,
+        "group": 0,
+        "deprel": "nsubj",
+        "form": "cat",
+        "lemma": "cat",
+        "upos": "NOUN"
+       }
+      ],
+      "groups": [
+       {
+        "index": 0,
+        "id": "t1",
+        "name": "a",
+        "start": 2,
+        "end": 2
+       }
+      ]
+     },
+     "target": {
+      "doc_id": "nl",
+      "match_start": 12,
+      "match_end": 12,
+      "context": {
+       "left": "barks at the cat .",
+       "match": "De",
+       "right": "zwarte kat slaapt . Een"
+      },
+      "tokens": [
+       {
+        "pos": 12,
+        "group": 0,
+        "deprel": "det",
+        "form": "De",
+        "lemma": "de",
+        "upos": "DET"
+       }
+      ],
+      "groups": [
+       {
+        "index": 0,
+        "id": "t2",
+        "name": "b",
+        "start": 12,
+        "end": 12
+       }
+      ]
+     },
+     "source_text_id": "en",
+     "target_text_id": "nl"
+    }
+   ],
+   "legend": [
+    {
+     "id": "a",
+     "name": "a",
+     "side": "source"
+    },
+    {
+     "id": "b",
+     "name": "b",
+     "side": "target"
+    }
+   ]
+  },
+  "format_version": 1
+ }
+}

@@ -1,0 +1,28 @@
+{
+ "request": {
+  "method": "GET",
+  "path": "/sessions",
+  "body": null
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "sessions": [
+   {
+    "session_id": "s3858a3d172d5b6044b8b2f570245c658",
+    "sets": 2,
+    "bytes": 0,
+    "age_s": 0.0,
+    "idle_s": 0.0,
+    "ttl_s": 1800,
+    "requests": 4,
+    "in_use": false
+   }
+  ],
+  "open": 1,
+  "bytes": 0,
+  "memory_budget": 2147483648,
+  "materialising_bytes": 0,
+  "format_version": 1
+ }
+}

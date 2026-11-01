@@ -1,0 +1,37 @@
+{"type": "header", "version": 2, "positional": ["form", "lemma", "upos", "deprel"]}
+{"type": "token", "tok_id": "1", "head": 3, "form": "The", "lemma": "the", "upos": "DET", "deprel": "det"}
+{"type": "token", "tok_id": "2", "head": 3, "form": "black", "lemma": "black", "upos": "ADJ", "deprel": "amod"}
+{"type": "token", "tok_id": "3", "head": 4, "form": "cat", "lemma": "cat", "upos": "NOUN", "deprel": "nsubj"}
+{"type": "token", "tok_id": "4", "head": 0, "form": "sleeps", "lemma": "sleep", "upos": "VERB", "deprel": "root"}
+{"type": "token", "tok_id": "5", "head": 4, "form": ".", "lemma": ".", "upos": "PUNCT", "deprel": "punct"}
+{"type": "region", "struct": "s", "start_pos": 0, "end_pos": 4, "attrs": {"id": "en1", "tuid": "u1"}}
+{"type": "region", "struct": "np", "start_pos": 0, "end_pos": 2, "attrs": {"type": "subj"}}
+{"type": "token", "tok_id": "1", "head": 2, "form": "A", "lemma": "a", "upos": "DET", "deprel": "det"}
+{"type": "token", "tok_id": "2", "head": 3, "form": "dog", "lemma": "dog", "upos": "NOUN", "deprel": "nsubj"}
+{"type": "token", "tok_id": "3", "head": 0, "form": "barks", "lemma": "bark", "upos": "VERB", "deprel": "root"}
+{"type": "token", "tok_id": "4", "head": 6, "form": "at", "lemma": "at", "upos": "ADP", "deprel": "case"}
+{"type": "token", "tok_id": "5", "head": 6, "form": "the", "lemma": "the", "upos": "DET", "deprel": "det"}
+{"type": "token", "tok_id": "6", "head": 3, "form": "cat", "lemma": "cat", "upos": "NOUN", "deprel": "obl"}
+{"type": "token", "tok_id": "7", "head": 3, "form": ".", "lemma": ".", "upos": "PUNCT", "deprel": "punct"}
+{"type": "region", "struct": "s", "start_pos": 5, "end_pos": 11, "attrs": {"id": "en2", "tuid": "u2"}}
+{"type": "region", "struct": "np", "start_pos": 5, "end_pos": 6, "attrs": {"type": "subj"}}
+{"type": "region", "struct": "np", "start_pos": 9, "end_pos": 10, "attrs": {"type": "obl"}}
+{"type": "region", "struct": "text", "start_pos": 0, "end_pos": 11, "attrs": {"id": "en", "lang": "en", "year": "1990"}}
+{"type": "token", "tok_id": "1", "head": 3, "form": "De", "lemma": "de", "upos": "DET", "deprel": "det"}
+{"type": "token", "tok_id": "2", "head": 3, "form": "zwarte", "lemma": "zwart", "upos": "ADJ", "deprel": "amod"}
+{"type": "token", "tok_id": "3", "head": 4, "form": "kat", "lemma": "kat", "upos": "NOUN", "deprel": "nsubj"}
+{"type": "token", "tok_id": "4", "head": 0, "form": "slaapt", "lemma": "slapen", "upos": "VERB", "deprel": "root"}
+{"type": "token", "tok_id": "5", "head": 4, "form": ".", "lemma": ".", "upos": "PUNCT", "deprel": "punct"}
+{"type": "region", "struct": "s", "start_pos": 12, "end_pos": 16, "attrs": {"id": "nl1", "tuid": "u1"}}
+{"type": "region", "struct": "np", "start_pos": 12, "end_pos": 14, "attrs": {"type": "subj"}}
+{"type": "token", "tok_id": "1", "head": 2, "form": "Een", "lemma": "een", "upos": "DET", "deprel": "det"}
+{"type": "token", "tok_id": "2", "head": 3, "form": "hond", "lemma": "hond", "upos": "NOUN", "deprel": "nsubj"}
+{"type": "token", "tok_id": "3", "head": 0, "form": "blaft", "lemma": "blaffen", "upos": "VERB", "deprel": "root"}
+{"type": "token", "tok_id": "4", "head": 6, "form": "naar", "lemma": "naar", "upos": "ADP", "deprel": "case"}
+{"type": "token", "tok_id": "5", "head": 6, "form": "de", "lemma": "de", "upos": "DET", "deprel": "det"}
+{"type": "token", "tok_id": "6", "head": 3, "form": "kat", "lemma": "kat", "upos": "NOUN", "deprel": "obl"}
+{"type": "token", "tok_id": "7", "head": 3, "form": ".", "lemma": ".", "upos": "PUNCT", "deprel": "punct"}
+{"type": "region", "struct": "s", "start_pos": 17, "end_pos": 23, "attrs": {"id": "nl2", "tuid": "u2"}}
+{"type": "region", "struct": "np", "start_pos": 17, "end_pos": 18, "attrs": {"type": "subj"}}
+{"type": "region", "struct": "np", "start_pos": 21, "end_pos": 22, "attrs": {"type": "obl"}}
+{"type": "region", "struct": "text", "start_pos": 12, "end_pos": 23, "attrs": {"id": "nl", "lang": "nl", "year": "2000"}}

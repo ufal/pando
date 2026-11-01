@@ -1,0 +1,102 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/query",
+  "body": {
+   "from": "N",
+   "limit": 2,
+   "offset": 1,
+   "session_id": "{session}"
+  }
+ },
+ "status": 200,
+ "answer": {
+  "session_id": "s3858a3d172d5b6044b8b2f570245c658",
+  "hitset": "N",
+  "ok": true,
+  "backend": "pando",
+  "operation": "query",
+  "last_command": "query",
+  "result": {
+   "query": {
+    "language": "pando-cql",
+    "text": "[upos=\"NOUN\"]"
+   },
+   "page": {
+    "start": 1,
+    "size": 2,
+    "returned": 2,
+    "total": 3,
+    "total_exact": false
+   },
+   "hits": [
+    {
+     "doc_id": "en",
+     "match_start": 6,
+     "match_end": 6,
+     "context": {
+      "left": "black cat sleeps . A",
+      "match": "dog",
+      "right": "barks at the cat ."
+     },
+     "tokens": [
+      {
+       "pos": 6,
+       "group": 0,
+       "deprel": "nsubj",
+       "form": "dog",
+       "lemma": "dog",
+       "upos": "NOUN"
+      }
+     ],
+     "groups": [
+      {
+       "index": 0,
+       "id": "t1",
+       "name": "t1",
+       "start": 6,
+       "end": 6
+      }
+     ]
+    },
+    {
+     "doc_id": "en",
+     "match_start": 10,
+     "match_end": 10,
+     "context": {
+      "left": "A dog barks at the",
+      "match": "cat",
+      "right": ". De zwarte kat slaapt"
+     },
+     "tokens": [
+      {
+       "pos": 10,
+       "group": 0,
+       "deprel": "obl",
+       "form": "cat",
+       "lemma": "cat",
+       "upos": "NOUN"
+      }
+     ],
+     "groups": [
+      {
+       "index": 0,
+       "id": "t1",
+       "name": "t1",
+       "start": 10,
+       "end": 10
+      }
+     ]
+    }
+   ],
+   "groups": [
+    {
+     "index": 0,
+     "id": "t1",
+     "name": "t1"
+    }
+   ]
+  },
+  "format_version": 1
+ }
+}

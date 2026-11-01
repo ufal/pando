@@ -1,0 +1,147 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/run",
+  "body": {
+   "cql": "a:[upos=\"NOUN\"]; tabulate a.lemma, a.upos",
+   "limit": 5
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "operation": "tabulate",
+  "last_command": "tabulate",
+  "result": {
+   "fields": [
+    "a.lemma",
+    "a.upos"
+   ],
+   "total_matches": 6,
+   "offset": 0,
+   "limit": 1000,
+   "rows_returned": 6,
+   "rows": [
+    [
+     "cat",
+     "NOUN"
+    ],
+    [
+     "dog",
+     "NOUN"
+    ],
+    [
+     "cat",
+     "NOUN"
+    ],
+    [
+     "kat",
+     "NOUN"
+    ],
+    [
+     "hond",
+     "NOUN"
+    ],
+    [
+     "kat",
+     "NOUN"
+    ]
+   ],
+   "row_contexts": [
+    {
+     "doc_id": "en",
+     "tok_id": "w-3",
+     "tokens": [
+      "The",
+      "black",
+      "cat",
+      "sleeps",
+      "."
+     ],
+     "hit": [
+      2
+     ]
+    },
+    {
+     "doc_id": "en",
+     "tok_id": "w-7",
+     "tokens": [
+      "A",
+      "dog",
+      "barks",
+      "at",
+      "the",
+      "cat",
+      "."
+     ],
+     "hit": [
+      1
+     ]
+    },
+    {
+     "doc_id": "en",
+     "tok_id": "w-11",
+     "tokens": [
+      "A",
+      "dog",
+      "barks",
+      "at",
+      "the",
+      "cat",
+      "."
+     ],
+     "hit": [
+      5
+     ]
+    },
+    {
+     "doc_id": "nl",
+     "tok_id": "w-15",
+     "tokens": [
+      "De",
+      "zwarte",
+      "kat",
+      "slaapt",
+      "."
+     ],
+     "hit": [
+      2
+     ]
+    },
+    {
+     "doc_id": "nl",
+     "tok_id": "w-19",
+     "tokens": [
+      "Een",
+      "hond",
+      "blaft",
+      "naar",
+      "de",
+      "kat",
+      "."
+     ],
+     "hit": [
+      1
+     ]
+    },
+    {
+     "doc_id": "nl",
+     "tok_id": "w-23",
+     "tokens": [
+      "Een",
+      "hond",
+      "blaft",
+      "naar",
+      "de",
+      "kat",
+      "."
+     ],
+     "hit": [
+      5
+     ]
+    }
+   ]
+  },
+  "format_version": 1
+ }
+}

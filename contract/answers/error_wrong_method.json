@@ -1,0 +1,13 @@
+{
+ "request": {
+  "method": "GET",
+  "path": "/query",
+  "body": null
+ },
+ "status": 405,
+ "answer": {
+  "ok": false,
+  "error": "method GET not allowed for /query",
+  "format_version": 1
+ }
+}

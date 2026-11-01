@@ -1,0 +1,49 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/run",
+  "body": {
+   "cql": "count N by lemma",
+   "limit": 5,
+   "session_id": "{session}"
+  }
+ },
+ "status": 200,
+ "answer": {
+  "session_id": "s3858a3d172d5b6044b8b2f570245c658",
+  "ok": true,
+  "operation": "count",
+  "last_command": "count",
+  "result": {
+   "total_matches": 6,
+   "groups": 4,
+   "groups_returned": 4,
+   "fields": [
+    "lemma"
+   ],
+   "rows": [
+    {
+     "key": "cat",
+     "count": 2,
+     "pct": 33.3333
+    },
+    {
+     "key": "kat",
+     "count": 2,
+     "pct": 33.3333
+    },
+    {
+     "key": "dog",
+     "count": 1,
+     "pct": 16.6667
+    },
+    {
+     "key": "hond",
+     "count": 1,
+     "pct": 16.6667
+    }
+   ]
+  },
+  "format_version": 1
+ }
+}

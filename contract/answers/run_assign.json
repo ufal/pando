@@ -1,0 +1,185 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/run",
+  "body": {
+   "cql": "A = [upos=\"NOUN\"]",
+   "limit": 5
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "backend": "pando",
+  "operation": "query",
+  "last_command": "query",
+  "result": {
+   "query": {
+    "language": "pando-cql",
+    "text": "A = [upos=\"NOUN\"]"
+   },
+   "page": {
+    "start": 0,
+    "size": 5,
+    "returned": 5,
+    "total": 6,
+    "total_exact": true
+   },
+   "hits": [
+    {
+     "doc_id": "en",
+     "match_start": 2,
+     "match_end": 2,
+     "context": {
+      "left": "The black",
+      "match": "cat",
+      "right": "sleeps . A dog barks"
+     },
+     "tokens": [
+      {
+       "pos": 2,
+       "group": 0,
+       "deprel": "nsubj",
+       "form": "cat",
+       "lemma": "cat",
+       "upos": "NOUN"
+      }
+     ],
+     "groups": [
+      {
+       "index": 0,
+       "id": "t1",
+       "name": "t1",
+       "start": 2,
+       "end": 2
+      }
+     ]
+    },
+    {
+     "doc_id": "en",
+     "match_start": 6,
+     "match_end": 6,
+     "context": {
+      "left": "black cat sleeps . A",
+      "match": "dog",
+      "right": "barks at the cat ."
+     },
+     "tokens": [
+      {
+       "pos": 6,
+       "group": 0,
+       "deprel": "nsubj",
+       "form": "dog",
+       "lemma": "dog",
+       "upos": "NOUN"
+      }
+     ],
+     "groups": [
+      {
+       "index": 0,
+       "id": "t1",
+       "name": "t1",
+       "start": 6,
+       "end": 6
+      }
+     ]
+    },
+    {
+     "doc_id": "en",
+     "match_start": 10,
+     "match_end": 10,
+     "context": {
+      "left": "A dog barks at the",
+      "match": "cat",
+      "right": ". De zwarte kat slaapt"
+     },
+     "tokens": [
+      {
+       "pos": 10,
+       "group": 0,
+       "deprel": "obl",
+       "form": "cat",
+       "lemma": "cat",
+       "upos": "NOUN"
+      }
+     ],
+     "groups": [
+      {
+       "index": 0,
+       "id": "t1",
+       "name": "t1",
+       "start": 10,
+       "end": 10
+      }
+     ]
+    },
+    {
+     "doc_id": "nl",
+     "match_start": 14,
+     "match_end": 14,
+     "context": {
+      "left": "the cat . De zwarte",
+      "match": "kat",
+      "right": "slaapt . Een hond blaft"
+     },
+     "tokens": [
+      {
+       "pos": 14,
+       "group": 0,
+       "deprel": "nsubj",
+       "form": "kat",
+       "lemma": "kat",
+       "upos": "NOUN"
+      }
+     ],
+     "groups": [
+      {
+       "index": 0,
+       "id": "t1",
+       "name": "t1",
+       "start": 14,
+       "end": 14
+      }
+     ]
+    },
+    {
+     "doc_id": "nl",
+     "match_start": 18,
+     "match_end": 18,
+     "context": {
+      "left": "zwarte kat slaapt . Een",
+      "match": "hond",
+      "right": "blaft naar de kat ."
+     },
+     "tokens": [
+      {
+       "pos": 18,
+       "group": 0,
+       "deprel": "nsubj",
+       "form": "hond",
+       "lemma": "hond",
+       "upos": "NOUN"
+      }
+     ],
+     "groups": [
+      {
+       "index": 0,
+       "id": "t1",
+       "name": "t1",
+       "start": 18,
+       "end": 18
+      }
+     ]
+    }
+   ],
+   "groups": [
+    {
+     "index": 0,
+     "id": "t1",
+     "name": "t1"
+    }
+   ]
+  },
+  "format_version": 1
+ }
+}

@@ -1,0 +1,36 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/run",
+  "body": {
+   "cql": "A = [upos=\"NOUN\"]; show named",
+   "limit": 5
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "operation": "show_named",
+  "result": [
+   {
+    "name": "A",
+    "matches": 0,
+    "materialised": false,
+    "total_known": false
+   },
+   {
+    "name": "B",
+    "matches": 4,
+    "materialised": true,
+    "total_known": true
+   },
+   {
+    "name": "Last",
+    "matches": 0,
+    "materialised": false,
+    "total_known": false
+   }
+  ],
+  "format_version": 1
+ }
+}

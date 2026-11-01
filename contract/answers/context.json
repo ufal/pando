@@ -1,0 +1,19 @@
+{
+ "request": {
+  "method": "GET",
+  "path": "/context?pos=2&left=2&right=2",
+  "body": null
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "pos": 2,
+  "left": "The black",
+  "match": "cat",
+  "right": "sleeps .",
+  "doc_id": "en",
+  "id": "",
+  "corpus_size": 24,
+  "format_version": 1
+ }
+}

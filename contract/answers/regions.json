@@ -1,0 +1,41 @@
+{
+ "request": {
+  "method": "GET",
+  "path": "/regions/np?limit=3",
+  "body": null
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "operation": "regions",
+  "result": {
+   "type": "np",
+   "total": 6,
+   "returned": 3,
+   "regions": [
+    {
+     "index": 0,
+     "start": 0,
+     "end": 2,
+     "tokens": 3,
+     "np_type": "subj"
+    },
+    {
+     "index": 1,
+     "start": 5,
+     "end": 6,
+     "tokens": 2,
+     "np_type": "subj"
+    },
+    {
+     "index": 2,
+     "start": 9,
+     "end": 10,
+     "tokens": 2,
+     "np_type": "obl"
+    }
+   ]
+  },
+  "format_version": 1
+ }
+}

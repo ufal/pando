@@ -1,0 +1,53 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/run",
+  "body": {
+   "cql": "[upos=\"NOUN\"]; freq by lemma",
+   "limit": 5
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "operation": "freq",
+  "last_command": "freq",
+  "result": {
+   "corpus_size": 24,
+   "total_matches": 6,
+   "freq_mode": "single",
+   "source_query": "Last",
+   "per_subcorpus_ipm": false,
+   "fields": [
+    "lemma"
+   ],
+   "rows": [
+    {
+     "key": "cat",
+     "count": 2,
+     "pct": 33.3333,
+     "ipm": 83333.33
+    },
+    {
+     "key": "kat",
+     "count": 2,
+     "pct": 33.33,
+     "ipm": 83333.33
+    },
+    {
+     "key": "dog",
+     "count": 1,
+     "pct": 16.67,
+     "ipm": 41666.67
+    },
+    {
+     "key": "hond",
+     "count": 1,
+     "pct": 16.67,
+     "ipm": 41666.67
+    }
+   ]
+  },
+  "format_version": 1
+ }
+}

@@ -1,0 +1,13 @@
+{
+ "request": {
+  "method": "GET",
+  "path": "/status?job=no-such-job",
+  "body": null
+ },
+ "status": 404,
+ "answer": {
+  "ok": false,
+  "error": "unknown job (expired or never started): no-such-job",
+  "format_version": 1
+ }
+}

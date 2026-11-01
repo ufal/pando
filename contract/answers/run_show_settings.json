@@ -1,0 +1,32 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/run",
+  "body": {
+   "cql": "show settings",
+   "limit": 5
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "operation": "show_settings",
+  "result": {
+   "limit": 5,
+   "offset": 0,
+   "context": 5,
+   "left": 5,
+   "right": 5,
+   "max_total": 0,
+   "max_items": 50,
+   "min_freq": 5,
+   "stoplist": 0,
+   "group_limit": 1000,
+   "child_limit": 20,
+   "total": false,
+   "measures": "logdice",
+   "attrs": "(all)"
+  },
+  "format_version": 1
+ }
+}

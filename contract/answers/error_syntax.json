@@ -1,0 +1,16 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/query",
+  "body": {
+   "query": "[upos=\"NOUN\"",
+   "limit": 5
+  }
+ },
+ "status": 400,
+ "answer": {
+  "ok": false,
+  "error": "Expected ']' but got '' at position 12",
+  "format_version": 1
+ }
+}

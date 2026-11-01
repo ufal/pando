@@ -1,0 +1,286 @@
+{
+ "request": {
+  "method": "GET",
+  "path": "/info",
+  "body": null
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "operation": "info",
+  "result": {
+   "name": "index",
+   "path": "/private<index>/index",
+   "size": 24,
+   "tokens": 24,
+   "has_deps": true,
+   "attributes": [
+    {
+     "name": "deprel",
+     "vocab": 7
+    },
+    {
+     "name": "form",
+     "vocab": 19
+    },
+    {
+     "name": "lemma",
+     "vocab": 17
+    },
+    {
+     "name": "upos",
+     "vocab": 6
+    }
+   ],
+   "total_regions": 12,
+   "structures": [
+    {
+     "name": "np",
+     "regions": 6,
+     "has_values": false,
+     "attrs": [
+      "type"
+     ],
+     "region_attrs": [
+      {
+       "name": "type",
+       "vocab": 2
+      }
+     ]
+    },
+    {
+     "name": "s",
+     "regions": 4,
+     "has_values": false,
+     "attrs": [
+      "tuid",
+      "id"
+     ],
+     "region_attrs": [
+      {
+       "name": "tuid",
+       "vocab": 2
+      },
+      {
+       "name": "id",
+       "vocab": 4
+      }
+     ]
+    },
+    {
+     "name": "text",
+     "regions": 2,
+     "has_values": false,
+     "attrs": [
+      "year",
+      "lang",
+      "id"
+     ],
+     "region_attrs": [
+      {
+       "name": "year",
+       "vocab": 2
+      },
+      {
+       "name": "lang",
+       "vocab": 2
+      },
+      {
+       "name": "id",
+       "vocab": 2
+      }
+     ]
+    }
+   ],
+   "region_attrs": [
+    "s_tuid",
+    "s_id",
+    "text_year",
+    "text_lang",
+    "text_id",
+    "np_type"
+   ],
+   "multivalue": [],
+   "kv_pipe": [],
+   "pando": {
+    "version": "0.3.1",
+    "build": "v0.3.1-dirty",
+    "commit": "124d8f2be487da8dabab7fb11f46aa07f39272c1",
+    "branch": "main",
+    "regex": "re2"
+   },
+   "index": {
+    "indexed_with": "0.3.1 (v0.3.1-dirty, main)",
+    "upgraded_with": "0.3.1 (v0.3.1-dirty, main) 2026-11-01T09:27:29Z",
+    "index_id": "20261101T092729187Z-49653443",
+    "index_identity": "20261101T092729187Z-49653443",
+    "index_dir": "/private<index>/index",
+    "published_root": null,
+    "current_version": null,
+    "newer_on_disk": false,
+    "disk_bytes": 8831,
+    "bytes_per_token": 368.0,
+    "attrs": [
+     {
+      "attr": "deprel",
+      "dat": "plain",
+      "rev": "plain"
+     },
+     {
+      "attr": "form",
+      "dat": "plain",
+      "rev": "plain"
+     },
+     {
+      "attr": "lemma",
+      "dat": "plain",
+      "rev": "plain"
+     },
+     {
+      "attr": "upos",
+      "dat": "plain",
+      "rev": "plain"
+     }
+    ],
+    "head_attrs": [
+     "upos",
+     "deprel",
+     "lemma"
+    ],
+    "dep_files": [
+     "dep.head",
+     "dep.head_rel",
+     "dep.head_rel8",
+     "dep.euler_in",
+     "dep.euler_out"
+    ],
+    "bitmaps": [
+     {
+      "attr": "deprel",
+      "values": 7,
+      "status": "ok"
+     },
+     {
+      "attr": "form",
+      "values": 19,
+      "status": "ok"
+     },
+     {
+      "attr": "lemma",
+      "values": 17,
+      "status": "ok"
+     },
+     {
+      "attr": "upos",
+      "values": 6,
+      "status": "ok"
+     }
+    ],
+    "structure_bitmaps": [
+     {
+      "struct": "np",
+      "status": "ok"
+     },
+     {
+      "struct": "s",
+      "status": "ok"
+     },
+     {
+      "struct": "text",
+      "status": "ok"
+     }
+    ],
+    "dep_pairs": [
+     {
+      "head": "upos",
+      "child": "upos",
+      "status": "ok"
+     }
+    ],
+    "dep_head_rel": true,
+    "fold_indexes": {
+     "ok": 12,
+     "missing": 0
+    }
+   },
+   "server": {
+    "version": "0.3.1",
+    "build": "v0.3.1-dirty",
+    "commit": "124d8f2be487da8dabab7fb11f46aa07f39272c1",
+    "branch": "main",
+    "regex": "re2",
+    "build_string": "0.3.1 (v0.3.1-dirty, main)",
+    "features": [
+     "query",
+     "run",
+     "context",
+     "values",
+     "regions",
+     "async_total",
+     "result_cache",
+     "limit0_total",
+     "bitmaps",
+     "dep_pairs",
+     "fold_index",
+     "sentence_context",
+     "version",
+     "query_timeout",
+     "sessions",
+     "tiers",
+     "page_cache",
+     "warm"
+    ],
+    "started": "2026-11-01T09:27:29Z",
+    "uptime_s": 0,
+    "corpus": "<index>/index",
+    "index": {
+     "index_id": "20261101T092729187Z-49653443",
+     "index_identity": "20261101T092729187Z-49653443",
+     "index_dir": "/private<index>/index",
+     "published_root": null,
+     "current_version": null,
+     "newer_on_disk": false
+    },
+    "threads": 10,
+    "query_threads": 1,
+    "pool": {
+     "threads": 10,
+     "started": 0,
+     "busy": 0,
+     "steps": 0,
+     "helpers_wanted": 0,
+     "helpers_granted": 0,
+     "usable_cpus": 10
+    },
+    "total_workers": 2,
+    "sessions": {
+     "open": 0,
+     "bytes": 0,
+     "ttl_s": 1800,
+     "max_sessions": 256,
+     "memory_budget": 2147483648,
+     "max_hits": 5000000
+    },
+    "warm": {
+     "state": "idle",
+     "level": "none",
+     "files": 0,
+     "files_done": 0,
+     "bytes": 0,
+     "bytes_done": 0,
+     "seconds": 0.0
+    },
+    "overlays": [],
+    "cache": {
+     "entries": 20,
+     "bytes": 18985,
+     "max_bytes": 134217728,
+     "hits": 1,
+     "misses": 25,
+     "evicted": 0
+    }
+   }
+  },
+  "format_version": 1
+ }
+}

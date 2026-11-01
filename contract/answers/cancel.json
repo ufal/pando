@@ -1,0 +1,16 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/cancel",
+  "body": {
+   "job": "{job}"
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "job": "68fb4eec87551305",
+  "cancelled": false,
+  "format_version": 1
+ }
+}

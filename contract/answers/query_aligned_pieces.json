@@ -1,0 +1,127 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/query",
+  "body": {
+   "query": "[lemma=\"cat\"]",
+   "limit": 5,
+   "aligned": "s_tuid"
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "backend": "pando",
+  "operation": "query",
+  "last_command": "query",
+  "result": {
+   "query": {
+    "language": "pando-cql",
+    "text": "[lemma=\"cat\"]"
+   },
+   "page": {
+    "start": 0,
+    "size": 5,
+    "returned": 2,
+    "total": 2,
+    "total_exact": true
+   },
+   "hits": [
+    {
+     "doc_id": "en",
+     "match_start": 2,
+     "match_end": 2,
+     "context": {
+      "left": "The black",
+      "match": "cat",
+      "right": "sleeps . A dog barks"
+     },
+     "aligned": [
+      {
+       "start": 12,
+       "end": 16,
+       "doc_id": "nl",
+       "doc": {
+        "year": "2000",
+        "lang": "nl",
+        "id": "nl"
+       },
+       "text": "De zwarte kat slaapt .",
+       "marked": []
+      }
+     ],
+     "tokens": [
+      {
+       "pos": 2,
+       "group": 0,
+       "deprel": "nsubj",
+       "form": "cat",
+       "lemma": "cat",
+       "upos": "NOUN"
+      }
+     ],
+     "groups": [
+      {
+       "index": 0,
+       "id": "t1",
+       "name": "t1",
+       "start": 2,
+       "end": 2
+      }
+     ]
+    },
+    {
+     "doc_id": "en",
+     "match_start": 10,
+     "match_end": 10,
+     "context": {
+      "left": "A dog barks at the",
+      "match": "cat",
+      "right": ". De zwarte kat slaapt"
+     },
+     "aligned": [
+      {
+       "start": 17,
+       "end": 23,
+       "doc_id": "nl",
+       "doc": {
+        "year": "2000",
+        "lang": "nl",
+        "id": "nl"
+       },
+       "text": "Een hond blaft naar de kat .",
+       "marked": []
+      }
+     ],
+     "tokens": [
+      {
+       "pos": 10,
+       "group": 0,
+       "deprel": "obl",
+       "form": "cat",
+       "lemma": "cat",
+       "upos": "NOUN"
+      }
+     ],
+     "groups": [
+      {
+       "index": 0,
+       "id": "t1",
+       "name": "t1",
+       "start": 10,
+       "end": 10
+      }
+     ]
+    }
+   ],
+   "groups": [
+    {
+     "index": 0,
+     "id": "t1",
+     "name": "t1"
+    }
+   ]
+  },
+  "format_version": 1
+ }
+}

@@ -1,0 +1,13 @@
+{
+ "request": {
+  "method": "GET",
+  "path": "/nothing",
+  "body": null
+ },
+ "status": 404,
+ "answer": {
+  "ok": false,
+  "error": "unknown route: GET /nothing",
+  "format_version": 1
+ }
+}

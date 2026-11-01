@@ -1,0 +1,55 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/run",
+  "body": {
+   "cql": "show regions",
+   "limit": 5
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "operation": "show_regions",
+  "result": {
+   "structures": [
+    {
+     "name": "np",
+     "regions": 6,
+     "has_values": false,
+     "attrs": [
+      "type"
+     ]
+    },
+    {
+     "name": "s",
+     "regions": 4,
+     "has_values": false,
+     "attrs": [
+      "tuid",
+      "id"
+     ]
+    },
+    {
+     "name": "text",
+     "regions": 2,
+     "has_values": false,
+     "attrs": [
+      "year",
+      "lang",
+      "id"
+     ]
+    }
+   ],
+   "region_attrs": [
+    "s_tuid",
+    "s_id",
+    "text_year",
+    "text_lang",
+    "text_id",
+    "np_type"
+   ]
+  },
+  "format_version": 1
+ }
+}

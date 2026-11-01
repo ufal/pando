@@ -1,0 +1,60 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/run",
+  "body": {
+   "cql": "set min-freq 1; a:[upos=\"VERB\"]; dcoll children by lemma",
+   "limit": 5
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "operation": "dcoll",
+  "last_command": "dcoll",
+  "result": {
+   "attribute": "lemma",
+   "relations": [
+    "children"
+   ],
+   "matches": 4,
+   "stoplist": 0,
+   "measures": [
+    "logdice"
+   ],
+   "collocates": [
+    {
+     "word": ".",
+     "obs": 4,
+     "freq": 4,
+     "logdice": 13.193
+    },
+    {
+     "word": "cat",
+     "obs": 2,
+     "freq": 2,
+     "logdice": 12.415
+    },
+    {
+     "word": "kat",
+     "obs": 2,
+     "freq": 2,
+     "logdice": 12.415
+    },
+    {
+     "word": "dog",
+     "obs": 1,
+     "freq": 1,
+     "logdice": 11.541
+    },
+    {
+     "word": "hond",
+     "obs": 1,
+     "freq": 1,
+     "logdice": 11.541
+    }
+   ]
+  },
+  "format_version": 1
+ }
+}

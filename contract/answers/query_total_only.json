@@ -1,0 +1,39 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/query",
+  "body": {
+   "query": "[upos=\"NOUN\"]",
+   "limit": 0
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "backend": "pando",
+  "operation": "query",
+  "last_command": "query",
+  "result": {
+   "query": {
+    "language": "pando-cql",
+    "text": "[upos=\"NOUN\"]"
+   },
+   "page": {
+    "start": 0,
+    "size": 0,
+    "returned": 0,
+    "total": 6,
+    "total_exact": true
+   },
+   "hits": [],
+   "groups": [
+    {
+     "index": 0,
+     "id": "t1",
+     "name": "t1"
+    }
+   ]
+  },
+  "format_version": 1
+ }
+}
