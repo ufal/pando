@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,8 @@ version = "0.4.4"
 description = "Python client for pando CQL: run queries, hit tables and counts for pandas; geolinguistic map layers (pando_geo)"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "See repository" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Pando contributors" }]
 keywords = ["pando", "cql", "corpus"]
 classifiers = [

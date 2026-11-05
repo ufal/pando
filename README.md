@@ -72,5 +72,7 @@ This should print total match count and timing information to stdout/stderr.
 
 ## License
 
-This repository is currently private and experimental. Choose and add a proper license (e.g. MIT, Apache 2.0) before making the project public or sharing it more broadly.
+MIT — see [`LICENSE`](LICENSE).
+
+If you use pando in research, please cite it: [`CITATION.cff`](CITATION.cff) has the reference (GitHub shows it as "Cite this repository").
 

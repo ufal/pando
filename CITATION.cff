@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "If you use pando in your research, please cite it as below."
+type: software
+title: "pando"
+abstract: "Corpus query engine in the family of Manatee and CWB/CQP, with search over dependency trees and extensive support for aligned corpora."
+authors:
+  - family-names: Janssen
+    given-names: Maarten
+    affiliation: "Institute of Formal and Applied Linguistics, Charles University"
+license: MIT
+repository-code: "https://github.com/ufal/pando"
