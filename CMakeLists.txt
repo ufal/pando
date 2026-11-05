@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.16)
 # toolchain targets the build host's own macOS version, which older Macs can't run).
 # Override with -DCMAKE_OSX_DEPLOYMENT_TARGET=…
 set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
-project(pando VERSION 0.4.2 LANGUAGES C CXX)
+project(pando VERSION 0.4.3 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -389,6 +389,10 @@ if(BUILD_TESTING)
     add_test(NAME conllu_jsonl_parity
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/conllu_jsonl_parity_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
+    add_test(NAME pmltq_sibling_chain
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/pmltq_sibling_chain_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
+                --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu)
     add_test(NAME conllu_meta_values
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/conllu_meta_values_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)

@@ -94,11 +94,27 @@ If neither path succeeds, translation fails (the error text mentions whether the
 - Different nodes are different tokens (PML-TQ; `+` before a nested node lets it overlap).
 - **`a-root`**: pando has no root node, so it is a condition — `a-root [ child a-node X ]` is X with `deprel = "root"` (the sentence's root word), `a-root [ descendant a-node X ]` is any X, `parent a-root []` is `deprel = "root"` (with `0x`: not the root word), `ancestor a-root []` always holds. `a-root` alone, with conditions, or with more than one related node is refused.
 
-**What it does not read:** the nodes of the match must form a **chain** — each related to at most two others (a verb with a subject and an object is a chain; with a subject, an object and an adverbial it is not: give the extra nodes occurrences, `1+x child a-node [ … ]`). Optional nodes (`?child`), relations other than the five above (`order-precedes`, `depth-first-…`, `same-tree-as`, PML references), lengths (`descendant{1,3}`), functions in tests (`sons()`, `lower()`), several top-level selectors, and `member`. Of the **`>>`** output filters only `>> distinct $a.attr, …` and `count(over $a.attr)`; a query is followed up with pando's own steps instead: `a-node $v := [ … ]; freq by v.lemma` (see above).
+**Shapes of the match.** pando matches the nodes as a chain of tokens. Nodes with the same head — the
+direct dependents of one node, and siblings — follow each other with the relation `~` (same head):
+
+```text
+a-node [ upos = "VERB", child a-node [ deprel = "nsubj" ], child a-node [ deprel = "obj" ],
+         child a-node [ deprel = "iobj" ] ]
+→ n1:[upos="VERB"] > n2:[deprel="nsubj"] ~ n3:[deprel="obj"] ~ n4:[deprel="iobj"]
+```
+
+So a node may have any number of direct dependents in the match, and a parent or ancestor above
+it, as long as **at most one** of those dependents has matched nodes of its own (it ends the run:
+`… ~ n4 > x`). One result per combination of nodes, all different words, as in PML-TQ. A tree that
+branches further — two dependents each with their own dependents, and a parent above — is refused
+with a message saying so; give the extra nodes occurrences to make them conditions
+(`1+x child a-node [ … ]`). `descendant` / `ancestor` nodes are related by their path, not by `~`.
+
+**What it does not read:** trees that branch further than above, optional nodes (`?child`), relations other than the five above (`order-precedes`, `depth-first-…`, `same-tree-as`, PML references), lengths (`descendant{1,3}`), functions in tests (`sons()`, `lower()`), several top-level selectors, and `member`. Of the **`>>`** output filters only `>> distinct $a.attr, …` and `count(over $a.attr)`; a query is followed up with pando's own steps instead: `a-node $v := [ … ]; freq by v.lemma` (see above).
 
 **`--pmltq-export-sql`:** Emits **ClickPMLTQ-style SQL** only (no corpus load). Requires **`--cql pmltq`**, a query on the command line, and the **JavaScript** helpers described in **`pando --help`** (typically a **`pmltq2sql-optimized.js`** next to the PEG bundle, plus **`PMLTQ_GOLD_JS_DIR`**).
 
-**Gaps / difficulty:** What the dialect does not lower (especially **`>>` output filters**, nodes that do not form a chain, multi-selector queries) is inventoried with effort estimates in **[`dev/PMLTQ-ROADMAP.md`](../dev/PMLTQ-ROADMAP.md)**.
+**Gaps / difficulty:** What the dialect does not lower (especially **`>>` output filters**, trees that branch further than one run of same-head nodes, multi-selector queries) is inventoried with effort estimates in **[`dev/PMLTQ-ROADMAP.md`](../dev/PMLTQ-ROADMAP.md)**.
 
 ---
 

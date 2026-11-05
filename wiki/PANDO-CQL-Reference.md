@@ -90,6 +90,12 @@ spans: `"the"` is just `[form="the"]` as in CWB (*the the* gives two hits). An e
 | `A << B` | A is a descendant of B |
 | `A >> B` | A is an ancestor of B |
 | `A !< B` | B without such a dependent A (A is not part of the hit) |
+| `A ~ B` | A and B have the same head (two different words; a root has none) |
+
+`~` lets one head have several dependents in the hit: `v:[upos="VERB"] > s:[deprel="nsubj"] ~
+o:[deprel="obj"] ~ i:[deprel="iobj"]` is a verb with a subject, an object and an indirect object, one hit
+per combination of them; the last dependent can continue the chain (`… ~ i > x:[…]`). It takes no
+layer (`~:deps` is an error): it is the basic tree's same head.
 
 Sequence and dependency relations can be mixed in one chain; each operator relates the two tokens next
 to it. Inside a token, relations are written as restrictions (PML-TQ style): `child [...]`,

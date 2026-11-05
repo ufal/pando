@@ -1439,6 +1439,7 @@ bool Parser::try_parse_relation(QueryRelation& rel, bool in_filter) {
         case TokType::LTLT:    rel.type = RelationType::TRANS_GOV_BY;  break;
         case TokType::BANG_GT: rel.type = RelationType::NOT_GOVERNS;   break;
         case TokType::BANG_LT: rel.type = RelationType::NOT_GOV_BY;    break;
+        case TokType::TILDE:   rel.type = RelationType::SIBLING;       break;   // the same head
         case TokType::EQ:      rel.type = RelationType::EQUIV;         break;   // =:X, layer required (below)
         case TokType::NEQ:     rel.type = RelationType::NOT_EQUIV;     break;
 
@@ -1463,6 +1464,8 @@ bool Parser::try_parse_relation(QueryRelation& rel, bool in_filter) {
 
     // Consume the explicit relation operator
     lexer_.consume();
+    if (rel.type == RelationType::SIBLING && lexer_.peek().type == TokType::COLON)
+        throw std::runtime_error("~ (same head) is a relation of the basic tree: it takes no layer or label");
     // `>:layer` / `>:layer:label`: a relation layer (only directly after an operator, so no clash with token
     // names `a:[...]` or `::`); a label with a colon is quoted (`>:deps:"nsubj:pass"`)
     if (lexer_.peek().type == TokType::COLON) {

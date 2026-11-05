@@ -120,6 +120,14 @@ int main() {
         assert(c1[0].command.query_name.empty() && c1[0].command.cat_from == 5 && c1[0].command.cat_to == SIZE_MAX);
         assert(message("cat A 4 2").find("ends before it starts") != std::string::npos);
     }
+    // `~`: the same head, in the chain; no layer
+    {
+        auto t = Parser(R"(v:[upos="VERB"] > a:[deprel="nsubj"] ~ b:[deprel="obj"])", {}).parse();
+        assert(t[0].query.relations.size() == 2 && t[0].query.relations[1].type == pando::RelationType::SIBLING);
+        bool threw = false;
+        try { Parser(R"([] ~:deps [])", {}).parse(); } catch (const std::exception&) { threw = true; }
+        assert(threw);
+    }
     std::cerr << "PASS parser_quoted_test\n";
     return 0;
 }

@@ -180,14 +180,53 @@ static void test_lower_tree() {
         R"(a-node [ upos = "VERB", 0x child a-node [ deprel = "nsubj" ] ])"), err);
     assert(err.empty() && p.at(0).query.tokens.size() == 1);
 
+    // a sibling: `~` (same head), no token for the parent
     p = lower_native_pmltq_query(parse_pmltq_query(
         R"(a-node [ deprel = "nsubj", sibling a-node [ deprel = "obj" ] ])"), err);
-    assert(err.empty() && p.at(0).query.tokens.size() == 3); // through the shared parent
-    assert(p.at(0).query.position_orders.size() == 1);
+    assert(err.empty() && p.at(0).query.tokens.size() == 2);
+    assert(p.at(0).query.relations[0].type == RelationType::SIBLING);
+    assert(p.at(0).query.position_orders.empty()); // neighbours are different tokens anyway
 
+    // three dependents: v > n1 ~ n2 ~ n3, the names on the right tokens, n1 != n3 (and v != n2, n3)
     p = lower_native_pmltq_query(parse_pmltq_query(
-        R"(a-node [ child [], child [], child [] ])"), err);
-    assert(err.find("chain") != std::string::npos);
+        R"(a-node $v := [ upos = "VERB", child a-node $s := [ deprel = "nsubj" ], child a-node $o := [ deprel = "obj" ], )"
+        R"(child a-node $i := [ deprel = "iobj" ] ])"), err);
+    assert(err.empty());
+    {
+        const TokenQuery& t3 = p.at(0).query;
+        assert(t3.tokens.size() == 4 && t3.tokens[0].name == "v" && t3.tokens[1].name == "s"
+               && t3.tokens[2].name == "o" && t3.tokens[3].name == "i");
+        assert(t3.relations[0].type == RelationType::GOVERNS && t3.relations[1].type == RelationType::SIBLING
+               && t3.relations[2].type == RelationType::SIBLING);
+        assert(t3.position_orders.size() == 3);
+    }
+    // the dependent with a subtree of its own ends the run: … ~ $o > amod
+    p = lower_native_pmltq_query(parse_pmltq_query(
+        R"(a-node [ upos = "VERB", child a-node [ deprel = "nsubj" ], child a-node $o := [ deprel = "obj", )"
+        R"(child a-node [ deprel = "amod" ] ], child a-node [ deprel = "iobj" ] ])"), err);
+    assert(err.empty());
+    {
+        const TokenQuery& t4 = p.at(0).query;
+        assert(t4.tokens.size() == 5 && t4.relations.back().type == RelationType::GOVERNS);
+        assert(t4.tokens[3].name == "o");
+    }
+    // a parent above: a > v > d1 ~ d2
+    p = lower_native_pmltq_query(parse_pmltq_query(
+        R"(a-node [ upos = "VERB", parent a-node [], child a-node [ deprel = "nsubj" ], child a-node [ deprel = "obj" ] ])"),
+        err);
+    assert(err.empty() && p.at(0).query.tokens.size() == 4);
+    // leaves only: fine
+    p = lower_native_pmltq_query(parse_pmltq_query(R"(a-node [ child [], child [], child [] ])"), err);
+    assert(err.empty() && p.at(0).query.tokens.size() == 4);
+    // two dependents with dependents of their own, and a parent: no chain
+    p = lower_native_pmltq_query(parse_pmltq_query(
+        R"(a-node [ parent a-node [], child a-node [ child [] ], child a-node [ child [] ] ])"), err);
+    assert(err.find("do not form a chain") != std::string::npos);
+    err.clear();
+    // a node with two parents in the match matches nothing: said so
+    p = lower_native_pmltq_query(parse_pmltq_query(
+        R"(a-node $x := [ parent a-node [ upos = "VERB" ], sibling a-node [ parent a-node [ upos = "NOUN" ] ] ])"), err);
+    assert(!err.empty());
     err.clear();
     p = lower_native_pmltq_query(parse_pmltq_query(R"(a-node [ ?child [] ])"), err);
     assert(err.find("optional") != std::string::npos);

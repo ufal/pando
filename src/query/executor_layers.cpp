@@ -64,6 +64,8 @@ std::vector<CorpusPos> QueryExecutor::find_class_mates(CorpusPos pos, const Rela
 
 std::vector<CorpusPos> QueryExecutor::find_layer_related(CorpusPos pos, const QueryRelation& qr, RelationType rel,
                                                          bool reversed) const {
+    if (rel == RelationType::SIBLING)
+        throw std::runtime_error("~ (same head) is a relation of the basic tree: it takes no layer (~:" + qr.layer + ")");
     const RelationDecl* decl = corpus_.relation(qr.layer);
     const bool equiv_op = rel == RelationType::EQUIV || rel == RelationType::NOT_EQUIV;
     if (decl && decl->kind == RelationDecl::Kind::Equivalence) {

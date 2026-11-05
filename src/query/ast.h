@@ -20,6 +20,7 @@ enum class RelationType {
     TRANS_GOV_BY,    // [] << []
     NOT_GOVERNS,     // [] !> []
     NOT_GOV_BY,      // [] !< []
+    SIBLING,         // [] ~ []  — the same (direct) head, two different tokens; symmetric
     EQUIV,           // [] =:X []  — in the same class of the equivalence layer X (relation_decl.h)
     NOT_EQUIV,       // [] !=:X [] — the first token without such a class-mate
 };

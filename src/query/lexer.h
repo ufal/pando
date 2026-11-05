@@ -22,6 +22,7 @@ enum class TokType {
     GTGT,        // >>
     BANG_LT,     // !<
     BANG_GT,     // !>
+    TILDE,       // ~ (same head)
     BANG,        // ! (negation inside [ ])
     AMP,         // &
     PIPE,        // |
@@ -62,6 +63,7 @@ inline const char* toktype_name(TokType t) {
         case TokType::GTGT:      return "'>>'";
         case TokType::BANG_LT:   return "'!<'";
         case TokType::BANG_GT:   return "'!>'";
+        case TokType::TILDE:     return "'~'";
         case TokType::BANG:      return "'!'";
         case TokType::AMP:       return "'&'";
         case TokType::PIPE:      return "'|'";

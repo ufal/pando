@@ -137,6 +137,7 @@ Token Lexer::next() {
         case '?': ++pos_; return {TokType::QUESTION, "?", start};
         case '%': ++pos_; return {TokType::PERCENT,  "%", start};
         case '!': ++pos_; return {TokType::BANG,     "!", start};
+        case '~': ++pos_; return {TokType::TILDE,    "~", start};
         default: break;
     }
 

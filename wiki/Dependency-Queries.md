@@ -11,6 +11,8 @@ Operators between tokens include:
 
 - **`>`** / **`<`**: head / dependent (direct)
 - **`>>` / `<<`**: transitive descendants / ancestors (tree traversal)
+- **`~`**: the same head (siblings): `v:[upos="VERB"] > [deprel="nsubj"] ~ [deprel="obj"] ~ [deprel="iobj"]`,
+  several dependents of one head in one hit
 - Negated forms (e.g. `!<`) where supported
 
 See [PANDO-CQL.md](PANDO-CQL.md#dependency-relations) for an introduction and the [reference](PANDO-CQL-Reference.md#dependency-relations) for the full operator set.

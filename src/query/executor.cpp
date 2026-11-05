@@ -2956,6 +2956,7 @@ std::vector<CorpusPos> QueryExecutor::find_related(
             case RelationType::TRANS_GOV_BY:   eff = RelationType::TRANS_GOVERNS; break;
             case RelationType::NOT_GOVERNS:    eff = RelationType::NOT_GOV_BY; break;
             case RelationType::NOT_GOV_BY:     eff = RelationType::NOT_GOVERNS; break;
+            case RelationType::SIBLING:        break;   // symmetric
             case RelationType::EQUIV:
             case RelationType::NOT_EQUIV:      break;   // symmetric
         }
@@ -2983,6 +2984,15 @@ std::vector<CorpusPos> QueryExecutor::find_related(
         case RelationType::TRANS_GOVERNS:
             out = deps.subtree(pos);
             break;
+
+        case RelationType::SIBLING: {
+            // the other dependents of pos's head; a root (no head) has none
+            const CorpusPos h = deps.head(pos);
+            if (h == NO_HEAD) break;
+            out = deps.children(h);
+            out.erase(std::remove(out.begin(), out.end(), pos), out.end());
+            break;
+        }
 
         case RelationType::TRANS_GOV_BY:
             out = deps.ancestors(pos);
