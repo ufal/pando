@@ -7195,6 +7195,103 @@ MatchSet QueryExecutor::execute_impl(const TokenQuery& query,
         }
     }
 
+    // ── Same-head fast path: [A] ~ [B], both posting lists joined on their head ──
+    //
+    // The general path takes one children(head) list per seed: about 0.7 µs per seed,
+    // over a second for two frequent deprels. Siblings share a sentence, so both lists
+    // are walked sentence by sentence: B's tokens of the sentence sorted by head, each
+    // A token paired with those of its own head (not itself). O(|A| + |B|) head reads.
+    // Only plain queries (no region filters, `within` other than s, position orders,
+    // anchors): every hit goes through add_match until the page is full, then a total
+    // is counted directly, which is exact only without filters.
+    if (n == 2 && q.relations.size() == 1 && q.relations[0].type == RelationType::SIBLING
+        && q.relations[0].layer.empty() && corpus_.has_deps() && corpus_.has_structure("s")
+        && fastpath_mode() == FastPathMode::On) {
+        bool plain = token_anchor_constraints.empty();
+        for (const auto& tok : q.tokens)
+            plain = plain && !tok.has_repetition() && !tok.is_anchor() && !tok.is_dep_subtree
+                    && tok.where_refs.empty();
+        const std::string& eff_within = q.within.empty() ? corpus_.default_within() : q.within;
+        plain = plain && (eff_within.empty() || eff_within == "s") && !q.not_within && !q.manatee_within
+                && !q.within_having && q.more_withins.empty() && q.union_alternatives.empty()
+                && q.aligned_parts.empty() && q.containing_clauses.empty() && q.global_region_filters.empty()
+                && q.global_alignment_filters.empty() && q.global_function_filters.empty()
+                && q.position_orders.empty();
+        SeqMergeOperand A, B;
+        if (plain) {
+            A = merge_operand(q.tokens[0].conditions);
+            B = merge_operand(q.tokens[1].conditions);
+        }
+        if (plain && A.kind == SeqMergeTok::EqRev && B.kind == SeqMergeTok::EqRev) {
+            result.plan_path = "dep_sibling";
+            result.seed_token = 0;
+            result.cardinalities = {estimate_cardinality(q.tokens[0].conditions),
+                                    estimate_cardinality(q.tokens[1].conditions)};
+            RevSpan sa = A.span, sb = B.span;
+            if (range_) {   // P4.1: ranges are cut at sentence starts, siblings share one
+                auto cut = [&](const RevSpan& sp) {
+                    const size_t a = gallop_rev(sp, 0, range_->lo);
+                    return rev_slice(sp, a, gallop_rev(sp, a, range_->hi));
+                };
+                sa = cut(sa);
+                sb = cut(sb);
+                result.range_ok = true;
+            }
+            const auto& deps = corpus_.deps();
+            const StructuralAttr& sents = corpus_.structure("s");
+            const Region* sent_r = sents.region_data();
+            FlatRegionCursor sent_cur(sents);
+            const bool can_fast_count = count_total && max_matches > 0 && !agg_ptr && !agg_sink && !sink_on
+                                        && sample_size == 0;
+            bool counting = false;
+            auto emit = [&](CorpusPos a, CorpusPos b) -> bool {
+                if (counting) {
+                    ++result.total_count;
+                    return !(max_total_cap > 0 && result.total_count >= max_total_cap);
+                }
+                add_match(std::vector<CorpusPos>{a, b, a, b});   // [t0_start, t1_start, t0_end, t1_end]
+                if (reached_limit() || reached_total_cap()) return false;
+                if (can_fast_count && result.matches.size() >= max_matches) counting = true;
+                return true;
+            };
+            std::vector<std::pair<CorpusPos, CorpusPos>> by_head;   // (head, position) of B's tokens
+            const size_t na = sa.count, nb = sb.count;
+            size_t i = 0, j = 0;
+            bool stop = false;
+            while (!stop && i < na && j < nb) {
+                const CorpusPos a0 = sa.at(i), b0 = sb.at(j);
+                const CorpusPos first = std::min(a0, b0);
+                const int64_t si = sent_cur.find(first);
+                if (si < 0) {   // outside every sentence: no head
+                    if (a0 == first) ++i; else ++j;
+                    continue;
+                }
+                const CorpusPos s_end = sent_r[si].end;
+                by_head.clear();
+                for (; j < nb; ++j) {
+                    const CorpusPos b = sb.at(j);
+                    if (b > s_end) break;
+                    const CorpusPos h = deps.head(b);
+                    if (h != NO_HEAD) by_head.emplace_back(h, b);
+                }
+                std::sort(by_head.begin(), by_head.end());
+                for (; i < na && !stop; ++i) {
+                    const CorpusPos a = sa.at(i);
+                    if (a > s_end) break;
+                    const CorpusPos h = deps.head(a);
+                    if (h == NO_HEAD || by_head.empty()) continue;
+                    auto it = std::lower_bound(by_head.begin(), by_head.end(),
+                                               std::make_pair(h, std::numeric_limits<CorpusPos>::min()));
+                    for (; it != by_head.end() && it->first == h; ++it)
+                        if (it->second != a && !emit(a, it->second)) { stop = true; break; }
+                }
+                progress_tick(s_end, result.total_count);
+            }
+            if (max_total_cap > 0 && result.total_count > max_total_cap) result.total_count = max_total_cap;
+            return finish_query();
+        }
+    }
+
     // ── Dep EQ fast path: [A] > [B] / [A] < [B] via bitset + head() ─────
     //
     // Dense POS×POS (e.g. VERB > NOUN) used to probe millions of seeds.

@@ -21,3 +21,7 @@ a:[upos="NOUN"]; count by a.u_gender
 # long sentences: heads more than 127 positions away (dep.head_rel8 exceptions)
 [upos="VERB"] > [deprel="obl"]
 [upos="VERB"] >> [upos="NUM"]
+# same head (dep_sibling): across partitions, bitmap chunks and long sentences
+[deprel="nsubj"] ~ [deprel="obl"]
+[upos="ADJ"] ~ [upos="NOUN"]
+a:[upos="PRON"] ~ b:[deprel="obj"]; count by b.lemma

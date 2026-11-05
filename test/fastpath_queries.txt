@@ -81,6 +81,17 @@
 [upos="VERB"] > [upos="NOUN"] :: match.text_langcode="cs"
 [upos="VERB"] > [upos="NOUN"] within s
 
+# --- same head (dep_sibling); the last three take the generic path ---
+[deprel="nsubj"] ~ [deprel="obj"]
+[deprel="obj"] ~ [deprel="nsubj"]
+[upos="ADJ"] ~ [upos="DET"]
+[upos="PUNCT"] ~ [upos="PUNCT"]
+[upos="NOUN" | upos="PROPN"] ~ [deprel="case"]
+a:[deprel="nsubj"] ~ b:[deprel="obl"]; count by a.lemma
+[deprel="det"] ~ [upos="ADJ"] within s
+[deprel="root"] ~ []
+[deprel="nsubj"] ~ [deprel="obj"] :: match.text_lang = "English"
+v:[upos="VERB"] > s:[deprel="nsubj"] ~ o:[deprel="obj"]
 # --- dependencies, transitive (dep_trans) ---
 fullmax=0	[upos="VERB"] >> [upos="NOUN"]
 [lemma="book"] >> [upos="ADJ"]
