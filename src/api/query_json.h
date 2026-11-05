@@ -1,5 +1,6 @@
 #pragma once
 
+#include "api/dcoll_totals.h"
 #include "corpus/corpus.h"
 #include "query/executor.h"
 #include <string>
@@ -257,6 +258,8 @@ struct ProgramOptions {
     size_t coll_max_items = 50;
     size_t coll_stoplist = 0; // 0 = disabled; otherwise top-N most frequent words are excluded
     std::vector<std::string> coll_measures;
+    /// `dcoll`: what the scores compare with (dcoll_totals.h); `set dcoll-baseline corpus` for pando < 0.4.5
+    DcollBaseline dcoll_baseline = DcollBaseline::Relation;
     /// P4.1: totals and `count by` over this many position ranges in parallel.
     unsigned threads = 1;
     /// Progress / cancel block for every query the program runs (nullptr = none);

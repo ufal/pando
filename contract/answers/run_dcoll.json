@@ -19,6 +19,8 @@
    ],
    "matches": 4,
    "stoplist": 0,
+   "baseline": "relation",
+   "relation_total": 20,
    "measures": [
     "logdice"
    ],
@@ -27,30 +29,35 @@
      "word": ".",
      "obs": 4,
      "freq": 4,
+     "relation_freq": 4,
      "logdice": 13.193
     },
     {
      "word": "cat",
      "obs": 2,
      "freq": 2,
+     "relation_freq": 2,
      "logdice": 12.415
     },
     {
      "word": "kat",
      "obs": 2,
      "freq": 2,
+     "relation_freq": 2,
      "logdice": 12.415
     },
     {
      "word": "dog",
      "obs": 1,
      "freq": 1,
+     "relation_freq": 1,
      "logdice": 11.541
     },
     {
      "word": "hond",
      "obs": 1,
      "freq": 1,
+     "relation_freq": 1,
      "logdice": 11.541
     }
    ]

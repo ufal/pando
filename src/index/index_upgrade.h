@@ -6,6 +6,7 @@
 //   dep.head_rel                 (P1.8)  relative head offsets
 //   <attr>.fold_{lc,na,lcna}.v2.perm (P1.6)  %c / %d / %cd lookups (UTF-8 fold)
 //   <attr>.bm{,.idx}             (P3.1)  chunked bitmaps, low-cardinality attrs
+//   <attr>.dcoll                         the totals dcoll scores compare with (dcoll_totals_file.h)
 
 #include "index/relation_decl.h"
 
@@ -23,6 +24,10 @@ inline constexpr const char* kDefaultBitmaps = "auto";
 // when it has a dependency index; `--head-attrs none` opts out.
 inline constexpr const char* kDefaultHeadAttrs = "auto";
 inline constexpr const char* kAutoHeadAttrs[] = {"upos", "deprel", "lemma"};
+// dcoll totals (auto: the attributes dcoll usually goes by, those the corpus has, when it has a dependency index;
+// `none` = no files, or a list). Attributes without the file are counted at query time.
+inline constexpr const char* kDefaultDcollAttrs = "auto";
+inline constexpr const char* kAutoDcollAttrs[] = {"lemma", "form", "word", "upos", "xpos", "deprel"};
 
 std::vector<std::string> split_list(const std::string& s);
 
@@ -31,7 +36,8 @@ std::vector<std::string> split_list(const std::string& s);
 int upgrade_index(const std::string& dir, bool quiet = false, const std::string& dep_pairs = kDefaultDepPairs,
                   const std::string& bitmaps = kDefaultBitmaps, const std::string& packed = "none",
                   bool drop_rev = false, const std::string& head_attrs = kDefaultHeadAttrs, bool compact_deps = false,
-                  const std::string& packed_dat = "none", bool drop_dat = false);
+                  const std::string& packed_dat = "none", bool drop_dat = false,
+                  const std::string& dcoll_attrs = kDefaultDcollAttrs);
 
 // Record `relation.<name>=…` in corpus.info (replacing an earlier line for that relation).
 bool record_relation(const std::string& dir, const RelationDecl& r);

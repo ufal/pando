@@ -39,6 +39,21 @@ If the corpus has a **dependency index** (sentence structure `s` plus `dep.*` da
 - For multi-token matches, **anchor** with a named token: `a:[upos="DET"] [upos="NOUN" & lemma="book"]; dcoll a.amod by lemma`.
 - A second attribute after `by` is tallied per collocate without changing the measures: `dcoll children by lemma, deprel` adds, for each collocate, how often it came in each relation (`de` → `case:27 det:12`); `dcoll head by lemma, upos` shows the word class of the heads. In JSON this is `"breakdown": {"case": 27, "det": 12}` per collocate (most frequent first) and `"breakdown_attribute"` on the result; an unknown attribute is an error.
 
+### What `dcoll` scores compare with
+
+A score compares the observed count (node, relation, collocate) with what chance would give: from how often the node has any relative of this kind, how often the collocate is such a relative, and how many such pairs there are. In a window collocation every token can fill a window position, so the collocate's corpus frequency and the corpus size are the right totals. In `dcoll` the observed count is of dependency pairs, so the other totals count the same pairs:
+
+| `dcoll …` | the collocate's frequency (`relation_freq`) | N (`relation_total`) |
+| --- | --- | --- |
+| a deprel (`amod`) | how often it is an `amod` dependent | all `amod` edges |
+| `children` | how often it has a head | all edges |
+| `head` | how often it is a head (once per dependent) | all edges |
+| `descendants` | the number of its ancestors, summed over its tokens | all (ancestor, descendant) pairs |
+
+Several relations add up (`dcoll head, amod` adds both); over a relation layer (`dcoll (via eff) …`) the layer's edges count. A collocate that is often used in other ways (*iron* mostly as a noun) is then not ranked down as a modifier for that; the score says how much it goes with the node *when* it is used in this relation, as word sketches do.
+
+This is the default (`"baseline": "relation"`). `set dcoll-baseline corpus` (CLI `--dcoll-baseline corpus`, FFI option `dcoll_baseline`) gives the scores of pando before 0.4.5: the collocate's corpus frequency and the corpus size. pando-index stores these totals for the usual attributes (`lemma`, `form`, `word`, `upos`, `xpos`, `deprel`; see [dcoll totals](Index-and-Corpus-Layout.md#dcoll-totals-attrdcoll)); for other attributes, older indexes and relation layers the first `dcoll` of a kind of relation counts them in a pass over the corpus, which pando-server then keeps.
+
 See [Dependency queries](Dependency-Queries.md) for how dependencies are encoded in queries.
 
 ---

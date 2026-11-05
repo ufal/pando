@@ -94,7 +94,7 @@ Pages are cut by pair.
 | `describe` | `total_matches, offset, limit, rows_returned, rows[]` | `{match_index, match_start, match_end, kind, tokens[] \| regions[]}` |
 | `raw` | a **list** | `{positions[], tokens[]}` |
 | `coll` | `attribute, window, matches, stoplist, measures[], collocates[]` | `{word, obs, freq, <measure>}` |
-| `dcoll` | `attribute, relations[], matches, stoplist, measures[], collocates[]` | as `coll`, with `breakdown{}` |
+| `dcoll` | `attribute, relations[], matches, stoplist, baseline, relation_total?, measures[], collocates[]` | as `coll`, with `relation_freq?`, `breakdown{}`; `freq` stays the corpus frequency, `relation_freq` and `relation_total` are what the scores compare with when `baseline` is `relation` ([Collocations](Collocations-and-Keyness.md#what-dcoll-scores-compare-with)) |
 | `keyness` | `attribute, focus_size, ref_size, corpus_size, stoplist, rows[]` | `{word, focus_freq, ref_freq, keyness, effect}` |
 | `size` | a **number** | |
 | `query` (`sort`, an assignment) | as hits | |

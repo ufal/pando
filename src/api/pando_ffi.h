@@ -88,7 +88,9 @@ PANDO_API char* pando_query(pando_handle_t h, const char* cql, const char* opts_
  *              query, sort or cat returns), strict_quoted_strings, group_limit,
  *              attrs (array), and for
  *              coll / dcoll: coll_left, coll_right (window), coll_min_freq,
- *              coll_max_items, measures (array, e.g. ["logdice","mi"]).
+ *              coll_max_items, measures (array, e.g. ["logdice","mi"]),
+ *              dcoll_baseline ("relation", the default, or "corpus": what dcoll
+ *              scores compare with, dcoll_totals.h).
  *              Pass NULL or "{}" for defaults.
  * Errors come back as {"ok":false,"error":"…"} (a syntax error says where).
  * Session state (named queries) persists across calls on the same handle.

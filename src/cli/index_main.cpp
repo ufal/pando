@@ -238,6 +238,7 @@ int main(int argc, char* argv[]) {
         bool compact_deps = false;
         std::string packed_dat = "none";
         bool drop_dat = false;
+        std::string dcoll_attrs = pando::kDefaultDcollAttrs;
         bool publish = false;
         int keep = 3;
         for (int i = 3; i < argc; ++i) {
@@ -255,6 +256,8 @@ int main(int argc, char* argv[]) {
             if (a.rfind("--packed-dat=", 0) == 0) { packed_dat = a.substr(13); continue; }
             if (a == "--drop-dat") { drop_dat = true; continue; }
             if (a.rfind("--head-attrs=", 0) == 0) { head_attrs = a.substr(13); continue; }
+            if (a == "--dcoll-attrs" && i + 1 < argc) { dcoll_attrs = argv[++i]; continue; }
+            if (a.rfind("--dcoll-attrs=", 0) == 0) { dcoll_attrs = a.substr(14); continue; }
             if (a == "--dep-pairs" && i + 1 < argc) pairs = argv[++i];
             else if (a.rfind("--dep-pairs=", 0) == 0) pairs = a.substr(12);
             else if (a == "--bitmaps" && i + 1 < argc) bitmaps = argv[++i];
@@ -288,14 +291,14 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             if (pando::upgrade_index(pub.building_dir(), false, pairs, bitmaps, packed, drop_rev, head_attrs, compact_deps,
-                              packed_dat, drop_dat) != 0 ||
+                              packed_dat, drop_dat, dcoll_attrs) != 0 ||
                 pando::measure_declared_equivalences(pub.building_dir(), false) != 0)
                 return 1;
             return report_publish(pub, keep);
         }
         if (refuse_published_in_place(argv[2], true)) return 1;
         if (pando::upgrade_index(argv[2], false, pairs, bitmaps, packed, drop_rev, head_attrs, compact_deps,
-                                 packed_dat, drop_dat) != 0)
+                                 packed_dat, drop_dat, dcoll_attrs) != 0)
             return 1;
         return pando::measure_declared_equivalences(argv[2], false);
     }
@@ -414,6 +417,10 @@ int main(int argc, char* argv[]) {
                   << "                    bit-packed, large ones as frequency ranks in 1-4 bytes; default none)\n"
                   << "    --drop-dat      remove the plain <attr>.dat once its packed ids are verified\n"
                   << "                    (implies --packed-dat auto)\n"
+                  << "    --dcoll-attrs auto|none|A[,B...]  store the totals dcoll scores compare with\n"
+                  << "                    (<attr>.dcoll; default auto = lemma, form, word, upos, xpos, deprel\n"
+                  << "                    when the corpus has dependencies; other attributes are counted at\n"
+                  << "                    query time)\n"
                   << "    --compact-deps  remove dep.head and dep.head_rel once dep.head_rel8 (1 byte\n"
                   << "                    per token, always written) is verified to give the same heads\n"
                   << "    --publish       <corpus_dir> is a published root: upgrade a copy of its current\n"

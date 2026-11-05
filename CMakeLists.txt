@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.16)
 # toolchain targets the build host's own macOS version, which older Macs can't run).
 # Override with -DCMAKE_OSX_DEPLOYMENT_TARGET=…
 set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
-project(pando VERSION 0.4.4 LANGUAGES C CXX)
+project(pando VERSION 0.4.5 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -169,6 +169,7 @@ add_library(pando_core STATIC
     src/index/index_publish.cpp
     src/index/index_upgrade.cpp
     src/index/head_attr.cpp
+    src/index/dcoll_totals_file.cpp
     src/index/positional_attr.cpp
     src/index/structural_attr.cpp
     src/index/dependency_index.cpp
@@ -222,7 +223,7 @@ add_executable(cwb-import src/cli/cwb_import_main.cpp)
 target_link_libraries(cwb-import PRIVATE pando_core)
 
 # API layer: query execution + JSON (used by CLI and server)
-add_library(pando_api STATIC src/api/query_json.cpp src/api/aligned_pieces.cpp src/api/program_api.cpp src/api/query_jobs.cpp src/api/group_counts.cpp src/api/coll_counts.cpp src/api/result_cache.cpp src/api/corpus_warm.cpp
+add_library(pando_api STATIC src/api/query_json.cpp src/api/aligned_pieces.cpp src/api/program_api.cpp src/api/query_jobs.cpp src/api/group_counts.cpp src/api/coll_counts.cpp src/api/dcoll_totals.cpp src/api/result_cache.cpp src/api/corpus_warm.cpp
     src/api/server_api.cpp src/api/server_capi.cpp src/api/sessions.cpp
     src/api/limits.cpp)
 target_include_directories(pando_api PUBLIC src)
@@ -455,6 +456,12 @@ if(BUILD_TESTING)
         # dcoll … by attr, attr2: attr2 tallied per collocate; JSON request escapes decoded
         add_test(NAME dcoll_breakdown
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/dcoll_breakdown_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
+                --server $<TARGET_FILE:pando-server>
+                --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu)
+        # dcoll scores compare with the collocate's frequency in the relation (or, asked for, in the corpus)
+        add_test(NAME dcoll_totals
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/dcoll_totals_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
                 --server $<TARGET_FILE:pando-server>
                 --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu)

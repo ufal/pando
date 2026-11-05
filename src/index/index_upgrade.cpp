@@ -1,3 +1,4 @@
+#include "index/dcoll_totals_file.h"
 #include "index/index_upgrade.h"
 
 #include "core/build_info.h"
@@ -332,7 +333,7 @@ static void record_upgrade(const std::string& dir) {
 
 int upgrade_index(const std::string& dir, bool quiet, const std::string& dep_pairs, const std::string& bitmaps,
                   const std::string& packed, bool drop_rev, const std::string& head_attrs, bool compact_deps,
-                  const std::string& packed_dat, bool drop_dat) {
+                  const std::string& packed_dat, bool drop_dat, const std::string& dcoll_attrs) {
     auto t0 = std::chrono::steady_clock::now();
     auto secs = [&] {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -541,6 +542,41 @@ int upgrade_index(const std::string& dir, bool quiet, const std::string& dep_pai
                 if (!quiet)
                     std::cerr << "Wrote " << DepPairIndex::base_path(dir, h, c)
                               << ".rev (" << secs() << " s)\n";
+            }
+        }
+        // the totals dcoll scores compare with, per attribute (all in one pass over the corpus)
+        if (corpus.has_deps() && dcoll_attrs != "none" && !dcoll_attrs.empty()) {
+            const bool is_auto = dcoll_attrs == "auto";
+            std::vector<std::string> names;
+            if (is_auto) {
+                for (const char* a : kAutoDcollAttrs)
+                    if (corpus.has_attr(a) && !corpus.is_multivalue(a)) names.push_back(a);
+            } else {
+                names = split_list(dcoll_attrs);
+            }
+            std::vector<std::string> todo;
+            for (const auto& a : names) {
+                if (!corpus.has_attr(a) || corpus.is_multivalue(a)) {
+                    std::cerr << "Error: --dcoll-attrs " << a << ": no single-valued positional attribute\n";
+                    return 1;
+                }
+                if (!heads_rewritten && DcollTotalsFile::up_to_date(corpus, a)) {
+                    if (!quiet) std::cerr << "dcoll totals " << DcollTotalsFile::path_for(corpus, a) << " up to date\n";
+                    continue;
+                }
+                todo.push_back(a);
+            }
+            if (!todo.empty()) {
+                std::string err;
+                if (!DcollTotalsFile::build(corpus, todo, &err)) {
+                    std::cerr << "Error: " << err << "\n";
+                    return 1;
+                }
+                if (!quiet) {
+                    std::string list;
+                    for (const auto& a : todo) list += (list.empty() ? "" : ", ") + a;
+                    std::cerr << "Wrote dcoll totals for " << list << " (" << secs() << " s)\n";
+                }
             }
         }
     } catch (const std::exception& e) {

@@ -6,6 +6,7 @@
 // nodes the children are found from the child side (one pass over the candidates'
 // heads) instead of rebuilding a sentence's children map per node.
 
+#include "api/dcoll_totals.h"
 #include "corpus/corpus.h"
 #include "query/executor.h"
 
@@ -25,6 +26,8 @@ struct CollCounts {
     /// `dcoll … by attr, attr2`: per (collocate id, attr2 id), how often the related
     /// tokens counted for that collocate had that attr2 value; key = id << 32 | attr2 id
     std::vector<std::pair<uint64_t, size_t>> breakdown;
+    /// `dcoll`: the kinds of pair counted, for the totals the scores compare with (dcoll_totals.h)
+    DcollPairKinds pairs;
 };
 
 /// `CollCounts::breakdown` per collocate id: (attr2 id, count), most frequent first.
@@ -81,6 +84,9 @@ public:
     /// from the child side when there are many).
     CollCounts finish();
 
+    /// The kinds of pair this command counts, for its totals (dcoll_totals.h).
+    DcollPairKinds pair_kinds() const;
+
 private:
     // `bd`: the breakdown value to tally; kBdOwn = the counted token's own (a child: its relation to the node),
     // else given (a head's `deprel`: the relation the node has to it, bd_label)
@@ -90,6 +96,7 @@ private:
     CollCounts done() const;
     CollCounts finish_layer();
     const RelationLayer* layer_ = nullptr;
+    std::string layer_name_;
     std::vector<std::string> deprel_names_;   // the deprels asked for, as the layer's labels
     const PositionalAttr* bd_ = nullptr;
     std::unordered_map<uint64_t, size_t> bd_counts_;

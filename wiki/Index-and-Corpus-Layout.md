@@ -90,6 +90,21 @@ unchanged. Worth it when the corpus would otherwise not fit in memory (the
 `.dat` of form and lemma are 8 GB per billion tokens, packed about 5 GB): a
 token read from disk costs far more than its decoding.
 
+## dcoll totals (`<attr>.dcoll`)
+
+The totals `dcoll` scores compare with ([Collocations](Collocations-and-Keyness.md#what-dcoll-scores-compare-with)),
+per value of the attribute, over the basic dependency tree: how often a token with the value has a head (children),
+is a head (once per dependent), how many ancestors its tokens have (descendants), and per deprel how often it has a
+head with that deprel, with each kind's total. Written by `pando-index` and `--upgrade` (`--dcoll-attrs`) in one
+pass over the corpus for all attributes; a file that does not match the corpus or is older than the attribute, the
+deprels or the heads is not used and is rewritten by the next `--upgrade`. Without it (an older index, another
+attribute) and over relation layers (`dcoll (via L)`), `dcoll` counts the totals itself: one pass over the corpus per
+kind of pair and attribute, kept by `pando-server` until it restarts.
+
+On UD 2.17 (38M tokens): writing lemma, form and upos takes about 15 s; `lemma.dcoll` is 82 MB, `form.dcoll`
+141 MB (three 8-byte counts per value plus the deprel table); a `dcoll` query then takes 0.04 s instead of 0.3–3 s
+for the pass (warm) on the first query.
+
 ## Versioned index directories (hot swap)
 
 A corpus that servers keep open is published in versions, so a new build or

@@ -1736,12 +1736,16 @@ static void emit_dcoll_result_json(std::ostream& out, const Corpus& corpus, cons
     const auto& obs_counts = cc.items;
     const size_t total_related = cc.total;
 
+    // the collocate's frequency and N in the same space as `obs` (dcoll_totals.h)
+    const DcollTotals totals = opts.dcoll_baseline == DcollBaseline::Corpus
+        ? DcollTotals::corpus(pa, corpus.size()) : DcollTotals::relation(corpus, coll_attr, cc.pairs);
+    const bool by_relation = totals.baseline() == DcollBaseline::Relation;
     std::vector<CollEntry> entries;
-    size_t N = corpus.size();
+    const size_t N = totals.total();
     for (const auto& [id, obs] : obs_counts) {
         if (stop_ids.count(id)) continue;
         if (obs < opts.coll_min_freq) continue;
-        entries.push_back({id, std::string(pa.lexicon().get(id)), obs, pa.count_of_id(id), total_related, N});
+        entries.push_back({id, std::string(pa.lexicon().get(id)), obs, totals.of(id), total_related, N});
     }
     std::sort(entries.begin(), entries.end(), [&](const CollEntry& a, const CollEntry& b) {
         // ties: more observations first, then by value (deterministic order)
@@ -1765,13 +1769,16 @@ static void emit_dcoll_result_json(std::ostream& out, const Corpus& corpus, cons
     if (bd_pa) out << "  \"breakdown_attribute\": " << jstr(bd_name) << ",\n";
     out << "  \"matches\": " << dcoll_match_n << ",\n";
     out << "  \"stoplist\": " << opts.coll_stoplist << ",\n";
+    out << "  \"baseline\": " << jstr(dcoll_baseline_name(totals.baseline())) << ",\n";
+    if (by_relation) out << "  \"relation_total\": " << N << ",\n";
     out << "  \"measures\": [";
     for (size_t i = 0; i < measures.size(); ++i) { if (i > 0) out << ", "; out << jstr(measures[i]); }
     out << "],\n  \"collocates\": [\n";
     for (size_t i = 0; i < show; ++i) {
         if (i > 0) out << ",\n";
         out << "    {\"word\": " << jstr(entries[i].form) << ", \"obs\": " << entries[i].obs
-            << ", \"freq\": " << entries[i].f_coll;
+            << ", \"freq\": " << pa.count_of_id(entries[i].id);
+        if (by_relation) out << ", \"relation_freq\": " << entries[i].f_coll;
         for (const auto& meas : measures)
             out << ", " << jstr(meas) << ": " << std::fixed << std::setprecision(3) << compute_measure(meas, entries[i]);
         if (bd_pa) {
@@ -2028,6 +2035,7 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
         o += std::to_string(opts.context) + "," + std::to_string(opts.coll_left) + "," + std::to_string(opts.coll_right)
              + (opts.total ? ",t" : ",-") + (opts.sentence ? ",s" : ",-") + (opts.fragment ? ",f" : ",-");
         for (const auto& m : opts.coll_measures) o += "," + m;
+        o += std::string(",b=") + dcoll_baseline_name(opts.dcoll_baseline);
         o += "|";
         for (const auto& a : opts.attrs) o += a + ",";
         return cache_key({"cmd/1", h.recipe, sorts_key(h.sorts), cst.source, dcoll_fallback ? "rel" : "-", o});
@@ -2195,6 +2203,14 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                 else if (name == "group-limit" || name == "group_limit") to_size(opts.group_limit);
                 else if (name == "child-limit" || name == "child_limit") to_size(opts.child_limit);
                 else if (name == "measures")  opts.coll_measures = split_csv(val);
+                else if (name == "dcoll-baseline" || name == "dcoll_baseline") {
+                    if (!parse_dcoll_baseline(val, opts.dcoll_baseline)) {
+                        out.str(""); out.clear();
+                        out << "{\"ok\": false, \"error\": "
+                            << jstr("dcoll-baseline is relation or corpus, not '" + val + "'") << "}\n";
+                        continue;
+                    }
+                }
                 else if (name == "attrs") {
                     if (val == "all" || val == "*" || val.empty()) opts.attrs.clear();
                     else opts.attrs = split_csv(val);
@@ -2226,6 +2242,7 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                 out << "  \"group_limit\": " << opts.group_limit << ",\n";
                 out << "  \"child_limit\": " << opts.child_limit << ",\n";
                 out << "  \"total\": " << (opts.total ? "true" : "false") << ",\n";
+                out << "  \"dcoll_baseline\": " << jstr(dcoll_baseline_name(opts.dcoll_baseline)) << ",\n";
                 out << "  \"measures\": " << jstr(join(opts.coll_measures.empty()
                     ? std::vector<std::string>{"logdice"} : opts.coll_measures)) << ",\n";
                 out << "  \"attrs\": " << jstr(join(opts.attrs)) << "\n";

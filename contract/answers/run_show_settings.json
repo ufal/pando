@@ -24,6 +24,7 @@
    "group_limit": 1000,
    "child_limit": 20,
    "total": false,
+   "dcoll_baseline": "relation",
    "measures": "logdice",
    "attrs": "(all)"
   },

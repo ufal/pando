@@ -122,6 +122,7 @@ struct Options {
     size_t coll_max_items = 50;
     size_t coll_stoplist = 0; // 0 = disabled; otherwise top-N most frequent coll_attr forms are excluded
     std::vector<std::string> coll_measures;  // empty = default {"logdice"}
+    DcollBaseline dcoll_baseline = DcollBaseline::Relation;  // --dcoll-baseline (dcoll_totals.h)
     // RG-REG-5: named-region binding policy when an anchor position is contained in
     // multiple candidate rows (nested/overlapping/zero-width). "fanout" (default)
     // emits one match per candidate row (Cartesian across multiple anchors);
@@ -2115,14 +2116,16 @@ static void emit_dcoll_result(const Corpus& corpus, const GroupCommand& cmd, con
     const auto& obs_counts = cc.items;
     const size_t total_related = cc.total;
 
-    // Build entries
+    // the collocate's frequency and N in the same space as `obs` (dcoll_totals.h)
+    const DcollTotals totals = opts.dcoll_baseline == DcollBaseline::Corpus
+        ? DcollTotals::corpus(pa, corpus.size()) : DcollTotals::relation(corpus, coll_attr, cc.pairs);
+    const bool by_relation = totals.baseline() == DcollBaseline::Relation;
     std::vector<CollEntry> entries;
-    size_t N = corpus.size();
+    const size_t N = totals.total();
     for (const auto& [id, obs] : obs_counts) {
         if (stop_ids.count(id)) continue;
         if (obs < opts.coll_min_freq) continue;
-        size_t f_coll = pa.count_of_id(id);
-        entries.push_back({id, std::string(pa.lexicon().get(id)), obs, f_coll, total_related, N});
+        entries.push_back({id, std::string(pa.lexicon().get(id)), obs, totals.of(id), total_related, N});
     }
 
     std::sort(entries.begin(), entries.end(), [&](const CollEntry& a, const CollEntry& b) {
@@ -2168,6 +2171,8 @@ static void emit_dcoll_result(const Corpus& corpus, const GroupCommand& cmd, con
         if (bd_pa) std::cout << "  \"breakdown_attribute\": " << jstr(bd_name) << ",\n";
         std::cout << "  \"matches\": " << dcoll_match_n << ",\n";
         std::cout << "  \"stoplist\": " << opts.coll_stoplist << ",\n";
+        std::cout << "  \"baseline\": " << jstr(dcoll_baseline_name(totals.baseline())) << ",\n";
+        if (by_relation) std::cout << "  \"relation_total\": " << N << ",\n";
         std::cout << "  \"measures\": [";
         for (size_t i = 0; i < measures.size(); ++i) {
             if (i > 0) std::cout << ", ";
@@ -2178,7 +2183,8 @@ static void emit_dcoll_result(const Corpus& corpus, const GroupCommand& cmd, con
             if (i > 0) std::cout << ",\n";
             std::cout << "    {\"word\": " << jstr(entries[i].form)
                       << ", \"obs\": " << entries[i].obs
-                      << ", \"freq\": " << entries[i].f_coll;
+                      << ", \"freq\": " << pa.count_of_id(entries[i].id);
+            if (by_relation) std::cout << ", \"relation_freq\": " << entries[i].f_coll;
             for (const auto& meas : measures)
                 std::cout << ", " << jstr(meas) << ": " << std::fixed << std::setprecision(3) << compute_measure(meas, entries[i]);
             if (bd_pa) {
@@ -2195,11 +2201,13 @@ static void emit_dcoll_result(const Corpus& corpus, const GroupCommand& cmd, con
         std::cout << "\n  ]\n}}\n";
     } else {
         std::cout << coll_attr << "\tobs\tfreq";
+        if (by_relation) std::cout << "\trelfreq";
         for (const auto& meas : measures) std::cout << "\t" << meas;
         if (bd_pa) std::cout << "\t" << bd_name;
         std::cout << "\n";
         for (size_t i = 0; i < show; ++i) {
-            std::cout << entries[i].form << "\t" << entries[i].obs << "\t" << entries[i].f_coll;
+            std::cout << entries[i].form << "\t" << entries[i].obs << "\t" << pa.count_of_id(entries[i].id);
+            if (by_relation) std::cout << "\t" << entries[i].f_coll;
             for (const auto& meas : measures)
                 std::cout << "\t" << std::fixed << std::setprecision(3) << compute_measure(meas, entries[i]);
             if (bd_pa) {
@@ -2901,6 +2909,10 @@ static void run_query(const Corpus& corpus, const std::string& input,
                     opts.no_mv_explode = (val == "true" || val == "1" || val == "on");
                 else if (name == "max-gap" || name == "max_gap")      to_int(opts.max_gap);
                 else if (name == "measures")  opts.coll_measures = split_csv(val);
+                else if (name == "dcoll-baseline" || name == "dcoll_baseline") {
+                    if (!parse_dcoll_baseline(val, opts.dcoll_baseline))
+                        fail("dcoll-baseline is relation or corpus, not '" + val + "'");
+                }
                 else if (name == "attrs") {
                     if (val == "all" || val == "*" || val.empty())
                         opts.attrs.clear();
@@ -2970,6 +2982,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                     std::cout << "  \"sample\": " << opts.sample << ",\n";
                     std::cout << "  \"allow_empty_alignment\": "
                               << (opts.allow_empty_alignment ? "true" : "false") << ",\n";
+                    std::cout << "  \"dcoll_baseline\": " << jstr(dcoll_baseline_name(opts.dcoll_baseline)) << ",\n";
                     std::cout << "  \"measures\": " << jstr(join(opts.coll_measures.empty()
                         ? std::vector<std::string>{"logdice"} : opts.coll_measures)) << ",\n";
                     std::cout << "  \"attrs\": " << jstr(join(opts.attrs)) << "\n";
@@ -2995,6 +3008,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                     std::cout << "sample      = " << opts.sample << "\n";
                     std::cout << "allow-empty-alignment = "
                               << (opts.allow_empty_alignment ? "on" : "off") << "\n";
+                    std::cout << "dcoll-baseline = " << dcoll_baseline_name(opts.dcoll_baseline) << "\n";
                     std::cout << "measures    = " << join(opts.coll_measures.empty()
                         ? std::vector<std::string>{"logdice"} : opts.coll_measures) << "\n";
                     std::cout << "attrs       = " << join(opts.attrs) << "\n";
@@ -3687,6 +3701,13 @@ static Options parse_args(int argc, char* argv[]) {
         else if (arg == "--min-freq" && i + 1 < argc) { opts.coll_min_freq = std::stoul(argv[++i]); }
         else if (arg == "--max-items" && i + 1 < argc) { opts.coll_max_items = std::stoul(argv[++i]); }
         else if (arg == "--stoplist" && i + 1 < argc) { opts.coll_stoplist = std::stoul(argv[++i]); }
+        else if (arg == "--dcoll-baseline" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            if (!parse_dcoll_baseline(v, opts.dcoll_baseline)) {
+                std::cerr << "Error: --dcoll-baseline is relation or corpus, not '" << v << "'\n";
+                std::exit(1);
+            }
+        }
         else if (arg == "--measures" && i + 1 < argc) {
             std::string list = argv[++i];
             opts.coll_measures.clear();
@@ -3788,7 +3809,10 @@ static Options parse_args(int argc, char* argv[]) {
                   << "  --min-freq N     Minimum co-occurrence frequency (default: 5)\n"
                   << "  --max-items N    Maximum collocates to display (default: 50)\n"
                   << "  --stoplist N     Exclude N most frequent words for coll/dcoll/keyness (default: 0)\n"
-                  << "  --measures M,... Association measures: logdice,mi,mi3,tscore,ll,dice (default: logdice)\n";
+                  << "  --measures M,... Association measures: logdice,mi,mi3,tscore,ll,dice (default: logdice)\n"
+                  << "  --dcoll-baseline relation|corpus  What dcoll scores compare with: the collocate's frequency\n"
+                  << "                   in the relation and all such pairs (default), or its corpus frequency and the\n"
+                  << "                   corpus size (pando before 0.4.5)\n";
         std::exit(1);
     }
 

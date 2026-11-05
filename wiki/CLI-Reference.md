@@ -61,6 +61,7 @@ Exact options change over time; always run **`pando --help`**, **`pando-index --
 | `--min-freq N` | Minimum co-occurrence frequency (default: 5) |
 | `--max-items N` | Max collocates to list (default: 50) |
 | `--measures M,...` | e.g. `logdice`, `mi`, `mi3`, `tscore`, `ll`, `dice` (default: `logdice`) |
+| `--dcoll-baseline relation\|corpus` | What `dcoll` scores compare with: the collocate's frequency in the relation and all such pairs (default), or its corpus frequency and the corpus size (pando before 0.4.5); also `set dcoll-baseline …`. Text output adds a `relfreq` column after `freq` |
 
 More detail: [Collocations and keyness](Collocations-and-Keyness.md).
 
@@ -110,6 +111,10 @@ for `--upgrade`:
   [Packed ids](Index-and-Corpus-Layout.md#packed-ids-datpk). Default none.
 - `--drop-dat` — remove the plain `<attr>.dat` once its packed ids are verified
   (implies `--packed-dat auto`).
+- `--dcoll-attrs auto|none|A[,B...]` — store the totals `dcoll` scores compare with
+  (`<attr>.dcoll`; see [dcoll totals](Index-and-Corpus-Layout.md#dcoll-totals-attrdcoll)).
+  Default `auto`: `lemma`, `form`, `word`, `upos`, `xpos`, `deprel` (those the corpus has) when it has a
+  dependency index — also when an index is built. `dcoll` by another attribute counts its totals at query time.
 - `--compact-deps` — remove `dep.head` and `dep.head_rel` once `dep.head_rel8`
   (one byte per token, always written) is verified to give the same heads; see
   [Dependency queries](Dependency-Queries.md#index).

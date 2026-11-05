@@ -127,6 +127,7 @@ pando::ProgramOptions parse_program_opts(const char* opts_json) {
     v = json_get(j, "coll_max_items");  if (!v.empty()) try { opts.coll_max_items = std::stoull(v); } catch (...) {}
     opts.attrs = json_get_string_array(j, "attrs");
     opts.coll_measures = json_get_string_array(j, "measures");
+    v = json_get(j, "dcoll_baseline");  if (!v.empty()) parse_dcoll_baseline(v, opts.dcoll_baseline);
     return opts;
 }
 

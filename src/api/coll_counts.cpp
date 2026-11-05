@@ -83,6 +83,7 @@ DcollCounter::DcollCounter(const Corpus& corpus, const PositionalAttr& pa,
     : corpus_(corpus), pa_(pa), counts_(pa.lexicon().size(), 0) {
     if (!layer.empty() && layer != "head") {
         layer_ = corpus.relation_layer(layer);
+        layer_name_ = layer;
         if (!layer_) {
             std::string names;
             for (const auto& r : corpus.relations())
@@ -130,8 +131,20 @@ LexiconId DcollCounter::bd_label(std::string_view label, CorpusPos dependent) co
     return bd_->id_at(dependent);
 }
 
+DcollPairKinds DcollCounter::pair_kinds() const {
+    DcollPairKinds k;
+    k.head = want_head_;
+    k.descendants = want_descendants_;
+    k.children = want_all_children_;
+    k.deprels = deprel_names_;
+    k.layer = layer_;
+    k.layer_name = layer_name_;
+    return k;
+}
+
 CollCounts DcollCounter::done() const {
     CollCounts out = collect(counts_, total_);
+    out.pairs = pair_kinds();
     out.breakdown.assign(bd_counts_.begin(), bd_counts_.end());
     std::sort(out.breakdown.begin(), out.breakdown.end());
     return out;
