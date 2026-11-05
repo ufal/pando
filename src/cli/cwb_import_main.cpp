@@ -1,4 +1,5 @@
 #include "core/types.h"
+#include "corpus/index_layout.h"
 #include "core/mmap_file.h"
 #include <iostream>
 #include <string>
@@ -170,6 +171,7 @@ int main(int argc, char* argv[]) {
         {
             std::ofstream info(out_dir + "/corpus.info");
             info << "size=" << corpus_size << "\n";
+            info << "layout_version=" << pando::kIndexLayoutVersion << "\n";
             info << "positional=";
             for (size_t i = 0; i < attrs.size(); ++i) {
                 if (i > 0) info << ",";

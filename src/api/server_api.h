@@ -182,6 +182,8 @@ private:
 
     // per-request deadlines (query_timeout_ms / "timeout_ms"): one watchdog thread
     struct Deadline;
+    /// A /query or /run sent with "request_id", while it runs: POST /cancel {"request": id} stops it.
+    struct RunningRequest;
     void watchdog_loop();
     void arm(Deadline& d);
     void disarm(Deadline& d);
@@ -198,6 +200,9 @@ private:
     std::chrono::system_clock::time_point started_;
     std::chrono::steady_clock::time_point started_steady_;
     std::string started_iso_;
+
+    std::mutex running_mu_;
+    std::map<std::string, RunningRequest*> running_;   // by request_id
 
     std::mutex wd_mu_;
     std::condition_variable wd_cv_;

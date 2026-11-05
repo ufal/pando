@@ -63,8 +63,16 @@ PANDO_API void pando_cancel(pando_handle_t h);
  *   h:         handle from pando_open
  *   cql:       CQL query string (single statement, no trailing command)
  *   opts_json: JSON object with optional keys: limit, offset, max_total, context,
- *              total, debug, strict_quoted_strings, attrs (array of names).
+ *              total, debug, strict_quoted_strings, attrs (array of names),
+ *              sentence (context = the enclosing sentence), fragment (each hit also
+ *              gets its context as TEITOK-style XML with every token attribute),
+ *              sample (N random hits), shuffle, seed (the same seed, the same
+ *              sample / order), aligned, aligned_where, aligned_max (the sentences
+ *              aligned with each hit), as on pando-server's /query.
  *              Pass NULL or "{}" for defaults.
+ *              This is the minimal API: sessions (paging a sorted set), background
+ *              totals and stopping one request of many are in server_capi.h
+ *              (pando_server_request, the pando-server JSON API without HTTP).
  * Returns a malloc'd JSON string (caller must free with pando_free_string),
  * or NULL on error.
  */
@@ -76,7 +84,9 @@ PANDO_API char* pando_query(pando_handle_t h, const char* cql, const char* opts_
  *   h:         handle from pando_open
  *   cql:       CQL program string
  *   opts_json: JSON object with optional keys: limit, offset, max_total, context,
- *              total, strict_quoted_strings, group_limit, attrs (array), and for
+ *              total, sentence, fragment (as for pando_query: the hit pages a
+ *              query, sort or cat returns), strict_quoted_strings, group_limit,
+ *              attrs (array), and for
  *              coll / dcoll: coll_left, coll_right (window), coll_min_freq,
  *              coll_max_items, measures (array, e.g. ["logdice","mi"]).
  *              Pass NULL or "{}" for defaults.

@@ -46,7 +46,7 @@ To disable a dialect: configure with **`-DPANDO_CWB_DIALECT=OFF`** or **`-DPANDO
 
 ## CWB / CQP (`--cql cwb`)
 
-**Intent:** A **partial** CWB/CQP-style front-end (lexer + recursive descent) that turns **token query** text into Pando’s `Program`: **named** assignments (`Name = pattern`), **anonymous** search patterns, and selected **shell-style** commands mapped to native `GroupCommand` (e.g. **`count by`**, **`group by`**, **`sort by`**, **`size`**, **`tabulate`**). Multi-statement input is split on **`;`** (outside quoted strings). Output formatting is **Pando’s**, not CQP’s.
+**Intent:** A **partial** CWB/CQP-style front-end (lexer + recursive descent) that turns **token query** text into Pando’s `Program`: **named** assignments (`Name = pattern`), **anonymous** search patterns, and selected **shell-style** commands mapped to native `GroupCommand` (e.g. **`count by`**, **`group by`**, **`sort by`**, **`size`**, **`cat`**, **`tabulate`**). Multi-statement input is split on **`;`** (outside quoted strings). Output formatting is **Pando’s**, not CQP’s.
 
 **Well supported relative to other dialects** because pando-CQL is modelled on CWB-style token patterns and attribute tests. Quoted-string behaviour for **`=`** inside **`[ ]`** follows the same **literal vs regex** heuristic as native CQL when **`--strict-quoted-strings`** is off; a backslash reaches the pattern as in CQP (`[word="\."]` is a full stop; see the [CQL reference](PANDO-CQL-Reference.md#values-and-regular-expressions)).
 
@@ -59,6 +59,7 @@ To disable a dialect: configure with **`-DPANDO_CWB_DIALECT=OFF`** or **`-DPANDO
 - **`group by <field>[, <field> …]`** mapped to the native **`group`** command. Fields use Pando’s **`name.attribute`** form; CWB-style **`name attribute`** (space instead of a dot) is accepted and normalized (e.g. `match lemma` → `match.lemma`). **`match.lemma`** is also accepted as a single dotted token.
 - **`sort [Name] by <field> [%c|%d|%cd] [on <from>..<to>]`** → native **`sort`** of the named query (or `Last`), with CQP's semantics: the key is the whole match (`match`..`matchend`) unless boundaries are given; `%c` / `%d` sort case- / diacritic-insensitively; boundaries are `match`, `matchend` or a token label with an optional offset (`on matchend[1]..matchend[5]` sorts on the right context, `on match[-1]..match[-5]` on the left context read from right to left). Boundaries beyond the corpus are clamped to its first / last token, as in CQP. Equal keys keep corpus order (CQP's order among them is arbitrary).
 - **`size`** → native **`size`** (optional query name).
+- **`cat [Name] [from [to]]`** → native **`cat`**: the hits in their current order (sorted after `sort`); `from` / `to` are hit numbers from 0, `to` included. Without `to`, pando shows a page (the limit) from `from`, where CQP shows every hit to the end; redirection (`> "file"`) is not supported.
 - **`tabulate`** → native **`tabulate`**: `tabulate [offset limit] field[, …]`, `tabulate QueryName offset limit field[, …]`, or `tabulate field[, …]` (default offset `0`, limit `1000`).
 
 **Not supported in this dialect** (the parser throws with a specific message; use **`--cql native`** for full Pando):
@@ -97,7 +98,7 @@ If neither path succeeds, translation fails (the error text mentions whether the
 
 **`--pmltq-export-sql`:** Emits **ClickPMLTQ-style SQL** only (no corpus load). Requires **`--cql pmltq`**, a query on the command line, and the **JavaScript** helpers described in **`pando --help`** (typically a **`pmltq2sql-optimized.js`** next to the PEG bundle, plus **`PMLTQ_GOLD_JS_DIR`**).
 
-**Gaps / difficulty:** What the dialect still does not lower (especially **`>>` output filters**, nodes that do not form a chain, multi-selector queries) is inventoried with effort estimates in **[`dev/PMLTQ-ROADMAP.md`](../dev/PMLTQ-ROADMAP.md)**.
+**Gaps / difficulty:** What the dialect does not lower (especially **`>>` output filters**, nodes that do not form a chain, multi-selector queries) is inventoried with effort estimates in **[`dev/PMLTQ-ROADMAP.md`](../dev/PMLTQ-ROADMAP.md)**.
 
 ---
 
@@ -131,6 +132,28 @@ cat VP
 **Scope:** This is **not** a full TIGERSearch or TIGER XML query language — only the macros above plus pass-through native CQL.
 
 ---
+
+## Hit counts compared with Manatee / KonText and CQP
+
+The same query on the same data can give a different number of hits in pando, Manatee and CQP.
+When it does, it is one of these counting rules:
+
+- **Sentence boundaries.** Like Manatee and CQP, pando does not keep a sequence inside a sentence
+  unless the query says so (`[] [] within s`). An index can set a default: `default_within`
+  (`"default_within": "text"` in the JSONL header, then `default_within=text` in `corpus.info`)
+  applies to every query without a `within` of its own. If pando counts fewer hits than Manatee,
+  check `corpus.info` for `default_within` first.
+- **Variable lengths.** For a pattern of variable length (`[upos="ADJ"] []{0,3} [upos="NOUN"]`)
+  pando and Manatee count every variant that matches; CQP keeps at most one match per start
+  position (its default matching strategy), so it reports fewer.
+- **Dependency queries.** Some engines report a head once however many matching dependents it
+  has; pando reports one hit per combination of matched tokens (as PML-TQ does).
+- **Regular expressions and quoted strings.** In pando-CQL `"…"` is a regular expression when it
+  contains regex characters, unless `--strict-quoted-strings` is set; `%c` / `%d` fold case and
+  diacritics as in CQP (see [the reference](PANDO-CQL-Reference.md#values-and-regular-expressions)).
+
+[Engine benchmark](Engine-Benchmark.md#count-discrepancies) lists the differences measured on real
+corpora.
 
 ## Quick comparison
 

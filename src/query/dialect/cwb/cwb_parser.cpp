@@ -107,7 +107,6 @@ std::vector<std::string> split_cwb_segments(const std::string& input) {
 static bool is_cqp_shell_keyword(CwbTok k) {
     switch (k) {
     case CwbTok::GROUP_SYM:
-    case CwbTok::CAT_SYM:
     case CwbTok::SAVE_SYM:
     case CwbTok::SHOW_SYM:
     case CwbTok::SET_SYM:
@@ -148,7 +147,7 @@ static bool is_cqp_shell_keyword(CwbTok k) {
         "CQP command '" + name +
         "' is not implemented in the CWB dialect yet (offset " + std::to_string(off) +
         "). Supported CWB-style commands include `count by`, `group by`, `sort by`, `size`, "
-        "`tabulate`, and token patterns (see IMS SortCmd). "
+        "`cat`, `tabulate`, and token patterns (see IMS SortCmd). "
         "Use `--cql native` for full pando commands.");
 }
 
@@ -853,6 +852,46 @@ Statement parse_cwb_sort_cmd(TokStream& ts, std::ostringstream* trace) {
     return stmt;
 }
 
+// IMS CatCmd: `cat [A] [from [to]]` — the hits of A (default Last) in their current order;
+// `from` / `to` are hit numbers from 0, `to` included. Without `to` pando shows a page (the
+// limit) from `from`, not every hit to the end as CQP does. Redirection (`> "file"`) is not
+// supported.
+Statement parse_cwb_cat_cmd(TokStream& ts, std::ostringstream* trace) {
+    expect_tok(ts, CwbTok::CAT_SYM, "cat");
+
+    Statement stmt;
+    stmt.has_command = true;
+    stmt.command.type = CommandType::CAT;
+
+    if (!ts.eof() && ts.peek().kind == CwbTok::ID) {
+        stmt.command.query_name = ts.peek().text;
+        ts.bump();
+    }
+    if (!ts.eof() && ts.peek().kind == CwbTok::INTEGER) {
+        stmt.command.cat_from = static_cast<std::size_t>(std::stoull(ts.peek().text));
+        ts.bump();
+        if (!ts.eof() && ts.peek().kind == CwbTok::INTEGER) {
+            stmt.command.cat_to = static_cast<std::size_t>(std::stoull(ts.peek().text));
+            ts.bump();
+            if (stmt.command.cat_to < stmt.command.cat_from)
+                throw std::runtime_error("cat: the window ends before it starts");
+        }
+    }
+
+    if (trace) {
+        *trace << "  statement: CWB cat";
+        if (!stmt.command.query_name.empty())
+            *trace << " " << stmt.command.query_name;
+        if (stmt.command.cat_from != SIZE_MAX)
+            *trace << " from=" << stmt.command.cat_from;
+        if (stmt.command.cat_to != SIZE_MAX)
+            *trace << " to=" << stmt.command.cat_to;
+        *trace << "\n";
+    }
+
+    return stmt;
+}
+
 Statement parse_cwb_tabulate_cmd(TokStream& ts, std::ostringstream* trace) {
     expect_tok(ts, CwbTok::TABULATE_SYM, "tabulate");
 
@@ -963,6 +1002,13 @@ Statement parse_statement_tokens(std::vector<CwbToken>& toks, std::ostringstream
         Statement st = parse_cwb_sort_cmd(ts, trace);
         if (!ts.eof() && ts.peek().kind != CwbTok::END && ts.peek().kind != CwbTok::SEMI)
             throw std::runtime_error("Unexpected tokens after CWB sort command");
+        return st;
+    }
+
+    if (ts.peek().kind == CwbTok::CAT_SYM) {
+        Statement st = parse_cwb_cat_cmd(ts, trace);
+        if (!ts.eof() && ts.peek().kind != CwbTok::END && ts.peek().kind != CwbTok::SEMI)
+            throw std::runtime_error("Unexpected tokens after CWB cat command (redirection is not supported)");
         return st;
     }
 

@@ -244,6 +244,38 @@ struct ServerApi::Deadline {
     bool fired = false;
 };
 
+// A request with "request_id" registers its progress block while it runs; POST /cancel
+// {"request": id} sets its cancel flag (as a deadline does) and marks it cancelled by the client,
+// so the answer says "cancelled" (499) instead of "timed out" (408). No id: nothing registered.
+struct ServerApi::RunningRequest {
+    ServerApi* api = nullptr;
+    std::string id;
+    ExecProgress* prog = nullptr;
+    std::atomic<bool> by_client{false};
+    bool registered = false;   // false with an id: that id is already running
+    RunningRequest(ServerApi* a, std::string rid, ExecProgress* p) : api(a), id(std::move(rid)), prog(p) {
+        if (id.empty()) return;
+        std::lock_guard<std::mutex> lock(api->running_mu_);
+        registered = api->running_.emplace(id, this).second;
+    }
+    ~RunningRequest() {
+        if (!registered) return;
+        std::lock_guard<std::mutex> lock(api->running_mu_);
+        api->running_.erase(id);
+    }
+    RunningRequest(const RunningRequest&) = delete;
+    RunningRequest& operator=(const RunningRequest&) = delete;
+};
+
+namespace {
+ServerResponse request_cancelled(const std::string& id) {
+    return json_error(499, "request cancelled", "\"cancelled\":true,\"request_id\":" + jstr(id));
+}
+ServerResponse request_id_busy(const std::string& id) {
+    return json_error(409, "a request with this request_id is running: " + id, "\"request_id\":" + jstr(id));
+}
+}  // namespace
+
 namespace {
 
 /// Size the process pool (first explicit value wins) and resolve
@@ -616,7 +648,8 @@ ServerResponse ServerApi::context(const std::map<std::string, std::string>& para
 }
 
 // POST /run — run a full CQL program (queries + commands), session-aware.
-// Body: {"cql": "...", "limit": 20, "offset": 0, "session_id": …, "timeout_ms": …}.
+// Body: {"cql": "...", "limit": 20, "offset": 0, "session_id": …, "timeout_ms": …};
+// "sentence" / "fragment" as on /query, for the hit pages the program returns.
 // Without "session_id" the program runs in the one shared session (requests one
 // at a time); with it, in that client session (P6.1: its named sets and Last).
 ServerResponse ServerApi::run(const std::string& body) {
@@ -630,6 +663,9 @@ ServerResponse ServerApi::run(const std::string& body) {
     opts.max_total  = json_extract_num(body, "max_total", 0);
     opts.context    = static_cast<int>(json_extract_num(body, "context", 5));
     opts.total      = json_extract_bool(body, "total", false);
+    // the hit pages the program returns (a query, `sort`, `cat`), as /query
+    opts.sentence   = json_extract_bool(body, "sentence", false);
+    opts.fragment   = json_extract_bool(body, "fragment", false);
     opts.group_limit = json_extract_num(body, "group_limit", 1000);
     opts.child_limit = json_extract_num(body, "child_limit", 20);
     opts.strict_quoted_strings = json_extract_bool(body, "strict_quoted_strings", false);
@@ -648,6 +684,9 @@ ServerResponse ServerApi::run(const std::string& body) {
     if (auto denied = check_denied(cql, opts.strict_quoted_strings, rl, opts.dialect)) return *denied;
 
     ExecProgress prog;
+    RunningRequest running(this, json_extract_str(body, "request_id"), &prog);
+    if (!running.id.empty() && !running.registered) return request_id_busy(running.id);
+    if (running.registered) opts.progress = &prog;
     Deadline deadline;
     struct Disarm {
         ServerApi* api; Deadline* d;
@@ -664,6 +703,7 @@ ServerResponse ServerApi::run(const std::string& body) {
         try {
             return json_ok(run_program_json(corpus_, ps, cql, opts));
         } catch (const QueryCancelled&) {
+            if (running.by_client) return request_cancelled(running.id);
             return json_error(408, "program timed out after " + std::to_string(timeout_ms) + " ms",
                               "\"timed_out\":true");
         } catch (const HitSetTooLarge& e) {
@@ -773,6 +813,9 @@ ServerResponse ServerApi::query(const std::string& body) {
     // the page / synchronous count of this request (not the background jobs)
     ExecProgress prog;
     ExecProgress* progress = nullptr;
+    RunningRequest running(this, json_extract_str(body, "request_id"), &prog);
+    if (!running.id.empty() && !running.registered) return request_id_busy(running.id);
+    if (running.registered) progress = &prog;
     Deadline deadline;
     struct Disarm {
         ServerApi* api; Deadline* d;
@@ -789,7 +832,9 @@ ServerResponse ServerApi::query(const std::string& body) {
         lease.lock();
         lease.ps().set_max_hits(rl.lim.max_hits ? rl.lim.max_hits : cfg_.sessions.max_hits);
         lease.ps().set_result_cache(cache_.max_bytes() ? &cache_ : nullptr);
-        return query_from(opts, total_async, timeout_ms, progress, from, lease, rl.tier, job_limit);
+        ServerResponse fr = query_from(opts, total_async, timeout_ms, progress, from, lease, rl.tier, job_limit);
+        if (fr.status == 408 && running.by_client) return request_cancelled(running.id);
+        return fr;
     }
 
     // a query answering as pairs (`a:[…] with b:[…] :: …`, `=:X` over an alignment layer) has an exact
@@ -930,6 +975,7 @@ ServerResponse ServerApi::query(const std::string& body) {
         }
         return ok(ms, elapsed, job_fields(st));
     } catch (const QueryCancelled&) {
+        if (running.by_client) return request_cancelled(running.id);
         return json_error(408, "query timed out after " + std::to_string(timeout_ms) + " ms",
                           "\"timed_out\":true");
     } catch (const std::exception& e) {
@@ -1067,6 +1113,23 @@ ServerResponse ServerApi::status(const std::map<std::string, std::string>& param
 
 // POST /cancel?job=<id> (or body {"job": "<id>"}) — stop a queued / running count.
 ServerResponse ServerApi::cancel(const std::map<std::string, std::string>& params, const std::string& body) {
+    // a running /query or /run sent with "request_id"
+    const std::string* rp = param(params, "request");
+    const std::string rid = rp ? *rp : json_extract_str(body, "request");
+    if (!rid.empty()) {
+        bool found = false;
+        {
+            std::lock_guard<std::mutex> lock(running_mu_);
+            auto it = running_.find(rid);
+            if (it != running_.end()) {
+                it->second->by_client = true;
+                it->second->prog->cancel.store(true);
+                found = true;
+            }
+        }
+        return json_ok(std::string("{\"ok\":true,\"request\":") + jstr(rid) + ",\"cancelled\":"
+                       + (found ? "true" : "false") + "}\n");
+    }
     const std::string* idp = param(params, "job");
     std::string id = idp ? *idp : json_extract_str(body, "job");
     const bool ok = jobs_.cancel(id);

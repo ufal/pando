@@ -24,7 +24,7 @@ static bool is_region_attr_key_token(std::string_view s) {
     return true;
 }
 
-// Structural region values for generic # key = val (skip UD translation sentences).
+// An id from a comment (# sent_id = …, # parallel_id = …): one word, no spaces.
 static bool is_simple_region_value(std::string_view s) {
     if (s.empty()) return false;
     for (unsigned char c : s) {
@@ -59,6 +59,11 @@ static bool is_ud_sentence_translation_key(const std::string& key) {
     };
     if (not_lang.count(suf)) return false;
     return true;
+}
+
+// `# text_KEY` that may belong to the sentence: any text_ key but the text region's own (text_id, …).
+static bool is_sentence_text_key(const std::string& key) {
+    return key.size() > 5 && key.compare(0, 5, "text_") == 0 && !is_reserved_text_structural_key(key);
 }
 
 // Every text region must supply the same named attrs (indexer requires equal-length vectors).
@@ -216,6 +221,12 @@ void CorpusBuilder::read_conllu(const std::string& path) {
     // often has no blank before the first sentence). UD # text_en = … is translation here, not VRT text_en.
     bool pending_sentence_comments = false;
     bool seen_any_token_line = false;
+    // The comment block before the current sentence: did `# newregion text` open the text there, and
+    // has a line of the sentence itself (`# sent_id`, `# text =`) come yet? A `# text_KEY` line is the
+    // text's metadata only right after its `# newregion text`, before the sentence's own lines; else
+    // it is the sentence's (`# text_ortho = …`, `# text_orig = …` in UD).
+    bool block_opened_text = false;
+    bool block_has_sentence_line = false;
 
     while (std::getline(in, line)) {
         if (line.empty()) {
@@ -226,6 +237,7 @@ void CorpusBuilder::read_conllu(const std::string& path) {
                 in_sentence_ = false;
             }
             pending_sentence_comments = true;
+            block_opened_text = block_has_sentence_line = false;
             continue;
         }
         if (line[0] == '#') {
@@ -263,6 +275,7 @@ void CorpusBuilder::read_conllu(const std::string& path) {
                     text_region_start_ = builder_.corpus_size();
                     text_region_attrs_.clear();
                     has_text_region_ = true;
+                    block_opened_text = true;
                 } else if (!rname.empty()) {
                     CorpusPos end = builder_.corpus_size() > 0 ? builder_.corpus_size() - 1 : 0;
                     close_last_region_of_type(conllu_region_stack_, rname, end, builder_);
@@ -339,19 +352,26 @@ void CorpusBuilder::read_conllu(const std::string& path) {
                             pending_sent_tuid_ = val;
                         }
                     } else if (key == "sent_id") {
+                        block_has_sentence_line = true;
                         if (is_simple_region_value(val))
                             upsert_region_attr(sent_region_attrs_, "sent_id", val);
                     } else if (key != "tuid") {
                         if (key == "text") {
                             // # text = primary surface (sentence); not a structural attribute
+                            block_has_sentence_line = true;
                         } else if (sentence_comment_context
-                                   && is_ud_sentence_translation_key(key)) {
-                            // UD: translation line for this sentence — not VRT text_<lang> = region attr.
+                                   && (is_ud_sentence_translation_key(key)
+                                       || (is_sentence_text_key(key)
+                                           && (!block_opened_text || block_has_sentence_line)))) {
+                            // UD: a translation (# text_en = …) or another version of the sentence
+                            // (# text_ortho = …) — the sentence's, not the text region's.
                             // Does not require # newregion text (bare UD corpora).
-                            upsert_region_attr(sent_region_attrs_, key, val);
-                        } else if (!is_simple_region_value(val)) {
-                            // Skip non-token structural values (long prose) except handled above.
+                            if (!val.empty()) upsert_region_attr(sent_region_attrs_, key, val);
+                        } else if (val.empty()) {
+                            // no value: no attribute
                         } else {
+                            // values with spaces too (an author, a title): UD translations
+                            // (# text_en = …) are taken apart above, so nothing here is prose
                             size_t us = key.find('_');
                             if (us != std::string::npos && us > 0 && us + 1 < key.size()) {
                                 std::string rname = key.substr(0, us);
@@ -459,6 +479,7 @@ void CorpusBuilder::read_conllu(const std::string& path) {
             in_sentence_ = true;
             pending_sentence_comments = false;
             seen_any_token_line = true;
+            block_opened_text = block_has_sentence_line = false;
 
             // MWT contraction region: after the last sub-token, emit "contr" region.
             if (mwt_remaining_ > 0) {

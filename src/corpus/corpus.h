@@ -54,6 +54,8 @@ struct CorpusInfo {
     // A new id for every build and every --upgrade (IndexPublish): hosts compare
     // it to notice that the corpus changed. Empty for older indexes.
     std::string index_id;
+    /// corpus.info `layout_version=` (index_layout.h); 1 when the line is missing
+    int layout_version = 1;
 };
 
 // Phase A: in-memory representation of one record from `groups/<struct>.jsonl`.

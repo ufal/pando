@@ -131,6 +131,37 @@ int main(int argc, char** argv) {
         pando_server_close(nullptr);
     }
 
+    // an index with a layout this build does not read is refused with what to do (EF-6)
+    {
+        const fs::path copy = tmp / "layout";
+        fs::remove_all(copy);
+        fs::create_directories(tmp);
+        // with modification times (fs::copy gives new ones, and derived files would look stale)
+        const std::string cp = "cp -Rp \"" + corpus_dir + "\" \"" + copy.string() + "\"";
+        CHECK(std::system(cp.c_str()) == 0);
+        auto open_with = [&](const std::string& layout) {
+            const fs::path info = copy / "corpus.info";
+            const auto mtime = fs::last_write_time(info);   // kept: derived files are checked against it
+            std::FILE* f = std::fopen(info.string().c_str(), "a");
+            std::fprintf(f, "layout_version=%s\n", layout.c_str());   // the last line wins
+            std::fclose(f);
+            fs::last_write_time(info, mtime);
+            char* e = nullptr;
+            pando_server_t* h = pando_server_open(copy.string().c_str(), nullptr, &e);
+            std::string msg = e ? e : "";
+            pando_server_free(e);
+            pando_server_close(h);
+            return std::make_pair(h != nullptr, msg);
+        };
+        auto [newer_ok, newer] = open_with("99");
+        CHECK(!newer_ok && has(newer, "layout version 99") && has(newer, "use a newer pando"));
+        auto [older_ok, older] = open_with("0");
+        CHECK(!older_ok && has(older, "reindex needed"));
+        auto [cur_ok, cur] = open_with("1");
+        CHECK(cur_ok && cur.empty());
+        fs::remove_all(copy);
+    }
+
     char* err = nullptr;
     pando_server_t* s = pando_server_open(corpus_dir.c_str(), "{\"total_workers\": 2, \"embedded_in\": \"server_api_test\"}", &err);
     if (!s) {
@@ -146,7 +177,8 @@ int main(int argc, char** argv) {
         r = call(s, "GET", "/version");
         CHECK(r.status == 200 && has(r.body, pando_server_build_string()));
         r = call(s, "GET", "/info");
-        CHECK(r.status == 200 && has(r.body, "\"server\": {") && has(r.body, "\"index\""));
+        CHECK(r.status == 200 && has(r.body, "\"server\": {") && has(r.body, "\"index\"")
+              && has(r.body, "\"layout_version\": 1"));
         r = call(s, "GET", "/values/upos", "limit=3");
         CHECK(r.status == 200 && has(r.body, "NOUN"));
         r = call(s, "GET", "/values/nosuch");
@@ -193,6 +225,129 @@ int main(int argc, char** argv) {
         r = call(s, "POST", "/query", nullptr, "{\"query\": \"[]\", \"limit\": 1, \"total\": true, \"timeout_ms\": 60000}");
         CHECK(r.status == 200);
         std::cerr << "  PASS routes\n";
+    }
+
+    // ── /run pages: sentence, fragment (EF-2); cat (EF-3) ────────────────
+    {
+        // the match_start of every hit on a page, in order
+        auto starts = [](const std::string& body) {
+            std::vector<long> v;
+            static const std::regex re("\"match_start\": ?([0-9]+)");
+            for (auto it = std::sregex_iterator(body.begin(), body.end(), re); it != std::sregex_iterator(); ++it)
+                v.push_back(std::stol((*it)[1]));
+            return v;
+        };
+        auto lefts = [](const std::string& body) {
+            std::vector<std::string> v;
+            static const std::regex re("\"left\": ?\"((?:[^\"\\\\]|\\\\.)*)\"");
+            for (auto it = std::sregex_iterator(body.begin(), body.end(), re); it != std::sregex_iterator(); ++it)
+                v.push_back((*it)[1]);
+            return v;
+        };
+        const std::string nouns = "[upos=\\\"NOUN\\\"]";
+
+        // a sorted page without the options: as before (no fragment, the token window)
+        Resp plain = call(s, "POST", "/run", nullptr,
+                          "{\"cql\": \"A = " + nouns + "; sort A by lemma;\", \"limit\": 3, \"context\": 1}");
+        CHECK(plain.status == 200 && !has(plain.body, "\"fragment\"") && starts(plain.body).size() == 3);
+        // with them: the same hits, the sentence as context, each with its fragment
+        Resp rich = call(s, "POST", "/run", nullptr,
+                         "{\"cql\": \"A = " + nouns + "; sort A by lemma;\", \"limit\": 3, \"context\": 1, "
+                         "\"sentence\": true, \"fragment\": true}");
+        CHECK(rich.status == 200 && has(rich.body, "\"fragment\"") && has(rich.body, "\"highlight_map\""));
+        CHECK(starts(rich.body) == starts(plain.body));
+        {
+            const auto lp = lefts(plain.body), lr = lefts(rich.body);
+            CHECK(lp.size() == 3 && lr.size() == 3);
+            size_t longer = 0;
+            for (size_t i = 0; i < lp.size() && i < lr.size(); ++i) longer += lr[i].size() > lp[i].size();
+            CHECK(longer > 0);   // one-token windows grew to their sentences
+        }
+        // a plain query page of a program carries them too
+        Resp qpage = call(s, "POST", "/run", nullptr,
+                          "{\"cql\": \"" + nouns + "\", \"limit\": 2, \"fragment\": true}");
+        CHECK(qpage.status == 200 && has(qpage.body, "\"fragment\""));
+
+        // cat: the set in corpus order = the query's own page
+        Resp q = call(s, "POST", "/query", nullptr, "{\"query\": \"" + nouns + "\", \"limit\": 4}");
+        Resp c = call(s, "POST", "/run", nullptr, "{\"cql\": \"B = " + nouns + "; cat B\", \"limit\": 4}");
+        CHECK(c.status == 200 && !has(c.body, "not yet implemented") && has(c.body, "\"operation\": \"query\""));
+        CHECK(starts(c.body).size() == 4 && starts(c.body) == starts(q.body));
+        // cat after sort: the sorted order, paged by offset / limit
+        Resp sorted = call(s, "POST", "/run", nullptr,
+                           "{\"cql\": \"C = " + nouns + "; sort C by lemma;\", \"limit\": 3, \"offset\": 2}");
+        Resp cs = call(s, "POST", "/run", nullptr,
+                       "{\"cql\": \"C = " + nouns + "; sort C by lemma; cat C\", \"limit\": 3, \"offset\": 2}");
+        CHECK(starts(cs.body).size() == 3 && starts(cs.body) == starts(sorted.body));
+        // the CQP window `cat C 2 4` = hits 2..4, whatever the limit
+        Resp cw = call(s, "POST", "/run", nullptr,
+                       "{\"cql\": \"C = " + nouns + "; sort C by lemma; cat C 2 4\", \"limit\": 20}");
+        CHECK(starts(cw.body) == starts(sorted.body));
+        CHECK(has(cw.body, "\"start\": 2"));
+        // `cat` alone: Last
+        Resp cl = call(s, "POST", "/run", nullptr, "{\"cql\": \"" + nouns + "; cat\", \"limit\": 4}");
+        CHECK(starts(cl.body) == starts(q.body));
+        // with sentence / fragment
+        Resp cf = call(s, "POST", "/run", nullptr,
+                       "{\"cql\": \"C = " + nouns + "; sort C by lemma; cat C 2 4\", \"fragment\": true}");
+        CHECK(has(cf.body, "\"fragment\"") && starts(cf.body) == starts(sorted.body));
+        // a window that ends before it starts is an error
+        Resp bad = call(s, "POST", "/run", nullptr, "{\"cql\": \"C = " + nouns + "; cat C 4 2\"}");
+        CHECK(bad.status == 400 && has(bad.body, "ends before it starts"));
+        // the same as /query "from" in a session
+        Resp sess = call(s, "POST", "/session", nullptr, "{}");
+        std::smatch m;
+        const std::string sb = sess.body;
+        CHECK(std::regex_search(sb, m, std::regex("\"session_id\": ?\"([^\"]+)\"")));
+        if (m.size() > 1) {
+            const std::string sid = m[1];
+            Resp r1 = call(s, "POST", "/run", nullptr,
+                           "{\"session_id\": \"" + sid + "\", \"cql\": \"D = " + nouns + "; sort D by lemma; cat D 2 4\"}");
+            Resp r2 = call(s, "POST", "/query", nullptr,
+                           "{\"session_id\": \"" + sid + "\", \"from\": \"D\", \"offset\": 2, \"limit\": 3}");
+            CHECK(r1.status == 200 && r2.status == 200 && starts(r1.body) == starts(r2.body)
+                  && starts(r1.body) == starts(sorted.body));
+            call(s, "POST", "/session/close", nullptr, "{\"session_id\": \"" + sid + "\"}");
+        }
+        std::cerr << "  PASS /run pages (sentence, fragment, cat)\n";
+    }
+
+    // ── cancelling a running request: "request_id" + POST /cancel {"request"} (EF-13) ──
+    {
+        Resp none = call(s, "POST", "/cancel", nullptr, "{\"request\": \"no-such-request\"}");
+        CHECK(none.status == 200 && has(none.body, "\"cancelled\":false"));
+        // ~30 s to count on the sample corpus: only a cancel ends it in time
+        const std::string slow = "\"query\": \"[]{1,60} []{0,60} []{0,60}\", \"limit\": 1, \"total\": true";
+        for (const char* route : {"/query", "/run"}) {
+            const bool is_run = std::string(route) == "/run";
+            const std::string body = is_run
+                ? "{\"cql\": \"[]{1,60} []{0,60} []{0,60}; size\", \"request_id\": \"cx-run\"}"
+                : "{" + slow + ", \"request_id\": \"cx-query\"}";
+            const char* rid = is_run ? "cx-run" : "cx-query";
+            Resp slow_r;
+            const auto t0 = std::chrono::steady_clock::now();
+            std::thread t([&] { slow_r = call(s, "POST", route, nullptr, body); });
+            bool cancelled = false, busy_checked = false;
+            for (int i = 0; i < 200 && !cancelled; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                if (!busy_checked) {   // the same id while it runs: refused
+                    Resp dup = call(s, "POST", route, nullptr, body);
+                    if (dup.status == 409) busy_checked = true;
+                }
+                Resp c = call(s, "POST", "/cancel", ("request=" + std::string(rid)).c_str());
+                cancelled = has(c.body, "\"cancelled\":true");
+            }
+            t.join();
+            const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            CHECK(cancelled && busy_checked);
+            CHECK(slow_r.status == 499 && has(slow_r.body, "\"cancelled\":true") && has(slow_r.body, rid));
+            CHECK(secs < 15);
+            // the id is free again, and the handle answers normally
+            Resp after = call(s, "POST", "/query", nullptr,
+                              "{\"query\": \"[upos=\\\"NOUN\\\"]\", \"limit\": 1, \"request_id\": \"" + std::string(rid) + "\"}");
+            CHECK(after.status == 200);
+        }
+        std::cerr << "  PASS cancel by request_id\n";
     }
 
     // ── async job, busy(), idle ──────────────────────────────────────────

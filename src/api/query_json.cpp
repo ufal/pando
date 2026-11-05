@@ -786,7 +786,8 @@ std::string index_status_json_fields(const Corpus& corpus) {
     auto opt_str = [](const std::string& v) { return v.empty() ? std::string("null") : jstr(v); };
     const CorpusInfo& ci = corpus.info();
     out << "\"indexed_with\": " << opt_str(ci.indexed_with)
-        << ", \"upgraded_with\": " << opt_str(ci.upgraded_with);
+        << ", \"upgraded_with\": " << opt_str(ci.upgraded_with)
+        << ", \"layout_version\": " << ci.layout_version;
     std::error_code ec;
     auto exists = [&](const std::string& p) { return fs::exists(p, ec); };
     out << ", " << index_identity_json_fields(corpus);

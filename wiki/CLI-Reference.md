@@ -72,6 +72,23 @@ When stdin is a TTY and no query is given, `pando` runs an interactive loop (`se
 
 Builds or updates a corpus directory from JSONL (or streaming integration). See [Sample corpora](Sample-Corpora.md) and [Index and corpus layout](Index-and-Corpus-Layout.md).
 
+**Metadata in CoNLL-U comments.** Regions and their attributes come from comment lines:
+
+| comment | gives |
+| --- | --- |
+| `# newdoc id = d1` | a `doc` region (`doc_id`) up to the next `# newdoc` |
+| `# meta::KEY = value` | an attribute of that document: `doc_KEY` (CorefUD, GUM) |
+| `# newpar id = p1` | a `par` region (`par_id`; `_` without an id) |
+| `# newregion text`, `# newregion p`, … | opens a region of that name |
+| `# text_KEY = value` (`# p_KEY`, …) | an attribute of the open region of that name: `text_KEY`; for `text`, only right after its `# newregion text` and before the sentence's own lines (`# sent_id`, `# text =`) |
+| `# sent_id = …`, `# s_KEY = value` | attributes of the sentence (`s_sent_id`, `s_KEY`) |
+| `# text_en = …`, `# text_ortho = …`, … among a sentence's own comments | that sentence's (`s_text_en`, `s_text_ortho`), not a `text` attribute; a translation (`text_` + a 2–3 letter code) always |
+| `# text = …` | the sentence's text (not stored as an attribute) |
+
+Values may contain spaces (`# text_author = Jan Novák`); empty values give no attribute. A
+`# KEY_attr` line for a region that is not open (no `# newdoc` / `# newregion KEY` before it) is
+ignored, as are comments without `=` (or `:`).
+
 `pando-index --upgrade <corpus_dir>` adds the sidecar indexes the current build
 knows (fold, bitmap, dependency edge postings, …) to an existing corpus. Options
 for `--upgrade`:
@@ -229,9 +246,10 @@ default 2^20 tokens) override, for tests. `--timing` reports the ranges as
 | `POST /query` | One query: `query`, `limit`, `offset`, `total`, `max_total`, `context`, `sentence`, `attrs`, `fragment`, `debug`, `strict_quoted_strings` (see "Token fragments" below) |
 | `GET /status?job=ID` | State of a background total (404 once it has expired: re-send the `/query`) |
 | `POST /cancel?job=ID` | Stop a queued / running count (send a body, even `{}`, or `Content-Length: 0`) |
+| `POST /cancel?request=ID` | Stop a running `/query` or `/run` sent with `"request_id": "ID"` (an id of the client's choosing, unique while it runs: a second request with the same id gets 409). It answers 499 with `"cancelled": true`; `"cancelled": false` here when no such request runs |
 | `GET /jobs` | All cached results and running counts |
 | `GET /version` | The pando build answering, its `features` and the served corpus (also in `/health`) |
-| `POST /run` | A full CQL program (named queries, `count`, `coll`, …); `session_id`, `timeout_ms` |
+| `POST /run` | A full CQL program (named queries, `count`, `coll`, …); `session_id`, `timeout_ms`; `sentence` and `fragment` as for `/query`, for the hit pages the program returns (a query, `sort`, `cat`) |
 | `POST /session` | Create a client session (`{"session_id": optional, "ttl_s": optional}`; an existing id is reused: `created: false`) |
 | `GET /session?session_id=` | The session's hit sets (query, materialised, hits, total, bytes, sort steps, aliases) |
 | `POST /session/close` | Close a session (`session_id` in the body or the query string) |
@@ -289,6 +307,7 @@ POST /query {"session_id": "s1f…", "name": "Q1", "query": "[upos=\"ADJ\"] [upo
              "limit": 20, "total": "async"}      → page 1 (+ job); stored as Q1 (and Last)
 POST /run   {"session_id": "s1f…", "cql": "sort Q1 by lemma", "limit": 20}   → page 1, sorted
 POST /query {"session_id": "s1f…", "from": "Q1", "offset": 5000, "limit": 20} → a page of the sorted set
+POST /run   {"session_id": "s1f…", "cql": "cat Q1 5000 5019"}               → the same page
 POST /run   {"session_id": "s1f…", "cql": "count Q1 by lemma"}              → counts (no re-run of the page)
 ```
 
@@ -414,6 +433,15 @@ this one was opened), what the directory holds (`disk_bytes`,
 `dep_pairs` (`ok`, `stale` = older than its source and ignored, `missing`),
 `dep_head_rel`, `fold_indexes`. A `stale` or `missing` entry means: run
 `pando-index --upgrade <corpus_dir>` with the current build.
+
+**Index layout version.** `corpus.info` records `layout_version=` (1 today; an index
+without the line is layout 1), reported as `result.index.layout_version`. It changes only
+when a core file (lexicons, `.dat`, `.rev`, regions, dependencies) changes in a way an
+older pando would misread; derived files are covered by the per-file status above and
+`--upgrade`. Opening an index whose layout this build does not read fails with a message
+saying what to do: "use a newer pando" (built by a newer one) or "reindex needed" (too old
+for this build) — from `pando_open` / `pando_server_open` as their error, from `pando` and
+`pando-server` at start.
 
 ### Totals: `"total": false | true | "async"`
 

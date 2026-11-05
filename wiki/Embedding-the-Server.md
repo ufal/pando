@@ -13,6 +13,15 @@ which keep corpora open, route requests to them and add their own protocols on t
 | C ABI | `src/api/server_capi.h` — `pando_server_*` | Rust (`libloading`), PHP FFI, Python `ctypes`, … |
 | HTTP | `src/cli/server_main.cpp` — `pando-server` | a thin httplib shell over `ServerApi` |
 
+**Which C API.** `pando_ffi.h` (`pando_query`, `pando_run`, `pando_info`, `pando_cancel`) is
+the minimal one: one query or program per call on a handle, with the page options of `/query`
+(`limit`, `offset`, `context`, `sentence`, `fragment`, `attrs`, `sample` / `shuffle` / `seed`,
+`aligned`, …) and named sets that live on the handle. `server_capi.h` is everything
+`pando-server` does: background totals (`"total": "async"`), client sessions and pages of stored
+or sorted sets (`/query` `"from"`), result caching, tiers, many threads on one handle and stopping
+one request among several (`"request_id"`). An application with a concordance UI usually wants
+`server_capi.h`.
+
 ## Routes
 
 These are the same as for `pando-server`: `GET /health`, `/version`, `/info`, `/values/<attr>`,
@@ -23,6 +32,13 @@ JSON `{"ok": false, "error": …}`. `/query` and `/run` accept `"timeout_ms"`. W
 answer is 408 `{"ok": false, "timed_out": true}`. The time limit covers the page and a
 synchronous count (for `/run`, the whole program, including the wait for its session), not
 background totals.
+
+**Stopping a request from the UI.** Send `/query` or `/run` with `"request_id": "<your id>"` and,
+from another thread, `pando_server_request(s, "POST", "/cancel", "request=<your id>", NULL, 0, NULL)`:
+the running request returns 499 `{"ok": false, "error": "request cancelled", "cancelled": true}`
+(408 stays "timed out"); a second request with an id that is still running gets 409. A background
+count is stopped with `/cancel?job=<id>`. With the plain `pando_ffi.h` API, `pando_cancel(h)` stops
+the call running on handle `h`.
 
 ## C ABI
 

@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.16)
 # toolchain targets the build host's own macOS version, which older Macs can't run).
 # Override with -DCMAKE_OSX_DEPLOYMENT_TARGET=…
 set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
-project(pando VERSION 0.4.1 LANGUAGES C CXX)
+project(pando VERSION 0.4.2 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -322,6 +322,10 @@ if(BUILD_TESTING)
     add_executable(group_counts_test src/api/group_counts_test.cpp)
     target_link_libraries(group_counts_test PRIVATE pando_api)
     add_test(NAME group_counts COMMAND group_counts_test)
+    add_executable(ffi_test src/api/ffi_test.cpp src/api/pando_ffi.cpp)
+    target_link_libraries(ffi_test PRIVATE pando_api)
+    add_test(NAME ffi COMMAND ffi_test $<TARGET_FILE:pando-index>
+             ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu)
     add_executable(server_api_test src/api/server_api_test.cpp)
     target_link_libraries(server_api_test PRIVATE pando_api)
     add_test(NAME server_api COMMAND server_api_test $<TARGET_FILE:pando-index>
@@ -384,6 +388,9 @@ if(BUILD_TESTING)
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
     add_test(NAME conllu_jsonl_parity
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/conllu_jsonl_parity_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
+    add_test(NAME conllu_meta_values
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/conllu_meta_values_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
     add_test(NAME class_join
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/class_join_test.py

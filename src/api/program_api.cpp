@@ -1911,6 +1911,7 @@ static QueryOptions query_options_of(const ProgramOptions& opts) {
     QueryOptions qopts;
     qopts.limit = opts.limit; qopts.offset = opts.offset; qopts.max_total = opts.max_total;
     qopts.context = opts.context; qopts.total = opts.total; qopts.attrs = opts.attrs;
+    qopts.sentence = opts.sentence; qopts.fragment = opts.fragment;
     return qopts;
 }
 
@@ -2025,7 +2026,7 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                          opts.coll_max_items, opts.coll_stoplist, opts.max_count_hits})
             o += std::to_string(v) + ",";
         o += std::to_string(opts.context) + "," + std::to_string(opts.coll_left) + "," + std::to_string(opts.coll_right)
-             + (opts.total ? ",t" : ",-");
+             + (opts.total ? ",t" : ",-") + (opts.sentence ? ",s" : ",-") + (opts.fragment ? ",f" : ",-");
         for (const auto& m : opts.coll_measures) o += "," + m;
         o += "|";
         for (const auto& a : opts.attrs) o += a + ",";
@@ -2294,7 +2295,9 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                 return *pairs;
             };
             auto counted_nm = [&]() -> const NameIndexMap& { return pairs ? pairs_nm : nm_to_use; };
-            if (opts.max_count_hits && !use_immediate && stmt.command.type != CommandType::SIZE) {
+            // (`size` and `cat` need no more hits than they show: no bound)
+            if (opts.max_count_hits && !use_immediate && stmt.command.type != CommandType::SIZE
+                && stmt.command.type != CommandType::CAT) {
                 check_count_limit(corpus, *hs, set_name, opts.max_count_hits, threads, opts.progress);
                 for (const std::string& fqn : stmt.command.freq_query_names)
                     if (HitSetPtr f = S.find(fqn))
@@ -2341,6 +2344,15 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                         emit_freq_json(out, corpus, cm, stmt.command, opts, counted_nm(), source_query_name);
                     }
                     break;
+                case CommandType::CAT: {
+                    // a page of the set in its current order (sorted sets: the sorted order), as
+                    // /query "from" gives it: one behaviour, two ways in
+                    QueryOptions qo = query_options_of(opts);
+                    qo.threads = threads;
+                    apply_cat_window(stmt.command, qo.offset, qo.limit);
+                    out << ps.page_json(corpus, set_name, qo, opts.progress);
+                    break;
+                }
                 case CommandType::SIZE: {
                     size_t n = 0;
                     if (use_immediate && immediate->aggregate_buckets) n = immediate->aggregate_buckets->total_hits;

@@ -85,6 +85,16 @@ pando::QueryOptions parse_query_opts(const char* opts_json) {
     v = json_get(j, "context");      if (!v.empty()) try { opts.context  = std::stoi(v); }  catch (...) {}
     v = json_get(j, "total");        if (v == "true" || v == "1") opts.total = true;
     v = json_get(j, "debug");        if (v == "true" || v == "1") opts.debug = true;
+    v = json_get(j, "sentence");     if (v == "true" || v == "1") opts.sentence = true;
+    v = json_get(j, "fragment");     if (v == "true" || v == "1") opts.fragment = true;
+    // a random sample / shuffled order (as pando-server's /query; the same seed, the same hits)
+    v = json_get(j, "sample");       if (!v.empty()) try { opts.sample = std::stoull(v); } catch (...) {}
+    v = json_get(j, "shuffle");      if (v == "true" || v == "1") opts.shuffle = true;
+    v = json_get(j, "seed");         if (!v.empty()) try { opts.seed = static_cast<uint32_t>(std::stoul(v)); } catch (...) {}
+    // the sentences aligned with each hit (an equivalence layer, e.g. "s_tuid")
+    opts.aligned = json_get(j, "aligned");
+    opts.aligned_where = json_get(j, "aligned_where");
+    v = json_get(j, "aligned_max");  if (!v.empty()) try { opts.aligned_max = std::stoull(v); } catch (...) {}
     v = json_get(j, "strict_quoted_strings");
     if (v == "true" || v == "1")
         opts.strict_quoted_strings = true;
@@ -103,6 +113,8 @@ pando::ProgramOptions parse_program_opts(const char* opts_json) {
     v = json_get(j, "max_total");       if (!v.empty()) try { opts.max_total = std::stoull(v); } catch (...) {}
     v = json_get(j, "context");         if (!v.empty()) try { opts.context  = std::stoi(v); }  catch (...) {}
     v = json_get(j, "total");           if (v == "true" || v == "1") opts.total = true;
+    v = json_get(j, "sentence");        if (v == "true" || v == "1") opts.sentence = true;
+    v = json_get(j, "fragment");        if (v == "true" || v == "1") opts.fragment = true;
     v = json_get(j, "strict_quoted_strings");
     if (v == "true" || v == "1")
         opts.strict_quoted_strings = true;

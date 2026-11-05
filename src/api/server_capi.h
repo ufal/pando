@@ -15,6 +15,9 @@
  *   ...
  *   pando_server_close(s);
  *
+ * A /query or /run sent with "request_id": "<id>" can be stopped from another thread with
+ * pando_server_request(s, "POST", "/cancel", "request=<id>", …): it answers 499, "cancelled": true.
+ *
  * Thread safety: one handle may be used from any number of threads at once
  * (queries run concurrently; /run is serialised inside). Only open and close
  * must not race with other calls on the same handle.

@@ -1,4 +1,6 @@
 #include "corpus/corpus.h"
+#include "corpus/index_layout.h"
+#include "core/build_info.h"
 #include <algorithm>
 #include <cstdlib>
 #include <list>
@@ -85,6 +87,8 @@ static CorpusInfo read_info(const std::string& path) {
                 std::cerr << "Warning: " << path << ": " << err << "\n";
         } else if (key == "indexed_with") {
             info.indexed_with = val;
+        } else if (key == "layout_version") {
+            try { info.layout_version = std::stoi(val); } catch (...) { info.layout_version = -1; }
         } else if (key == "upgraded_with") {
             info.upgraded_with = val;
         } else if (key == "index_id") {
@@ -169,6 +173,19 @@ void Corpus::open(const std::string& dir_given, bool preload,
     }
     const std::string& dir = dir_;
     info_ = read_info(dir_ + "/corpus.info");
+    // an index this build cannot read: say so, instead of misreading it
+    if (info_.layout_version > kIndexLayoutVersion)
+        throw std::runtime_error(
+            "The index in " + dir_ + " has layout version " + std::to_string(info_.layout_version) +
+            (info_.indexed_with.empty() ? std::string() : " (built with pando " + info_.indexed_with + ")") +
+            "; this pando (" + build_string() + ") reads layout versions " + std::to_string(kIndexLayoutOldest) +
+            " to " + std::to_string(kIndexLayoutVersion) + ": use a newer pando");
+    if (info_.layout_version < kIndexLayoutOldest)
+        throw std::runtime_error(
+            "The index in " + dir_ + " has layout version " +
+            (info_.layout_version < 0 ? std::string("(unreadable)") : std::to_string(info_.layout_version)) +
+            ", which this pando (" + build_string() + ") no longer reads: rebuild it with pando-index "
+            "from its source (reindex needed)");
 
     std::unordered_set<std::string> pos_seen;
     for (const auto& name : info_.positional_attrs) pos_seen.insert(name);

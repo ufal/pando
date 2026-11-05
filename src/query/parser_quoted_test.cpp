@@ -99,6 +99,27 @@ int main() {
         auto r = Parser(R"(a:[upos="VERB"] :: a.text_lang = "en")", {}).parse();
         assert(r[0].query.global_region_filters.size() == 1);
     }
+    // EF-14: CQP forms pando-CQL does not have are refused with what to write instead
+    {
+        auto message = [](const char* q) -> std::string {
+            try { Parser(q, {}).parse(); } catch (const std::exception& e) { return e.what(); }
+            return {};
+        };
+        const std::string grp = message(R"(([upos="DET"] [upos="NOUN"])+)");
+        assert(grp.find("groups of tokens") != std::string::npos && grp.find("MANATEE") != std::string::npos);
+        const std::string grp2 = message(R"([upos="VERB"] ([upos="ADJ"] [upos="NOUN"]){1,2})");
+        assert(grp2.find("groups of tokens") != std::string::npos && grp2.find("MANATEE") != std::string::npos);
+        assert(message(R"([upos="ADJ"] [upos="NOUN"] | [upos="DET"])").find("MANATEE") != std::string::npos);
+        const std::string cont = message(R"(<s/> containing [upos="DET"])");
+        assert(cont.find("not a token pattern") != std::string::npos && cont.find("within s having") != std::string::npos);
+        // `cat` (EF-3): set name and CQP window
+        auto c = Parser("cat A 2 4", {}).parse();
+        assert(c[0].command.type == CommandType::CAT && c[0].command.query_name == "A");
+        assert(c[0].command.cat_from == 2 && c[0].command.cat_to == 4);
+        auto c1 = Parser("cat 5", {}).parse();
+        assert(c1[0].command.query_name.empty() && c1[0].command.cat_from == 5 && c1[0].command.cat_to == SIZE_MAX);
+        assert(message("cat A 4 2").find("ends before it starts") != std::string::npos);
+    }
     std::cerr << "PASS parser_quoted_test\n";
     return 0;
 }

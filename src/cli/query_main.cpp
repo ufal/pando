@@ -2449,6 +2449,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                 case CommandType::COLL:
                 case CommandType::DCOLL:
                 case CommandType::KEYNESS:
+                case CommandType::CAT:
                     return true;
                 default:
                     return false;  // e.g. SORT emits KWIC text, not JSON
@@ -3380,6 +3381,19 @@ static void run_query(const Corpus& corpus, const std::string& input,
                     sort_matches_by_key(corpus, ms_to_use->matches, *nm_to_use, cmd_to_run.fields,
                                         /*group_key_order=*/false);
                     if (should_emit_output) emit_hits_text(corpus, "(sorted)", *ms_to_use, opts, 0);
+                    break;
+
+                case CommandType::CAT:
+                    // a page of the set in its current order (after `sort`: the sorted order)
+                    if (should_emit_output) {
+                        Options page_opts = opts;
+                        apply_cat_window(cmd_to_run, page_opts.offset, page_opts.limit);
+                        const std::string label = cmd_to_run.query_name.empty() ? "Last" : cmd_to_run.query_name;
+                        if (opts.json)
+                            emit_json(corpus, label, *ms_to_use, page_opts, 0);
+                        else
+                            emit_hits_text(corpus, label, *ms_to_use, page_opts, 0);
+                    }
                     break;
 
                 case CommandType::SIZE:

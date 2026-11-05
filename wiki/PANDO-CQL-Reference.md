@@ -286,7 +286,7 @@ For a named query `M` (default: the last one):
 
 | command | meaning |
 | --- | --- |
-| `cat [M]` | the hits as KWIC |
+| `cat [M] [from [to]]` | a page of the hits in their current order (after `sort`: sorted); `from`/`to` as in CQP |
 | `size [M]` | number of hits |
 | `count [M] by att+` / `group` | frequency per value (combinations for several attributes); with a region attribute also the relative frequency |
 | `freq [M] by att` | as count, in instances per million |
@@ -303,6 +303,11 @@ For a named query `M` (default: the last one):
   `on match[-1]..match[-5]` (left context, nearest first); `from`/`to` are `match`, `matchend` or a
   token label with an optional offset. Equal keys keep corpus order. The CWB dialect sorts on the whole
   hit by default, as CQP does.
+- `cat M` shows a page of M (the `offset` / `limit` settings) in its current order: corpus order,
+  or the sorted order after `sort M by …`. `cat M 20 29` shows hits 20 to 29 (numbered from 0, as
+  in CQP); `cat M 20` a page from hit 20 (CQP shows every hit to the end). It returns the same page
+  as pando-server's `/query` with `"from": "M"`. Example: `A = [lemma="go"]; sort A by lemma on
+  match[-1]..match[-1]; cat A 0 49` (the first 50 hits, sorted on the lemma of the word before).
 - `tabulate M 0 100 a.lemma, a.form` tabulates the first 100 hits.
 - `stats`: values that are not numbers are skipped per metric (`n_valid`); the bucket size is
   `n_total`. Example: `a:[]; stats avg(strlen(a.form)), median(strlen(a.form)) by a.text_id`.
@@ -343,5 +348,8 @@ those of the command-line flags without `--`.
 ## Limitations
 
 - A query is one sequence: `|` between sequences (`[a] [b] | [c]`) and groups of tokens
-  (`([a] [b])+`) are not supported yet and give an error. `|` inside a token works.
+  (`([a] [b])+`) are not pando-CQL and give an error saying so; `|` inside a token works. The
+  Manatee dialect expands both into sequences: `MANATEE ([upos="ADJ"] [upos="NOUN"]){1,2}`.
+- `containing` takes a region or `subtree [ … ]`, not a token pattern (CQP `<s/> containing
+  [lemma="x"]`): the sentences that contain such a token are `s:<s> within s having [lemma="x"]`.
 - Only one region without a token per query (see Named regions).

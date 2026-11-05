@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/types.h"
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -472,7 +473,20 @@ struct GroupCommand {
     // tabulate: CWB-style optional window [offset limit] before fields (default limit 1000)
     size_t tabulate_offset = 0;
     size_t tabulate_limit = 1000;
+
+    // cat: CQP-style window `cat [A] from [to]`: hit numbers from 0, `to` included
+    // (SIZE_MAX: not given; then the page is the options' offset / limit)
+    size_t cat_from = SIZE_MAX;
+    size_t cat_to = SIZE_MAX;
 };
+
+/// `cat`'s page: its window (`cat A 10 19` = 10 hits from hit 10; `cat A 10` = a page from hit 10)
+/// over the options' offset / limit.
+inline void apply_cat_window(const GroupCommand& c, size_t& offset, size_t& limit) {
+    if (c.cat_from == SIZE_MAX) return;
+    offset = c.cat_from;
+    if (c.cat_to != SIZE_MAX) limit = c.cat_to - c.cat_from + 1;
+}
 
 // ── Top-level statement ─────────────────────────────────────────────────
 

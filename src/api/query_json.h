@@ -239,6 +239,9 @@ struct ProgramOptions {
     size_t max_total = 0;
     int context    = 5;
     bool total     = false;
+    /// The hit pages the program returns (a query, `sort`, `cat`): as QueryOptions::sentence / ::fragment.
+    bool sentence  = false;
+    bool fragment  = false;
     bool strict_quoted_strings = false;
     /// The program's language (as QueryOptions::dialect).
     std::string dialect;

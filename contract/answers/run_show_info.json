@@ -106,23 +106,24 @@
    "multivalue": [],
    "kv_pipe": [],
    "pando": {
-    "version": "0.3.1",
-    "build": "v0.3.1-dirty",
-    "commit": "124d8f2be487da8dabab7fb11f46aa07f39272c1",
+    "version": "0.4.1",
+    "build": "v0.4.1-dirty",
+    "commit": "2ef4b421ad168eace7e5334ecab6de2e1f72a8ba",
     "branch": "main",
     "regex": "re2"
    },
    "index": {
-    "indexed_with": "0.3.1 (v0.3.1-dirty, main)",
-    "upgraded_with": "0.3.1 (v0.3.1-dirty, main) 2026-11-01T09:27:29Z",
-    "index_id": "20261101T092729187Z-49653443",
-    "index_identity": "20261101T092729187Z-49653443",
+    "indexed_with": "0.4.1 (v0.4.1-dirty, main)",
+    "upgraded_with": "0.4.1 (v0.4.1-dirty, main) 2026-11-05T15:08:03Z",
+    "layout_version": 1,
+    "index_id": "20261105T150803846Z-b28f671e",
+    "index_identity": "20261105T150803846Z-b28f671e",
     "index_dir": "/private<index>/index",
     "published_root": null,
     "current_version": null,
     "newer_on_disk": false,
-    "disk_bytes": 8831,
-    "bytes_per_token": 368.0,
+    "disk_bytes": 8848,
+    "bytes_per_token": 368.7,
     "attrs": [
      {
       "attr": "deprel",

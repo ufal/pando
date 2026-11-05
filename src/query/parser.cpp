@@ -73,6 +73,17 @@ Statement Parser::parse_statement_with_source() {
     return st;
 }
 
+// CQP / Manatee forms pando-CQL leaves to the Manatee dialect, which expands them into sequences
+static std::string groups_message() {
+    return "groups of tokens `( … )` are not pando-CQL: pando-CQL repeats single tokens "
+           "(`[upos=\"ADJ\"]{1,2} [upos=\"NOUN\"]`); the Manatee dialect expands groups into their "
+           "sequences: `MANATEE ([upos=\"ADJ\"] [upos=\"NOUN\"]){1,2}`, `MANATEE ([…] […] | […])`";
+}
+static std::string alternatives_message() {
+    return "alternatives between sequences are not pando-CQL: use [a | b] inside one token, or the "
+           "Manatee dialect, which expands them: `MANATEE [a] [b] | [c]`";
+}
+
 Program Parser::parse() {
     Program prog;
     prog.push_back(parse_statement_with_source());
@@ -87,10 +98,9 @@ Program Parser::parse() {
     if (rest.type != TokType::END) {
         std::string hint;
         if (rest.type == TokType::PIPE)
-            hint = " (alternatives between sequences are not supported yet: use [a | b] inside one "
-                   "token, or run the alternatives as separate queries)";
+            hint = " (" + alternatives_message() + ")";
         else if (rest.type == TokType::LPAREN)
-            hint = " (groups of several tokens `( ... )` are not supported yet)";
+            hint = " (" + groups_message() + ")";
         throw std::runtime_error(std::string("Unexpected ") + toktype_name(rest.type) + " at position " +
                                  std::to_string(rest.pos) + hint);
     }
@@ -653,6 +663,17 @@ GroupCommand Parser::parse_command() {
         }
     }
 
+    // cat: optional CQP window after the set name: `cat A 0 19` (hits 0 to 19), `cat A 20` (a page from 20)
+    if (cmd.type == CommandType::CAT && lexer_.peek().type == TokType::NUMBER) {
+        cmd.cat_from = std::stoull(lexer_.next().text);
+        if (lexer_.peek().type == TokType::NUMBER) {
+            cmd.cat_to = std::stoull(lexer_.next().text);
+            if (cmd.cat_to < cmd.cat_from)
+                throw std::runtime_error("cat: the window ends before it starts (cat " + std::to_string(cmd.cat_from)
+                                         + " " + std::to_string(cmd.cat_to) + ")");
+        }
+    }
+
     // coll: optional unparenthesized `on <label>` after optional query name (same meaning as `(on label)`)
     if (cmd.type == CommandType::COLL && lexer_.peek().type == TokType::IDENT) {
         std::string plow = lexer_.peek().text;
@@ -1050,6 +1071,9 @@ QueryToken Parser::parse_token_expr() {
         qt.min_repeat = 1;
         qt.max_repeat = REPEAT_UNBOUNDED;
         qt.bare_string = true;
+    } else if (t.type == TokType::LPAREN) {
+        // CQP / Manatee groups: `( A B )+`, `( A B ){1,2}`, `( A | B C )`
+        throw std::runtime_error("Unexpected '(' at position " + std::to_string(t.pos) + " (" + groups_message() + ")");
     } else {
         throw std::runtime_error("Expected '[' or string or /regex/ at position " +
                                  std::to_string(t.pos));
@@ -1587,6 +1611,12 @@ void Parser::parse_containing_clause(TokenQuery& tq, bool negated) {
     } else if (t.type == TokType::IDENT) {
         lexer_.consume();
         cc.region = t.text;
+    } else if (t.type == TokType::LBRACKET || t.type == TokType::STRING || t.type == TokType::REGEX) {
+        // CQP / Manatee `<s/> containing [lemma="x"]`: a token pattern
+        throw std::runtime_error(
+            "'containing' takes a region (`containing np`) or `subtree [ … ]`, not a token pattern. "
+            "Regions that contain such a token: `s:<s> within s having [lemma=\"x\"]`; "
+            "tokens in such a region: `[] within s having [lemma=\"x\"]`");
     } else {
         throw std::runtime_error("Expected region name or 'subtree' after 'containing'");
     }

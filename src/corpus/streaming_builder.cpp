@@ -1,6 +1,7 @@
 #include "corpus/streaming_builder.h"
 #include "index/relation_decl.h"
 #include "core/build_info.h"
+#include "corpus/index_layout.h"
 #include "index/postings_writer.h"
 #include <future>
 #include <thread>
@@ -1030,6 +1031,7 @@ void StreamingBuilder::finalize() {
         if (!info) throw std::runtime_error("Cannot create corpus.info");
         info << "size=" << corpus_size_ << "\n";
         info << "indexed_with=" << build_string() << "\n";
+        info << "layout_version=" << kIndexLayoutVersion << "\n";
         info << "positional=";
         for (size_t i = 0; i < sorted_attrs.size(); ++i) {
             if (i > 0) info << ",";
