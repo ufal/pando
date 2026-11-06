@@ -250,6 +250,44 @@ static void test_lower_root() {
     assert(err.find("a-root") != std::string::npos);
 }
 
+// a relation to a node named elsewhere: order-follows / order-precedes $x as a position order
+static void test_lower_order_refs() {
+    std::string err;
+    Program p = lower_native_pmltq_query(parse_pmltq_query(
+        R"(a-node $v := [ upos = "VERB", child a-node $o1 := [ deprel = "obj" ], child a-node $o2 := [ deprel = "obj", order-follows $o1 ] ])"), err);
+    assert(err.empty());
+    const TokenQuery& tq = p.at(0).query;
+    bool gt = false;
+    for (const auto& po : tq.position_orders)
+        if (po.name1 == "o2" && po.name2 == "o1" && po.op == CompOp::GT) gt = true;
+    assert(gt);
+    p = lower_native_pmltq_query(parse_pmltq_query(
+        R"(a-node $v := [ child a-node $a := [], child a-node $b := [ order-precedes $a ] ])"), err);
+    assert(err.empty());
+    bool lt = false;
+    for (const auto& po : p.at(0).query.position_orders)
+        if (po.name1 == "b" && po.name2 == "a" && po.op == CompOp::LT) lt = true;
+    assert(lt);
+    // a named node without a type after a relation
+    p = lower_native_pmltq_query(parse_pmltq_query(R"(a-node [ upos = "VERB", child $o := [ deprel = "obj" ] ])"), err);
+    assert(err.empty() && p.at(0).query.tokens.size() == 2);
+    // refused, with what to write instead
+    p = lower_native_pmltq_query(parse_pmltq_query(
+        R"(a-node $v := [ child a-node $o := [], child a-node [ child $o ] ])"), err);
+    assert(err.find("word order only") != std::string::npos);
+    p = lower_native_pmltq_query(parse_pmltq_query(R"(a-node $v := [ order-follows $v ])"), err);
+    assert(err.find("itself") != std::string::npos);
+    p = lower_native_pmltq_query(parse_pmltq_query(R"(a-node $v := [ order-follows $zz ])"), err);
+    assert(err.find("no node is called $zz") != std::string::npos);
+    bool threw = false;
+    try {
+        parse_pmltq_query(R"(a-node $v := [ child a-node $o := [], child a-node [ !(order-follows $o) ] ])");
+    } catch (const std::runtime_error& e) {
+        threw = std::string(e.what()).find("own condition list") != std::string::npos;
+    }
+    assert(threw);
+}
+
 static void test_parse_output_distinct_count() {
     PmltqQuery q = parse_pmltq_query(
         "a-node $a := [ form = \"th.*\" ] >> distinct $a.form, count(over $a.form)");
@@ -283,6 +321,7 @@ int main() {
     test_parse_conditions();
     test_lower_tree();
     test_lower_root();
+    test_lower_order_refs();
     test_parse_output_distinct_count();
     std::cerr << "PASS pmltq_dialect_test\n";
     return 0;

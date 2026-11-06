@@ -86,7 +86,7 @@ private:
             add_related(idx, *e.nested);
             return;
         }
-        if (e.kind == PmltqCondKind::Same ||
+        if (e.kind == PmltqCondKind::Same || e.kind == PmltqCondKind::Ref ||
             (e.kind == PmltqCondKind::Test && refers_to_other_node(e, self))) {
             pending.push_back({idx, e});
             return;
@@ -388,6 +388,19 @@ void apply_references(const std::vector<Pending>& pending, std::vector<QNode>& n
     };
     for (const auto& p : pending) {
         const PmltqCondExpr& e = p.expr;
+        if (e.kind == PmltqCondKind::Ref) {
+            // `order-follows $b` / `order-precedes $b`: the word order of two nodes of the match,
+            // as pando's position order (`:: a > b`: a comes after b)
+            const size_t a = p.owner, b = node_of(e.ref_node, p.owner, e.byte_offset);
+            if (e.field != "order-follows" && e.field != "order-precedes")
+                fail(e.field + " $" + e.ref_node + " at byte " + std::to_string(e.byte_offset) +
+                     " (pando relates named nodes by word order only: order-precedes / order-follows $" + e.ref_node +
+                     "; write the node there instead: " + e.field + " a-node $x := [ … ])");
+            if (a == b)
+                fail("$" + nodes[a].name + " " + e.field + " itself (byte " + std::to_string(e.byte_offset) + ")");
+            tq.position_orders.push_back({nodes[a].name, nodes[b].name, e.field == "order-follows" ? CompOp::GT : CompOp::LT});
+            continue;
+        }
         if (e.kind == PmltqCondKind::Same) {
             const size_t a = node_of(e.node, p.owner, e.byte_offset), b = node_of(e.ref_node, p.owner, e.byte_offset);
             if (e.op == "!=") {

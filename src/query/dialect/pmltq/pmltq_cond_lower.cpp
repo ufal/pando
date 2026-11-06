@@ -166,6 +166,8 @@ PmltqCondExpr negate_condition(const PmltqCondExpr& e) {
     case PmltqCondKind::Same:
         n.op = flip.at(e.op);
         return n;
+    case PmltqCondKind::Ref:
+        fail("a negated relation to a named node (! " + e.field + " $" + e.ref_node + ")", e.byte_offset);
     case PmltqCondKind::Not:
         return e.children.front();
     case PmltqCondKind::And:
@@ -189,6 +191,7 @@ PmltqCondExpr negate_condition(const PmltqCondExpr& e) {
 bool refers_to_other_node(const PmltqCondExpr& e, const std::string& self) {
     switch (e.kind) {
     case PmltqCondKind::Same:
+    case PmltqCondKind::Ref:
         return true;
     case PmltqCondKind::Test:
         return (!e.node.empty() && e.node != self) || !e.ref_node.empty();
@@ -213,6 +216,10 @@ ConditionPtr lower_condition(const PmltqCondExpr& e, const std::string& self, bo
     case PmltqCondKind::Same:
         fail(in_subquery ? "a comparison of two nodes inside a subquery"
                          : "a comparison of two nodes inside or / !",
+             e.byte_offset);
+    case PmltqCondKind::Ref:
+        fail(in_subquery ? "a relation to a named node inside a subquery"
+                         : "a relation to a named node inside or / !",
              e.byte_offset);
     case PmltqCondKind::Not:
         return lower_condition(negate_condition(e.children.front()), self, in_subquery);

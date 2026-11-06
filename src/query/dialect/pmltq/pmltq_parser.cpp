@@ -73,6 +73,9 @@ private:
     [[noreturn]] void throw_expected(const char* what) {
         std::ostringstream o;
         o << "PMLTQ: expected " << what << " at byte " << cur_.byte_offset;
+        // a query copied from JSON or program code: `tag=\"VERB\"`
+        if (cur_.type == PmltqTok::BACKSLASH)
+            o << " (a backslash: write quotes without it, tag=\"VERB\")";
         throw std::runtime_error(o.str());
     }
 
@@ -108,11 +111,30 @@ private:
     /// A nested selector (join or subquery) starts here: `+`? relation? selector.
     bool nested_starts() { return cur_.type == PmltqTok::PLUS || relation_starts() || selector_starts(); }
 
+    /// The part of a selector after its name: `[ conditions ]`.
+    void parse_selector_body(PmltqSelector& s) {
+        expect(PmltqTok::LBRACKET, "'['");
+        bump();
+        if (cur_.type != PmltqTok::RBRACKET) {
+            s.has_cond = true;
+            s.cond = parse_conditions();
+        }
+        expect(PmltqTok::RBRACKET, "']' or ',' between conditions");
+        bump();
+    }
+
     PmltqSelector parse_selector() {
         PmltqSelector s;
         if (cur_.type == PmltqTok::IDENT || cur_.type == PmltqTok::STAR) {
             const PmltqTok n = peek().type;
             if (n == PmltqTok::LBRACKET || n == PmltqTok::DOLLAR) {
+                if (n == PmltqTok::DOLLAR && cur_.type == PmltqTok::IDENT && relation_words().count(cur_.text)) {
+                    std::ostringstream o;
+                    o << "PMLTQ: " << cur_.text << " $… at byte " << cur_.byte_offset
+                      << ": a relation to a named node is read in a node's own condition list only (not under ! / or, "
+                         "not in a subquery)";
+                    throw std::runtime_error(o.str());
+                }
                 s.type_name = cur_.type == PmltqTok::STAR ? "*" : cur_.text;
                 if (s.type_name == "a-root")
                     s.kind = PmltqSelectorKind::ARoot;
@@ -130,14 +152,7 @@ private:
             expect(PmltqTok::COLON_EQ, "':=' after the node's name");
             bump();
         }
-        expect(PmltqTok::LBRACKET, "'['");
-        bump();
-        if (cur_.type != PmltqTok::RBRACKET) {
-            s.has_cond = true;
-            s.cond = parse_conditions();
-        }
-        expect(PmltqTok::RBRACKET, "']' or ',' between conditions");
-        bump();
+        parse_selector_body(s);
         return s;
     }
 
@@ -164,6 +179,38 @@ private:
             bump();
             PmltqCondExpr e = parse_nested(false);
             e.nested->optional = true;
+            e.byte_offset = at;
+            return e;
+        }
+        // a relation to a node named elsewhere: `order-follows $o1` (no `:=` after the name); with
+        // `:=` (`child $x := [ … ]`) it is a named node without a type
+        if (cur_.type == PmltqTok::IDENT && relation_words().count(cur_.text) && peek().type == PmltqTok::DOLLAR) {
+            const size_t at = cur_.byte_offset;
+            const std::string relation = cur_.text;
+            bump(); // the relation
+            bump(); // $
+            if (cur_.type != PmltqTok::IDENT)
+                throw_expected("variable name after '$'");
+            const std::string name = cur_.text;
+            bump();
+            if (cur_.type == PmltqTok::COLON_EQ) {
+                bump();
+                PmltqCondExpr e;
+                e.kind = PmltqCondKind::Nested;
+                e.byte_offset = at;
+                auto n = std::make_shared<PmltqNested>();
+                n->relation = relation;
+                n->byte_offset = at;
+                n->node = std::make_shared<PmltqSelector>();
+                n->node->bind_name = name;
+                parse_selector_body(*n->node);
+                e.nested = std::move(n);
+                return e;
+            }
+            PmltqCondExpr e;
+            e.kind = PmltqCondKind::Ref;
+            e.field = relation;
+            e.ref_node = name;
             e.byte_offset = at;
             return e;
         }

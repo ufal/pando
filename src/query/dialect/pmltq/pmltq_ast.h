@@ -32,6 +32,7 @@ enum class PmltqCondKind {
     Not,    // `!` (children[0])
     Nested, // a nested selector: a join (no occurrences) or a subquery (occurrences)
     Same,   // `$a = $b` / `$a != $b`: the same node or not (node = a, ref_node = b, op)
+    Ref,    // `order-follows $b`: a relation to a node named elsewhere (field = the relation, ref_node = b)
 };
 
 struct PmltqNested;
