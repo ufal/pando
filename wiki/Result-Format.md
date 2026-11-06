@@ -54,6 +54,9 @@ A program (`/run`) answers with the output of its **last** output-producing stat
 - `page: {start, size, returned, total, total_exact}`
 - `hits[]`
 - `groups[]`: the query's tokens and region anchors (`{index, id, name}`; regions `{id, name, region}`)
+  - a token's `name` is its label in the query, else `t1`, `t2`, … in chain order; in PML-TQ
+    (and the other dialects) the name the query gives the node (`$v`, else `n1`, `n2`, … for the
+    unnamed nodes in written order), whatever its place in the chain pando searches
 - `legend[]`: with `fragment` and more than one group
 
 Optional: `job_id` and `job` (an asynchronous total), `sample` (with `sample` / `shuffle`), and

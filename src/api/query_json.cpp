@@ -29,6 +29,7 @@ namespace {
 std::string query_language_name(const std::string& dialect) {
     const std::string d = normalize_dialect(dialect);
     if (d == "cwb") return "cwb-cql";
+    if (d == "manatee") return "manatee-cql";
     if (d == "pmltq" || d == "tiger") return d;
     return "pando-cql";
 }
@@ -521,8 +522,9 @@ std::string to_query_result_json(const Corpus& corpus,
     size_t source_tokens = 0;
     {
         try {
-            Parser parser(query_text, ParserOptions{opts.strict_quoted_strings});
-            Program prog = parser.parse();
+            // in the query's own language: a PML-TQ node keeps its name (n1, $v, …) whatever its
+            // place in the chain pando searches
+            Program prog = parse_in_dialect(query_text, opts.dialect, ParserOptions{opts.strict_quoted_strings}, &corpus);
             if (!prog.empty() && prog[0].has_query) {
                 auto add = [&](const TokenQuery& q) {
                     // region anchors (`ip:<node …>`) are not query tokens: they bind a
