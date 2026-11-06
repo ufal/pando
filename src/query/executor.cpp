@@ -1091,6 +1091,8 @@ static const char* struct_rel_keyword(StructRelType t) {
         case StructRelType::PREV: return "prev";
         case StructRelType::AFTER: return "after";
         case StructRelType::BEFORE: return "before";
+        case StructRelType::TREE_WORDS: return "tree words";
+        case StructRelType::TREE_ROOTS: return "tree roots";
     }
     return "structural";
 }
@@ -2864,6 +2866,28 @@ static std::vector<CorpusPos> related_positions(const Corpus& corpus, CorpusPos 
                 for (CorpusPos p = pos + 1; p <= reg.end; ++p) related.push_back(p);
             else
                 for (CorpusPos p = pos; p > reg.start;) related.push_back(--p);
+            return related;
+        }
+        case StructRelType::TREE_WORDS:
+        case StructRelType::TREE_ROOTS: {
+            // the words of the sentence in its dependency tree, as PML-TQ's a-root has them below it:
+            // a stored head of -1 is a root word, -2 a word without dependency information (not in the
+            // tree); an index with only head offsets (--compact-deps) cannot tell: every word counts
+            if (!corpus.has_structure("s"))
+                throw std::runtime_error("the sentence's tree needs sentence regions (<s>) in the corpus");
+            if (!corpus.has_deps())
+                throw std::runtime_error("the sentence's tree needs the dependency index");
+            const auto& sents = corpus.structure("s");
+            const int64_t r = sents.find_region(pos);
+            if (r < 0) return related;
+            const Region reg = sents.get(static_cast<size_t>(r));
+            const auto& deps = corpus.deps();
+            const int16_t* local = deps.head_local_data();
+            for (CorpusPos p = reg.start; p <= reg.end; ++p) {
+                const bool root = local ? local[p] == -1 : deps.head(p) == NO_HEAD;
+                const bool in_tree = local ? local[p] >= -1 : true;
+                if (rel == StructRelType::TREE_ROOTS ? root : in_tree) related.push_back(p);
+            }
             return related;
         }
         default:

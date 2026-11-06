@@ -32,4 +32,8 @@ ConditionPtr lower_test_root(bool negated = false);
 /// the others.
 StructRelType structural_relation(const std::string& relation);
 
+/// A subquery (a related node with occurrences) as a count over `rel` instead of its own relation
+/// (a-root's: the sentence's tree words or root words).
+ConditionPtr lower_subquery_as(const PmltqNested& n, StructRelType rel, size_t at);
+
 } // namespace pando::pmltq

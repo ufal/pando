@@ -248,6 +248,30 @@ static void test_lower_root() {
     err.clear();
     p = lower_native_pmltq_query(parse_pmltq_query(R"(a-root [ child [], child [] ])"), err);
     assert(err.find("a-root") != std::string::npos);
+    // counted nodes next to the node of the match: conditions on the sentence's tree
+    auto has_count = [](const ConditionPtr& c, StructRelType rel, CompOp op, int64_t v, auto& self) -> bool {
+        if (!c) return false;
+        if (c->is_count && c->count_rel == rel && c->count_op == op && c->count_value == v) return true;
+        return self(c->left, rel, op, v, self) || self(c->right, rel, op, v, self);
+    };
+    err.clear();
+    p = lower_native_pmltq_query(parse_pmltq_query(
+        R"(a-root [ 20-x descendant a-node [], descendant a-node $v := [ upos = "VERB" ] ])"), err);
+    assert(err.empty() && p.at(0).query.tokens.size() == 1);
+    assert(has_count(p.at(0).query.tokens[0].conditions, StructRelType::TREE_WORDS, CompOp::LTE, 20, has_count));
+    p = lower_native_pmltq_query(parse_pmltq_query(
+        R"(a-root [ 5..10x descendant a-node [], 2x child a-node [], descendant a-node [ upos = "NOUN" ] ])"), err);
+    assert(err.empty());
+    const ConditionPtr& c2 = p.at(0).query.tokens[0].conditions;
+    assert(has_count(c2, StructRelType::TREE_WORDS, CompOp::GTE, 5, has_count));
+    assert(has_count(c2, StructRelType::TREE_WORDS, CompOp::LTE, 10, has_count));
+    assert(has_count(c2, StructRelType::TREE_ROOTS, CompOp::EQ, 2, has_count));
+    p = lower_native_pmltq_query(parse_pmltq_query(R"(a-root [ 20-x descendant a-node [] ])"), err);
+    assert(err.find("counted nodes only") != std::string::npos);
+    err.clear();
+    p = lower_native_pmltq_query(parse_pmltq_query(
+        R"(a-root [ descendant a-node [], descendant a-node [ upos = "VERB" ] ])"), err);
+    assert(err.find("two nodes of the match") != std::string::npos);
 }
 
 // a relation to a node named elsewhere: order-follows / order-precedes $x as a position order

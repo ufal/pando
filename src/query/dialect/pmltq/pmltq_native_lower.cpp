@@ -434,24 +434,49 @@ void apply_references(const std::vector<Pending>& pending, std::vector<QNode>& n
 }
 
 /// The top selector. `a-root [ child a-node X ]` (pando has no root node): X, the sentence's root
-/// word; `a-root [ descendant a-node X ]`: X, any word.
+/// word; `a-root [ descendant a-node X ]`: X, any word. Next to that node, counted nodes are
+/// conditions on the sentence's tree, put on X: `20-x descendant a-node []` (at most 20 words in the
+/// tree), `1+x descendant a-node [ upos = "VERB" ]`, `2x child a-node []` (two root words).
 void add_selector(TreeBuilder& tb, const PmltqSelector& sel) {
     if (sel.kind != PmltqSelectorKind::ARoot) {
         tb.add(sel);
         return;
     }
     const std::string how = " (pando has no root node: a-root [ child a-node [ … ] ] is the sentence's root word, "
-                            "a-root [ descendant a-node [ … ] ] any word)";
+                            "a-root [ descendant a-node [ … ] ] any word; counted nodes next to it, "
+                            "e.g. 20-x descendant a-node [], are conditions on the sentence's tree)";
     if (!sel.has_cond)
         fail("a-root on its own" + how);
-    const PmltqCondExpr& c = sel.cond;
-    if (c.kind != PmltqCondKind::Nested || c.nested->subquery || c.nested->optional ||
-        (c.nested->relation != "child" && c.nested->relation != "descendant") ||
-        c.nested->node->kind == PmltqSelectorKind::ARoot)
-        fail("a-root with conditions other than one child or descendant node" + how);
-    const size_t idx = tb.add(*c.nested->node);
-    if (c.nested->relation == "child")
+    std::vector<const PmltqCondExpr*> items;
+    if (sel.cond.kind == PmltqCondKind::And)
+        for (const auto& c : sel.cond.children)
+            items.push_back(&c);
+    else
+        items.push_back(&sel.cond);
+    const PmltqNested* main = nullptr;
+    std::vector<ConditionPtr> tree_conds;
+    for (const PmltqCondExpr* c : items) {
+        const bool nested = c->kind == PmltqCondKind::Nested && c->nested->node->kind != PmltqSelectorKind::ARoot &&
+                            (c->nested->relation == "child" || c->nested->relation == "descendant");
+        if (nested && !c->nested->subquery && !c->nested->optional) {
+            if (main)
+                fail("a-root with two nodes of the match at byte " + std::to_string(c->byte_offset) + how);
+            main = c->nested.get();
+        } else if (nested && c->nested->subquery) {
+            tree_conds.push_back(lower_subquery_as(
+                *c->nested, c->nested->relation == "descendant" ? StructRelType::TREE_WORDS : StructRelType::TREE_ROOTS,
+                c->byte_offset));
+        } else {
+            fail("a-root with conditions other than child or descendant nodes" + how);
+        }
+    }
+    if (!main)
+        fail("a-root with counted nodes only (pando needs one node of the match: descendant a-node [ … ])" + how);
+    const size_t idx = tb.add(*main->node);
+    if (main->relation == "child")
         tb.nodes[idx].conds.push_back(lower_test_root());
+    for (auto& c : tree_conds)
+        tb.nodes[idx].conds.push_back(std::move(c));
 }
 
 } // namespace

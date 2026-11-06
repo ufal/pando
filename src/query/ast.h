@@ -52,6 +52,9 @@ enum class StructRelType {
     PREV,        // the token directly before
     AFTER,       // a later token in the same sentence
     BEFORE,      // an earlier token in the same sentence
+    // the sentence's dependency tree (no notation of their own; PML-TQ's a-root)
+    TREE_WORDS,  // the words of the token's sentence that are in the tree (root words and words with a head)
+    TREE_ROOTS,  // the root words of the token's sentence
 };
 
 // ── A single attribute condition inside [] ──────────────────────────────

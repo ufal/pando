@@ -83,11 +83,37 @@ ConditionPtr lower_root_subquery(const PmltqNested& n, size_t at) {
 ConditionPtr lower_subquery(const PmltqNested& n, size_t at) {
     if (n.node->kind == PmltqSelectorKind::ARoot)
         return lower_root_subquery(n, at);
+    return lower_subquery_as(n, structural_relation(n.relation), at);
+}
+
+
+ConditionPtr lower_test(const PmltqCondExpr& t) {
+    if (t.op == "in" || t.op == "!in") {
+        const bool neg = t.op == "!in";
+        ConditionPtr acc;
+        for (const auto& v : t.set_values) {
+            std::string err;
+            ConditionPtr leaf = lower_pmltq_test_strings(t.field, neg ? "!=" : "=", v, err);
+            if (!leaf)
+                fail(err.substr(err.rfind("PMLTQ: ") == 0 ? 7 : 0), t.byte_offset);
+            acc = all_of(acc, leaf, neg ? BoolOp::AND : BoolOp::OR);
+        }
+        return acc;
+    }
+    std::string err;
+    ConditionPtr leaf = lower_pmltq_test_strings(t.field, t.op, t.value, err);
+    if (!leaf)
+        fail(err.substr(err.rfind("PMLTQ: ") == 0 ? 7 : 0), t.byte_offset);
+    return leaf;
+}
+
+} // namespace
+
+ConditionPtr lower_subquery_as(const PmltqNested& n, StructRelType rel, size_t at) {
     if (n.optional)
         fail("an optional node (?) inside a test", at);
     if (n.bounded_length)
         fail(n.relation + "{…} with a length", at);
-    const StructRelType rel = structural_relation(n.relation);
     const PmltqSelector& sel = *n.node;
     ConditionPtr inner = sel.has_cond ? lower_condition(sel.cond, sel.bind_name, true) : nullptr;
     ConditionPtr any;
@@ -113,28 +139,6 @@ ConditionPtr lower_subquery(const PmltqNested& n, size_t at) {
         any = ConditionNode::make_count(rel, nullptr, CompOp::LT, 0);
     return any;
 }
-
-ConditionPtr lower_test(const PmltqCondExpr& t) {
-    if (t.op == "in" || t.op == "!in") {
-        const bool neg = t.op == "!in";
-        ConditionPtr acc;
-        for (const auto& v : t.set_values) {
-            std::string err;
-            ConditionPtr leaf = lower_pmltq_test_strings(t.field, neg ? "!=" : "=", v, err);
-            if (!leaf)
-                fail(err.substr(err.rfind("PMLTQ: ") == 0 ? 7 : 0), t.byte_offset);
-            acc = all_of(acc, leaf, neg ? BoolOp::AND : BoolOp::OR);
-        }
-        return acc;
-    }
-    std::string err;
-    ConditionPtr leaf = lower_pmltq_test_strings(t.field, t.op, t.value, err);
-    if (!leaf)
-        fail(err.substr(err.rfind("PMLTQ: ") == 0 ? 7 : 0), t.byte_offset);
-    return leaf;
-}
-
-} // namespace
 
 ConditionPtr lower_test_root(bool negated) {
     std::string err;
