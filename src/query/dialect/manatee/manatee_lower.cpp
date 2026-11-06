@@ -99,17 +99,55 @@ public:
 
     Program run(const Query& q) {
         TokenQuery tq;
-        std::vector<Tokens> alts = expand_sequence(q.sequence);
-        tq.tokens = std::move(alts[0]);
-        for (size_t i = 1; i < alts.size(); ++i) tq.union_alternatives.push_back(std::move(alts[i]));
-        if (q.conditions) conditions(*q.conditions, tq);
-        for (const Clause& c : q.clauses) clause(c, tq);
+        if (const Repetition* whole = whole_structure(q.sequence)) region_query(*whole, q, tq);
+        else query(q, tq);
         Statement st;
         st.query = std::move(tq);
         st.has_query = true;
         Program p;
         p.push_back(std::move(st));
         return p;
+    }
+
+private:
+    // the query is one whole structure (<s/>, <doc genre="x"/>): its regions
+    static const Repetition* whole_structure(const Sequence& seq) {
+        if (seq.alternatives.size() != 1 || seq.alternatives[0].negated || seq.alternatives[0].items.size() != 1)
+            return nullptr;
+        const Repetition& r = seq.alternatives[0].items[0];
+        return r.kind == Repetition::Kind::StructWhole ? &r : nullptr;
+    }
+
+    // <s/>, <s/> containing [one token]: pando's region query s:<s>, with `within s having [ … ]`
+    void region_query(const Repetition& r, const Query& q, TokenQuery& tq) {
+        const Structure& st = r.structure;
+        QueryToken t;
+        t.name = st.name;
+        t.anchor = RegionAnchorType::REGION_START;
+        t.anchor_region = st.name;
+        if (st.attrs) structure_pairs(*st.attrs, t.anchor_attrs, "<" + st.name + " …/>");
+        tq.tokens.push_back(std::move(t));
+        if (q.conditions) unsupported("global conditions (&) on a whole structure", r.pos);
+        for (const Clause& c : q.clauses) {
+            if (!c.containing || c.negated || c.suffix.kind != Suffix::Kind::Sequence)
+                unsupported("<" + st.name + "/> with this within / containing", c.suffix.pos);
+            std::vector<Tokens> alts = expand_sequence(c.suffix.sequence);
+            if (alts.size() != 1 || alts[0].size() != 1 || alts[0][0].is_anchor() || alts[0][0].has_repetition()
+                || tq.within_having)
+                unsupported("<" + st.name + "/> containing more than one token", c.suffix.pos);
+            if (!alts[0][0].conditions) continue;   // containing []: every region has a token
+            tq.within = st.name;
+            tq.within_having = alts[0][0].conditions;
+        }
+    }
+
+public:
+    void query(const Query& q, TokenQuery& tq) {
+        std::vector<Tokens> alts = expand_sequence(q.sequence);
+        tq.tokens = std::move(alts[0]);
+        for (size_t i = 1; i < alts.size(); ++i) tq.union_alternatives.push_back(std::move(alts[i]));
+        if (q.conditions) conditions(*q.conditions, tq);
+        for (const Clause& c : q.clauses) clause(c, tq);
     }
 
 private:
@@ -275,8 +313,10 @@ private:
             conditions(*c.left, tq);
             conditions(*c.right, tq);
             return;
-        case Cond::Kind::AttrEq: {
+        case Cond::Kind::AttrEq:
+        case Cond::Kind::AttrNeq: {
             GlobalAlignmentFilter af;
+            af.op = c.kind == Cond::Kind::AttrNeq ? CompOp::NEQ : CompOp::EQ;
             af.name1 = label_name(c.l1);
             af.attr1 = c.a1;
             af.name2 = label_name(c.l2);
@@ -301,8 +341,6 @@ private:
             tq.global_function_filters.push_back(std::move(ff));
             return;
         }
-        case Cond::Kind::AttrNeq:
-            unsupported("'!=' between labelled attributes", c.pos);
         case Cond::Kind::Or:
             unsupported("'|' between global conditions", c.pos);
         case Cond::Kind::Not:

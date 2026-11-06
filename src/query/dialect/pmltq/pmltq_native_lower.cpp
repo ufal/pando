@@ -408,9 +408,10 @@ void apply_references(const std::vector<Pending>& pending, std::vector<QNode>& n
             continue;
         }
         const size_t b = node_of(e.ref_node, p.owner, e.byte_offset);
-        if (e.op != "=" || a == b)
-            fail("pando compares attributes of two different nodes with = (byte " + std::to_string(e.byte_offset) + ")");
+        if ((e.op != "=" && e.op != "!=") || a == b)
+            fail("pando compares attributes of two different nodes with = or != (byte " + std::to_string(e.byte_offset) + ")");
         GlobalAlignmentFilter f;
+        f.op = e.op == "=" ? CompOp::EQ : CompOp::NEQ;
         f.name1 = nodes[a].name;
         f.attr1 = e.field;
         f.name2 = nodes[b].name;

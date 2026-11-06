@@ -11,6 +11,7 @@ All pages are Markdown in this folder (same convention as **flexipipe** / **flex
 | [Quick Start](Quick-Start.md) | First corpus, first query, pointers to samples |
 | [Sample corpora](Sample-Corpora.md) | CoNLL-U sample, full UD download script |
 | [Query language (Pando CQL)](Query-Language-and-CQL.md) | Where the full CQL spec lives; dialects |
+| [CWB / CQP queries](CWB-Dialect.md) | What the CWB dialect reads, what differs from CQP, what to write instead |
 | [Multivalue attributes](Multivalue-Attributes.md) | Pipe values, indexes, queries, count/freq, CLI flags |
 | [Overlapping and nested regions](Overlapping-and-Nested-Regions.md) | Structural types, lookup, zero-width |
 | [Constituency grammar and nested regions](Constituency-and-Nested-Regions.md) | Phrase-structure trees as nested `node` regions |

@@ -61,6 +61,32 @@ int main() {
     expect_throw("![lemma=\"x\"]");
     expect_throw("[lemma=\"x\"] ::");
 
+    // CQP's global constraint, XML tags, @, ->, lookahead, _. (2026-11-06)
+    {
+        using namespace pando;
+        auto q = [](const char* s) { return translate_cwb_program(s, 0, nullptr).at(0).query; };
+        const TokenQuery g = q("[lemma=\"go\"] :: match.text_langcode=\"en\" within text");
+        assert(g.within == "text" && g.global_region_filters.size() == 1);
+        const TokenQuery l = q("a:[upos=\"ADJ\"] b:[upos=\"NOUN\"] :: a.lemma != b.lemma");
+        assert(l.global_alignment_filters.size() == 1 && l.global_alignment_filters[0].op == CompOp::NEQ);
+        expect_throw("[lemma=\"go\"] within text :: match.text_langcode=\"en\"");   // CQP: :: before within
+        const TokenQuery a = q("<s> [upos=\"DET\"] [] </s>");
+        assert(a.tokens.size() == 4 && a.tokens[0].anchor == RegionAnchorType::REGION_START
+               && a.tokens[3].anchor == RegionAnchorType::REGION_END && a.tokens[3].anchor_region == "s");
+        const TokenQuery v = q("<text_langcode=\"en\"> []");
+        assert(v.tokens[0].anchor_region == "text" && v.tokens[0].anchor_attrs.size() == 1
+               && v.tokens[0].anchor_attrs[0].first == "langcode" && v.tokens[0].anchor_attrs[0].second == "en");
+        assert(q("@[upos=\"ADJ\"] [upos=\"NOUN\"]").tokens[0].name == "target");
+        assert(q("@1[upos=\"ADJ\"]").tokens[0].name == "keyword");
+        const TokenQuery i = q("[(lemma=\"be\") -> (upos=\"AUX\")]");
+        assert(i.tokens[0].conditions && !i.tokens[0].conditions->is_leaf);
+        const TokenQuery la = q("[upos=\"DET\"] [:upos=\"NOUN\":]");
+        assert(la.tokens.size() == 1 && la.tokens[0].conditions && !la.tokens[0].conditions->is_leaf);
+        const TokenQuery u = q("[lemma=\"go\" & _.text_langcode=\"en\"]");
+        assert(!u.tokens[0].conditions->is_leaf
+               && u.tokens[0].conditions->right->leaf.attr == "text_langcode");
+    }
+
     try {
         pando::translate_cwb_program("count", 0, nullptr);
         assert(false);

@@ -285,6 +285,8 @@ struct GlobalRegionFilter {
 struct GlobalAlignmentFilter {
     std::string name1, attr1;
     std::string name2, attr2;
+    /// EQ (`:: a.x = b.x`, also the alignment joins) or NEQ (`:: a.x != b.x`: checked per hit only, no join)
+    CompOp op = CompOp::EQ;
 };
 
 // :: distance(a, b) < 5, :: f(a.lemma) >= 100, :: depth(a) > depth(b), :: contains(s, np) = 1

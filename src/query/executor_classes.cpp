@@ -295,6 +295,7 @@ std::optional<MatchSet> QueryExecutor::class_join(const TokenQuery& q, const std
     constexpr LexiconId kUnmapped = UNKNOWN_LEX - 1;
     std::vector<PairKey> keys;
     for (const auto& af : q.global_alignment_filters) {
+        if (af.op != CompOp::EQ) return std::nullopt;   // != is checked per hit (apply_global_filters)
         const int i1 = af.name1 == q.tokens[0].name ? 0 : af.name1 == q.tokens[1].name ? 1 : -1;
         const int i2 = af.name2 == q.tokens[0].name ? 0 : af.name2 == q.tokens[1].name ? 1 : -1;
         if (i1 < 0 || i2 < 0 || i1 == i2 || q.tokens[0].name.empty()) return std::nullopt;

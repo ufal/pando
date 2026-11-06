@@ -62,12 +62,12 @@ To disable a dialect: configure with **`-DPANDO_CWB_DIALECT=OFF`** or **`-DPANDO
 - **`cat [Name] [from [to]]`** → native **`cat`**: the hits in their current order (sorted after `sort`); `from` / `to` are hit numbers from 0, `to` included. Without `to`, pando shows a page (the limit) from `from`, where CQP shows every hit to the end; redirection (`> "file"`) is not supported.
 - **`tabulate`** → native **`tabulate`**: `tabulate [offset limit] field[, …]`, `tabulate QueryName offset limit field[, …]`, or `tabulate field[, …]` (default offset `0`, limit `1000`).
 
-**Not supported in this dialect** (the parser throws with a specific message; use **`--cql native`** for full Pando):
-
-- **CQP shell commands** at statement start: `cat`, `save`, `show`, `set`, `discard`, **`intersect` / `union` / `diff` / `join` / `subset`**, `meet`, `info`, `dump`, `cut`, `mu`, `tab`, `exec`, macros, and similar keywords.
-- **`meet` / `join` on named query results** (same class as shell combinators above).
-- **Pattern features** not mapped to the native condition AST, including: **`within` / `containing`** after the pattern; **global `::`** constraints after the pattern; **alternation `|`** between full token-sequence patterns at the top level; **parenthesised groups** with repetition in some forms; **lookahead** `[: … :]` / `[::]`; **boolean `!`** and **`->`** inside **`[ ]`**; **MU** / **TAB** query forms; **XML/anchor tags** in the pattern; **region append `<<`**; **`cut` / `show match …`** tails; **redirection** / **`into outfile`** (Pando has no query-directed file output).
-- **`count` / `group` / `size` / `tabulate`**: `on match` / anchor boundaries; for all of these and `sort`: **`cut`**, shell-style **`>`** redirection. `sort … descending` / `reverse` are accepted but not applied.
+**Not supported in this dialect:** the parser stops with a message starting with `Unsupported:`.
+It reads global constraints `::` (before `within`, as CQP), the `@` target marker, XML tags,
+`->` and lookahead; what it does not read (`|` between sequences, repeated groups, `within N`, `cut`,
+MU queries, set operations on named results, shell commands, …), what it reads
+differently from CQP, and what to write in pando CQL instead are listed per construct in
+**[CWB-Dialect.md](CWB-Dialect.md)**.
 
 **Security / I/O:** There is no **`into outfile`** or other query-driven disk write; use shell redirection on the CLI if you need a file.
 
@@ -90,7 +90,7 @@ If neither path succeeds, translation fails (the error text mentions whether the
 - **Conditions** joined by **`,`** or **`and`**: tests with **`=` / `!=`** (the value as it is), **`~` / `!~`** (a regular expression anywhere in the value), **`~*` / `!~*`** (ignoring case), **`<` `>` `<=` `>=`**, **`in { … }` / `!in { … }`**; **`or`**, **`!`** and parentheses.
 - **Nested nodes** with **`child`** (the default), **`parent`**, **`descendant`**, **`ancestor`**, **`sibling`**. As in PML-TQ, a nested node in the condition list is a **node of the match**: `a-node [ upos = "VERB", child a-node [ deprel = "obj" ] ]` gives one result per verb–object pair, and becomes the chain `n1:[upos="VERB"] > n2:[deprel="obj"]`. Names given with `$o :=` are the tokens' names, so later steps can use them (`; freq by o.lemma`).
 - **Subqueries** — a nested node with **occurrences** (`0x`, `1+x`, `2x`, `2-x`, `1..3x`, alternatives `0|2+x`), or after `and` / under `or` / `!` (as 1+x) — are **conditions** on the outer node: `child [...]`, `not child [...]`, `count(child [...]) >= 2`. One result per outer node.
-- **References** between nodes of the match: `lemma = $v.lemma` (the same value on both), `$a != $b`.
+- **References** between nodes of the match: `lemma = $v.lemma` (the same value on both), `lemma != $v.lemma` (different values), `$a != $b` (different nodes).
 - Different nodes are different tokens (PML-TQ; `+` before a nested node lets it overlap).
 - **`a-root`**: pando has no root node, so it is a condition — `a-root [ child a-node X ]` is X with `deprel = "root"` (the sentence's root word), `a-root [ descendant a-node X ]` is any X, `parent a-root []` is `deprel = "root"` (with `0x`: not the root word), `ancestor a-root []` always holds. `a-root` alone, with conditions, or with more than one related node is refused.
 

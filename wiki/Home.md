@@ -33,6 +33,7 @@ Use `pando --help` for the current option list. Important query options include 
 - [Sample corpora](Sample-Corpora.md) — CoNLL-U, full UD via `build_ud_corpus.py`
 - [Quick Start](Quick-Start.md)
 - [Query language (Pando CQL)](Query-Language-and-CQL.md)
+- [CWB / CQP queries](CWB-Dialect.md) — what the CWB dialect reads and what to write instead
 - [Multivalue attributes](Multivalue-Attributes.md) — MV sets + **KV pipe** (`feats`)
 - [Overlapping and nested regions](Overlapping-and-Nested-Regions.md)
 - [Constituency grammar and nested regions](Constituency-and-Nested-Regions.md)

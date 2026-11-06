@@ -2,6 +2,7 @@
 
 #include "query/dialect/cwb/cwb_lexer.h"
 #include "query/condition_negate.h"
+#include "query/parser.h"
 #include "query/quoted_string_pattern.h"
 
 #include <cctype>
@@ -24,6 +25,7 @@ struct Repeat {
 struct TokStream {
     const std::vector<CwbToken>* v = nullptr;
     std::size_t i = 0;
+    std::string_view src;   // the statement's text (CwbToken::offset points into it)
 
     const CwbToken& peek() const { return (*v)[i]; }
     void bump() { ++i; }
@@ -190,6 +192,8 @@ std::string parse_rel_lhs(TokStream& ts) {
     if (k == CwbTok::ID || k == CwbTok::QID) {
         std::string attr = ts.peek().text;
         ts.bump();
+        // `_` is the token itself (CQP's "this" label): `[_.text_id="x"]` = `[text_id="x"]`
+        if (attr.rfind("_.", 0) == 0) attr.erase(0, 2);
         if (!ts.eof() && ts.peek().kind == CwbTok::LPAREN)
             throw std::runtime_error("Unsupported: function call inside [ ]");
         return attr;
@@ -337,9 +341,12 @@ ConditionPtr parse_bool_or(TokStream& ts, std::ostringstream* trace) {
 
 ConditionPtr parse_bool_expr_implies(TokStream& ts, std::ostringstream* trace) {
     ConditionPtr left = parse_bool_or(ts, trace);
-    if (!ts.eof() && ts.peek().kind == CwbTok::IMPLIES)
-        throw std::runtime_error(
-            "Unsupported: boolean implication (->) inside [ ] (not mapped to pando)");
+    if (!ts.eof() && ts.peek().kind == CwbTok::IMPLIES) {
+        // A -> B: if A then B, which is !A | B
+        ts.bump();
+        ConditionPtr right = parse_bool_expr_implies(ts, trace);
+        return ConditionNode::make_branch(BoolOp::OR, negate_condition(std::move(left)), std::move(right));
+    }
     return left;
 }
 
@@ -354,8 +361,7 @@ QueryToken parse_wordform_pattern(TokStream& ts, std::ostringstream* trace) {
         return qt;
     }
     if (k == CwbTok::LCMATCHALL || k == CwbTok::LCSTART)
-        throw std::runtime_error(
-            "Unsupported: lookahead constraints [: … :] / [::] (not implemented)");
+        throw std::runtime_error("A lookahead constraint [: … :] cannot take a repetition or a label");
     if (k == CwbTok::STRING) {
         // CQP: a bare "pattern" [flags] is [word="pattern" flags] (word is the default attribute)
         AttrCondition ac;
@@ -410,6 +416,7 @@ bool starts_reg_wordf_power(const CwbToken& t) {
     case CwbTok::FIELDLABEL:
     case CwbTok::AT:
     case CwbTok::TAGSTART:
+    case CwbTok::TAGEND:
     case CwbTok::ANCHORTAG:
     case CwbTok::ANCHORENDTAG:
     case CwbTok::LEFT_APPEND:
@@ -486,6 +493,47 @@ Repeat parse_repeat_suffix(TokStream& ts) {
 
 TokenQuery parse_reg_wordf_expr(TokStream& ts, std::ostringstream* trace);
 
+// CQP's s-attribute with a value is struct_attr (text_langcode); pando's anchor names the structure and the attribute
+std::pair<std::string, std::string> split_struct_attr(const std::string& name) {
+    const std::size_t u = name.find('_');
+    if (u == std::string::npos || u == 0 || u + 1 >= name.size()) return {name, ""};
+    return {name.substr(0, u), name.substr(u + 1)};
+}
+
+// <s>, </s>, <text_langcode="en">: zero-width anchors at the first / last token of a region (pando's <s>, </s>,
+// <text langcode="en">)
+QueryToken parse_xml_tag(TokStream& ts) {
+    QueryToken qt;
+    qt.conditions = nullptr;
+    if (ts.peek().kind == CwbTok::TAGEND) {
+        qt.anchor = RegionAnchorType::REGION_END;
+        qt.anchor_region = split_struct_attr(ts.peek().text).first;
+        ts.bump();
+        return qt;
+    }
+    const std::string name = ts.peek().text;
+    ts.bump();
+    qt.anchor = RegionAnchorType::REGION_START;
+    if (!ts.eof() && (ts.peek().kind == CwbTok::EQ || ts.peek().kind == CwbTok::NEQ)) {
+        if (ts.peek().kind == CwbTok::NEQ)
+            throw std::runtime_error("Unsupported: <" + name + " != …> (pando's region anchors compare with =)");
+        ts.bump();
+        if (ts.eof() || ts.peek().kind != CwbTok::STRING)
+            throw std::runtime_error("Expected a quoted value in <" + name + " = …>");
+        auto [region, attr] = split_struct_attr(name);
+        if (attr.empty())
+            throw std::runtime_error("<" + name + " = …>: a value needs an annotated s-attribute (struct_attr)");
+        qt.anchor_region = region;
+        qt.anchor_attrs.emplace_back(attr, ts.peek().text);
+        ts.bump();
+        while (!ts.eof() && ts.peek().kind == CwbTok::FLAG) ts.bump();   // %c / %d: not on anchors (rare)
+    } else {
+        qt.anchor_region = split_struct_attr(name).first;
+    }
+    expect_tok(ts, CwbTok::GT, "'>' to close the XML tag");
+    return qt;
+}
+
 TokenQuery parse_reg_wordf_power_inner(TokStream& ts, std::ostringstream* trace) {
     if (ts.eof())
         throw std::runtime_error("Unexpected end in token pattern");
@@ -493,15 +541,35 @@ TokenQuery parse_reg_wordf_power_inner(TokStream& ts, std::ostringstream* trace)
     if (k == CwbTok::MU_SYM || k == CwbTok::TAB_SYM)
         throw std::runtime_error("Unsupported: MU / TAB query forms (not implemented)");
 
-    if (k == CwbTok::TAGSTART || k == CwbTok::ANCHORTAG || k == CwbTok::ANCHORENDTAG)
+    if (k == CwbTok::TAGSTART || k == CwbTok::TAGEND) {
+        TokenQuery tq;
+        tq.tokens.push_back(parse_xml_tag(ts));
+        return tq;
+    }
+    if (k == CwbTok::ANCHORTAG || k == CwbTok::ANCHORENDTAG)
         throw std::runtime_error(
-            "Unsupported: XML / anchor tags in token pattern (not mapped to pando)");
+            "Unsupported: match / target anchor tags (<match>, </target>, …) in a token pattern");
     if (k == CwbTok::LEFT_APPEND)
         throw std::runtime_error("Unsupported: region append syntax (<<) in token pattern");
 
-    if (k == CwbTok::AT)
-        throw std::runtime_error(
-            "Unsupported: @ target / keyword markers in NamedWfPattern (not implemented)");
+    if (k == CwbTok::AT) {
+        // @[…] marks the target (@0 too), @1[…] the keyword: pando's labels target: / keyword:
+        ts.bump();
+        std::string name = "target";
+        if (!ts.eof() && ts.peek().kind == CwbTok::INTEGER) {
+            if (ts.peek().ival == 1) name = "keyword";
+            else if (ts.peek().ival != 0)
+                throw std::runtime_error("Unsupported: @" + ts.peek().text + " (pando reads @, @0 and @1)");
+            ts.bump();
+        }
+        if (!ts.eof() && (ts.peek().kind == CwbTok::LABEL || ts.peek().kind == CwbTok::FIELDLABEL))
+            throw std::runtime_error("Unsupported: @ together with a label (pando names a token once)");
+        QueryToken qt = parse_wordform_pattern(ts, trace);
+        qt.name = std::move(name);
+        TokenQuery tq;
+        tq.tokens.push_back(std::move(qt));
+        return tq;
+    }
 
     if (k == CwbTok::LPAREN) {
         ts.bump();
@@ -543,12 +611,54 @@ TokenQuery parse_reg_wordf_factor_chunk(TokStream& ts, std::ostringstream* trace
     return iq;
 }
 
+// [: … :] / [::] — a condition on the token after the previous one, without matching it: pando's
+// `next [ … ]` on the previous token, or (at the start) a condition on the first token itself
+ConditionPtr parse_lookahead(TokStream& ts, std::ostringstream* trace) {
+    if (ts.peek().kind == CwbTok::LCMATCHALL) {
+        ts.bump();
+        return nullptr;
+    }
+    ts.bump();   // [:
+    ConditionPtr c = parse_bool_expr_implies(ts, trace);
+    expect_tok(ts, CwbTok::LCEND, "':]' to close the lookahead constraint");
+    return c;
+}
+
 TokenQuery parse_reg_wordf_term(TokStream& ts, std::ostringstream* trace) {
     TokenQuery tq;
     if (!starts_reg_wordf_power(ts.peek()))
         throw std::runtime_error("Expected token pattern (e.g. `[lemma=\"x\"]`)");
+    ConditionPtr pending;   // a lookahead before the first token: a condition on that token
+    bool have_pending = false;
     for (;;) {
+        if (ts.peek().kind == CwbTok::LCSTART || ts.peek().kind == CwbTok::LCMATCHALL) {
+            ConditionPtr la = parse_lookahead(ts, trace);
+            QueryToken* prev = nullptr;
+            for (auto it = tq.tokens.rbegin(); it != tq.tokens.rend(); ++it)
+                if (!it->is_anchor()) { prev = &*it; break; }
+            if (prev) {
+                if (prev->has_repetition())
+                    throw std::runtime_error("Unsupported: a lookahead after a repeated token");
+                ConditionPtr nx = ConditionNode::make_structural(StructRelType::NEXT, std::move(la));
+                prev->conditions = prev->conditions
+                    ? ConditionNode::make_branch(BoolOp::AND, prev->conditions, nx) : nx;
+            } else {
+                pending = la ? (pending ? ConditionNode::make_branch(BoolOp::AND, pending, la) : la) : pending;
+                have_pending = true;
+            }
+            if (ts.eof() || !starts_reg_wordf_power(ts.peek())) break;
+            continue;
+        }
         TokenQuery chunk = parse_reg_wordf_factor_chunk(ts, trace);
+        if (have_pending) {
+            for (auto& t : chunk.tokens) {
+                if (t.is_anchor()) continue;
+                if (pending) t.conditions = t.conditions ? ConditionNode::make_branch(BoolOp::AND, pending, t.conditions) : pending;
+                break;
+            }
+            have_pending = false;
+            pending = nullptr;
+        }
         if (!tq.tokens.empty()) {
             QueryRelation rel;
             rel.type = RelationType::SEQUENCE;
@@ -587,15 +697,31 @@ void parse_search_pattern_tail(TokStream& ts, TokenQuery& tq) {
         ts.bump();
         tq.within = ts.peek().text;
         ts.bump();
+        if (!ts.eof() && ts.peek().kind == CwbTok::GCDEL)
+            throw std::runtime_error("CQP syntax error: the global constraint (:: …) comes before within "
+                                     "([word=\"x\"] :: match.text_id=\"…\" within text)");
         parse_search_pattern_tail(ts, tq);
         return;
     }
-    if (ts.peek().kind == CwbTok::GCDEL)
-        throw std::runtime_error(
-            "Unsupported: global constraint (:: …) after pattern (alignment / multi-corpus)");
+    if (ts.peek().kind == CwbTok::GCDEL) {
+        // CQP's global constraint, read by pando's own :: parser: up to within / cut / show or the end
+        ts.bump();
+        const std::size_t from = ts.i;
+        while (!ts.eof() && ts.peek().kind != CwbTok::SEMI && ts.peek().kind != CwbTok::WITHIN_SYM
+               && ts.peek().kind != CwbTok::CUT_SYM && ts.peek().kind != CwbTok::SHOW_SYM)
+            ts.bump();
+        if (ts.i == from) throw std::runtime_error("Expected a condition after ::");
+        if (ts.src.empty()) throw std::runtime_error("Unsupported: global constraint (:: …) here");
+        const std::size_t b = (*ts.v)[from].offset;
+        const std::size_t e = ts.eof() ? ts.src.size() : ts.peek().offset;
+        Parser::parse_global_filter_text(std::string(ts.src.substr(b, e - b)), tq);
+        parse_search_pattern_tail(ts, tq);
+        return;
+    }
     if (ts.peek().kind == CwbTok::WITHIN_SYM)
         throw std::runtime_error(
-            "Unsupported: within clause after pattern (not mapped to pando TokenQuery yet)");
+            "Unsupported: this within clause in the CWB dialect; it reads within with a structure "
+            "name (within s), not a number of tokens (write a gap: [a] []{0,8} [b])");
     if (ts.peek().kind == CwbTok::CUT_SYM)
         throw std::runtime_error("Unsupported: cut clause after pattern");
     if (ts.peek().kind == CwbTok::SHOW_SYM)
@@ -970,10 +1096,12 @@ static Statement parse_cwb_query_statement_after_keywords(TokStream& ts, std::os
     return stmt;
 }
 
-Statement parse_statement_tokens(std::vector<CwbToken>& toks, std::ostringstream* trace) {
+Statement parse_statement_tokens(std::vector<CwbToken>& toks, std::ostringstream* trace,
+                                 std::string_view src = {}) {
     TokStream ts;
     ts.v = &toks;
     ts.i = 0;
+    ts.src = src;
     if (ts.eof())
         throw std::runtime_error("Empty CWB statement");
 
@@ -1049,7 +1177,7 @@ Program translate_cwb_program_parsed(const std::string& input, int debug_level,
             continue;
 
         std::vector<CwbToken> toks = tokenize_all(sv);
-        Statement st = parse_statement_tokens(toks, tp);
+        Statement st = parse_statement_tokens(toks, tp, sv);
         prog.push_back(std::move(st));
         if (tp)
             *tp << "  ---\n";

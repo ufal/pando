@@ -1365,7 +1365,9 @@ ConditionPtr Parser::parse_primary_condition() {
     ac.attr = t.text;
     if (lexer_.peek().type == TokType::DOT) {
         lexer_.consume();
-        ac.attr += "." + lexer_.expect(TokType::IDENT).text;
+        const std::string field = lexer_.expect(TokType::IDENT).text;
+        // `_` is the token itself (CQP's "this" label): `[_.text_genre="x"]` = `[text_genre="x"]`
+        ac.attr = ac.attr == "_" ? field : ac.attr + "." + field;
     }
     reject_ud_feats_dot_syntax(ac.attr, t.pos);
 
@@ -1873,8 +1875,11 @@ void Parser::parse_global_filters(TokenQuery& tq) {
                     read_region_filter_value(gf);
                     tq.global_region_filters.push_back(std::move(gf));
                 } else {
-                    // Alignment: :: a.upos = b.upos
+                    // Alignment: :: a.upos = b.upos (or != : the values differ)
+                    if (op != CompOp::EQ && op != CompOp::NEQ)
+                        throw std::runtime_error("Only = and != compare the attributes of two names in a global filter");
                     GlobalAlignmentFilter af;
+                    af.op = op;
                     af.name1 = t.text;
                     af.attr1 = attr1;
                     af.name2 = lexer_.expect(TokType::IDENT).text;
@@ -1893,6 +1898,14 @@ void Parser::parse_global_filters(TokenQuery& tq) {
         lexer_.consume();
         parse_one();
     }
+}
+
+void Parser::parse_global_filter_text(const std::string& text, TokenQuery& tq, ParserOptions opts) {
+    Parser p(text, opts);
+    p.parse_global_filters(tq);
+    const Token rest = p.lexer_.peek();
+    if (rest.type != TokType::END)
+        throw std::runtime_error("Unexpected '" + rest.text + "' in the global constraint (:: " + text + ")");
 }
 
 } // namespace pando

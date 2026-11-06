@@ -29,6 +29,10 @@ public:
 
     Program parse();
 
+    /// The filters after a `::` (the text without the `::`), added to `tq` (its tokens already parsed): for a
+    /// dialect that reads CQP's global constraint with pando's own rules. Anything left over is an error.
+    static void parse_global_filter_text(const std::string& text, TokenQuery& tq, ParserOptions opts = {});
+
 private:
     Statement parse_statement();
     Statement parse_statement_with_source();

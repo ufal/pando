@@ -1898,6 +1898,12 @@ void QueryExecutor::compile_conditions(const ConditionPtr& cond) const {
                 && !corpus_.has_attr(name))
                 throw std::runtime_error("Unknown attribute '" + ac.attr + "'");
             std::string feat_name;
+            // A plain token attribute name (no struct_ prefix, feature or overlay syntax) that the corpus does
+            // not have is a mistake (`[cat="NP"]` on a corpus without cat), not 0 hits; region attributes
+            // (text_genre, contr_form) keep their fallbacks, as a corpus may lack the structure on purpose
+            if (name.find_first_of("_/#.-") == std::string::npos && !corpus_.has_attr(name)
+                && !feats_is_subkey(name, feat_name))
+                throw std::runtime_error("Unknown attribute '" + ac.attr + "' (this corpus has no such token attribute)");
             const bool plain = !feats_is_subkey(name, feat_name) && corpus_.has_attr(name)
                                && !corpus_.is_multivalue(name);
             ac.plain_attr = plain ? static_cast<const void*>(&corpus_.attr(name)) : nullptr;
@@ -2092,6 +2098,9 @@ size_t QueryExecutor::bind_external_alignment(TokenQuery& query, const LabelLook
     std::vector<GlobalAlignmentFilter> keep;
     for (const auto& af : query.global_alignment_filters) {
         const bool l1 = local(af.name1), l2 = local(af.name2);
+        if (af.op != CompOp::EQ && l1 != l2)
+            throw std::runtime_error(":: " + af.name1 + "." + af.attr1 + " != " + af.name2 + "." + af.attr2
+                                     + ": != compares two names of the same query, not one of an earlier statement");
         if (l1 == l2) {   // both in this query (or neither: validation says so)
             keep.push_back(af);
             continue;
@@ -9269,6 +9278,10 @@ MatchSet QueryExecutor::execute_parallel(const TokenQuery& source_query,
             }
     }
 
+    for (const auto& af : merged_alignment)
+        if (af.op != CompOp::EQ)
+            throw std::runtime_error(":: " + af.name1 + "." + af.attr1 + " != " + af.name2 + "." + af.attr2
+                                     + ": between aligned queries only = is supported");
     // one token either side over one attribute: the class join (executor_classes.cpp)
     if (auto ms = execute_parallel_class_join(source_query, target_query, merged_alignment, max_matches, count_total))
         return std::move(*ms);
@@ -9747,6 +9760,17 @@ void QueryExecutor::apply_global_filters(const TokenQuery& query, const NameInde
                 { pass = false; break; }
             auto v1 = resolve_alignment_operand_value(corpus_, m, name_map, af.name1, an1);
             auto v2 = resolve_alignment_operand_value(corpus_, m, name_map, af.name2, an2);
+            if (af.op == CompOp::NEQ) {
+                // the values differ; a missing value (_, empty) compares as little as with = (unless allowed)
+                const bool comparable = v1 && v2
+                    && (include_empty_alignment_values_
+                        || (!alignment_value_is_missing(*v1) && !alignment_value_is_missing(*v2)));
+                if (!comparable || alignment_values_match(corpus_, an1, an2, v1, v2, include_empty_alignment_values_)) {
+                    pass = false;
+                    break;
+                }
+                continue;
+            }
             if (!alignment_values_match(corpus_, an1, an2, v1, v2,
                                         include_empty_alignment_values_)) {
                 pass = false;
