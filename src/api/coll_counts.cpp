@@ -161,10 +161,11 @@ CollCounts DcollCounter::finish() {
             CorpusPos h = deps.head(node);
             if (h != NO_HEAD && h != node) count(h, 1, bd_label({}, node));
         }
-    if (want_descendants_)
-        for (CorpusPos node : nodes_)
-            for (CorpusPos rp : deps.subtree(node))
-                if (rp != node) count(rp);
+    if (want_descendants_) {
+        // each descendant once per node: per sentence, a token counts the node occurrences above it
+        std::sort(nodes_.begin(), nodes_.end());
+        deps.for_each_descendant_count(nodes_, [&](CorpusPos p, uint32_t k) { count(p, k); });
+    }
 
     const bool want_children = want_all_children_ || deprel_filter_;
     if (!want_children) return done();
@@ -270,22 +271,33 @@ CollCounts DcollCounter::finish_layer() {
                 return true;
             });
         }
-    if (want_descendants_)
-        for (CorpusPos node : nodes_) {
-            std::unordered_set<CorpusPos> seen{node};
-            std::vector<CorpusPos> todo{node};
+    if (want_descendants_) {
+        // one walk per distinct node, its relatives counted as often as the node occurs
+        std::sort(nodes_.begin(), nodes_.end());
+        std::unordered_set<CorpusPos> seen;
+        std::vector<CorpusPos> todo;
+        for (size_t i = 0; i < nodes_.size();) {
+            const CorpusPos node = nodes_[i];
+            size_t j = i;
+            while (j < nodes_.size() && nodes_[j] == node) ++j;
+            const uint32_t times = static_cast<uint32_t>(j - i);
+            i = j;
+            seen.clear();
+            seen.insert(node);
+            todo.assign(1, node);
             while (!todo.empty()) {
                 const CorpusPos from = todo.back();
                 todo.pop_back();
                 L.for_each_child(from, [&](CorpusPos c, std::string_view) {
                     if (seen.insert(c).second) {
-                        count(c);
+                        count(c, times);
                         todo.push_back(c);
                     }
                     return true;
                 });
             }
         }
+    }
     if (!want_all_children_ && !deprel_filter_) return done();
 
     const CorpusPos n = corpus_.size();

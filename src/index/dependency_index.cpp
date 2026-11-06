@@ -213,7 +213,7 @@ DependencyIndex::ChildrenCache& DependencyIndex::tl_children_cache() {
     return c;
 }
 
-const DependencyIndex::ChildrenCache& DependencyIndex::ensure_children_cache(CorpusPos pos) const {
+DependencyIndex::ChildrenCache& DependencyIndex::ensure_children_cache(CorpusPos pos) const {
     ChildrenCache& c = tl_children_cache();
     if (c.gen != cache_gen_) {
         c.gen = cache_gen_;
@@ -225,11 +225,21 @@ const DependencyIndex::ChildrenCache& DependencyIndex::ensure_children_cache(Cor
         c.sentence_id = -1;
         c.sentence = {0, -1};
         c.children.clear();
+        c.seen.clear();
         return c;
     }
     if (ri == c.sentence_id) return c;
 
     Region sent = sentences_->get(static_cast<size_t>(ri));
+    // a region past the last token (a damaged index) reads no head beyond it
+    if (sent.end >= static_cast<CorpusPos>(n_)) sent.end = static_cast<CorpusPos>(n_) - 1;
+    if (sent.end < sent.start) {
+        c.sentence_id = -1;
+        c.sentence = {0, -1};
+        c.children.clear();
+        c.seen.clear();
+        return c;
+    }
     size_t sent_len = static_cast<size_t>(sent.end - sent.start + 1);
 
     c.children.assign(sent_len, {});
@@ -247,9 +257,19 @@ const DependencyIndex::ChildrenCache& DependencyIndex::ensure_children_cache(Cor
             c.children[static_cast<size_t>(h)].push_back(static_cast<int16_t>(i));
     }
 
+    c.seen.assign(sent_len, 0);
+    c.stamp = 0;
     c.sentence_id = ri;
     c.sentence = sent;
     return c;
+}
+
+uint32_t DependencyIndex::ChildrenCache::next_stamp() {
+    if (++stamp == 0) {   // wrapped: forget every earlier walk
+        std::fill(seen.begin(), seen.end(), 0);
+        stamp = 1;
+    }
+    return stamp;
 }
 
 std::vector<CorpusPos> DependencyIndex::children(CorpusPos pos) const {
@@ -282,7 +302,7 @@ size_t DependencyIndex::children_count(CorpusPos pos) const {
 }
 
 std::vector<CorpusPos> DependencyIndex::subtree(CorpusPos pos) const {
-    const ChildrenCache& c = ensure_children_cache(pos);
+    ChildrenCache& c = ensure_children_cache(pos);
     const Region sent = c.sentence;
     if (sent.end < sent.start) return {};
 
@@ -290,20 +310,86 @@ std::vector<CorpusPos> DependencyIndex::subtree(CorpusPos pos) const {
     if (my_local < 0 || static_cast<size_t>(my_local) >= c.children.size())
         return {};
 
-    // DFS from my_local using the cached children map
+    // DFS from my_local using the cached children map. In a tree every token is
+    // reached once; the marks only matter when the heads form a cycle (a damaged
+    // index), where the walk would otherwise never end.
+    const uint32_t st = c.next_stamp();
+    c.seen[static_cast<size_t>(my_local)] = st;
     std::vector<CorpusPos> result;
-    const auto& root_ch = c.children[static_cast<size_t>(my_local)];
-    std::vector<int16_t> stack(root_ch.begin(), root_ch.end());
+    std::vector<int16_t> stack;
+    auto push_children = [&](int16_t of) {
+        for (int16_t k : c.children[static_cast<size_t>(of)])
+            if (c.seen[static_cast<size_t>(k)] != st) {
+                c.seen[static_cast<size_t>(k)] = st;
+                stack.push_back(k);
+            }
+    };
+    push_children(my_local);
     while (!stack.empty()) {
         int16_t cur = stack.back();
         stack.pop_back();
         result.push_back(sent.start + static_cast<CorpusPos>(cur));
-        if (static_cast<size_t>(cur) < c.children.size()) {
-            for (int16_t k : c.children[static_cast<size_t>(cur)])
-                stack.push_back(k);
-        }
+        push_children(cur);
     }
     return result;
+}
+
+void DependencyIndex::for_each_descendant_count(const std::vector<CorpusPos>& nodes,
+                                                const std::function<void(CorpusPos, uint32_t)>& add) const {
+    std::vector<uint32_t> times;   // [local] → occurrences of the token as a node
+    std::vector<uint32_t> above;   // [local] → node occurrences among its ancestors
+    std::vector<char> reached;     // [local] → reached from a root of the sentence
+    std::vector<int16_t> stack;
+    for (size_t i = 0; i < nodes.size();) {
+        ChildrenCache& c = ensure_children_cache(nodes[i]);
+        const Region sent = c.sentence;
+        if (sent.end < sent.start || nodes[i] < sent.start || nodes[i] > sent.end) {   // in no sentence
+            ++i;
+            continue;
+        }
+        const size_t len = c.children.size();
+        times.assign(len, 0);
+        size_t j = i;
+        for (; j < nodes.size() && nodes[j] <= sent.end; ++j) {
+            const CorpusPos local = nodes[j] - sent.start;
+            if (local >= 0 && static_cast<size_t>(local) < len) ++times[static_cast<size_t>(local)];
+        }
+        i = j;
+
+        // top down from the roots (the tokens that are no one's child here): a token lies below the node
+        // occurrences of its parent and of all the parent's ancestors
+        above.assign(len, 0);
+        reached.assign(len, 0);
+        for (size_t p = 0; p < len; ++p)
+            for (int16_t k : c.children[p]) reached[static_cast<size_t>(k)] = 1;   // has a parent
+        for (size_t r = 0; r < len; ++r) {
+            if (reached[r]) continue;   // a child (or, below, already walked)
+            reached[r] = 2;             // a root: walk its tree
+            stack.assign(1, static_cast<int16_t>(r));
+            while (!stack.empty()) {
+                const size_t cur = static_cast<size_t>(stack.back());
+                stack.pop_back();
+                const uint32_t below = above[cur] + times[cur];
+                for (int16_t k : c.children[cur]) {
+                    const size_t ku = static_cast<size_t>(k);
+                    if (reached[ku] == 2) continue;   // never in a tree: one parent each
+                    reached[ku] = 2;
+                    above[ku] = below;
+                    stack.push_back(k);
+                }
+            }
+        }
+        for (size_t p = 0; p < len; ++p)
+            if (reached[p] == 2 && above[p]) add(sent.start + static_cast<CorpusPos>(p), above[p]);
+
+        // tokens on or below a cycle of heads (a damaged index) are no root's descendants: a node there
+        // counts what subtree() walks from it
+        for (size_t p = 0; p < len; ++p) {
+            if (reached[p] == 2 || !times[p]) continue;
+            for (CorpusPos d : subtree(sent.start + static_cast<CorpusPos>(p)))
+                add(d, times[p]);
+        }
+    }
 }
 
 std::vector<CorpusPos> DependencyIndex::ancestors(CorpusPos pos) const {

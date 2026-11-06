@@ -3,6 +3,7 @@
 #include "core/types.h"
 #include "core/mmap_file.h"
 #include "index/structural_attr.h"
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -94,9 +95,18 @@ public:
     // Count-only variant: no vector allocation, just returns the count.
     size_t children_count(CorpusPos pos) const;
 
-    // All descendants of pos.  Uses the children cache internally.
-    // Builds cache + DFS — O(sentence_length).
+    // All descendants of pos (pos itself not included), each once.  Uses the
+    // children cache internally.  Builds cache + DFS — O(sentence_length); a
+    // cycle in the heads (a damaged index) ends the walk instead of looping.
     std::vector<CorpusPos> subtree(CorpusPos pos) const;
+
+    // The descendants of many nodes at once: calls add(p, k) for every token p that
+    // is a descendant of k node occurrences (k > 0) — the sum over the nodes of
+    // subtree(node), a node listed m times counting m times. `sorted_nodes` in corpus
+    // order (repeats allowed). One pass per sentence with nodes, O(sentence_length),
+    // however many nodes it holds and however deeply they nest.
+    void for_each_descendant_count(const std::vector<CorpusPos>& sorted_nodes,
+                                   const std::function<void(CorpusPos, uint32_t)>& add) const;
 
     // All ancestors of pos.  Walks the head chain — O(depth), typ. <15.
     std::vector<CorpusPos> ancestors(CorpusPos pos) const;
@@ -136,6 +146,9 @@ private:
         int64_t sentence_id = -1;
         Region sentence{0, -1};
         std::vector<std::vector<int16_t>> children;   // [local_idx] → children local indices
+        std::vector<uint32_t> seen;                    // [local_idx] == stamp: visited by this walk
+        uint32_t stamp = 0;
+        uint32_t next_stamp();                         // a fresh stamp (all of `seen` unvisited)
     };
     static uint64_t next_cache_gen();
     static ChildrenCache& tl_children_cache();
@@ -143,7 +156,7 @@ private:
 
     // Build (or reuse) the calling thread's children map for the sentence
     // containing pos; `sent` = the sentence ({0, -1} when pos is in none).
-    const ChildrenCache& ensure_children_cache(CorpusPos pos) const;
+    ChildrenCache& ensure_children_cache(CorpusPos pos) const;
 };
 
 } // namespace pando

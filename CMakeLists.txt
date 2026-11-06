@@ -459,6 +459,11 @@ if(BUILD_TESTING)
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
                 --server $<TARGET_FILE:pando-server>
                 --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu)
+        # dcoll descendants: once per node and occurrence, nested nodes; ends on a damaged index (cycles of heads)
+        add_test(NAME dcoll_descendants
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/dcoll_descendants_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>
+                --conllu ${CMAKE_CURRENT_SOURCE_DIR}/test/data/sample.conllu)
         # dcoll scores compare with the collocate's frequency in the relation (or, asked for, in the corpus)
         add_test(NAME dcoll_totals
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/dcoll_totals_test.py
