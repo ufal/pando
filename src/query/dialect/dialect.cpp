@@ -64,10 +64,49 @@ size_t top_level_semicolon(const std::string& text) {
     return std::string::npos;
 }
 
+// An attribute renamed throughout a program: in conditions (also of related and counted words),
+// in comparisons between named tokens and in a command's fields (`tag`, `v.tag`).
+void rename_attr(const ConditionPtr& c, const std::string& from, const std::string& to) {
+    if (!c) return;
+    if (c->is_leaf && c->leaf.attr == from) c->leaf.attr = to;
+    rename_attr(c->left, from, to);
+    rename_attr(c->right, from, to);
+    rename_attr(c->nested_conditions, from, to);
+    rename_attr(c->count_filter, from, to);
+}
+
+void rename_attr(TokenQuery& q, const std::string& from, const std::string& to) {
+    for (auto& t : q.tokens) rename_attr(t.conditions, from, to);
+    for (auto& f : q.global_alignment_filters) {
+        if (f.attr1 == from) f.attr1 = to;
+        if (f.attr2 == from) f.attr2 = to;
+    }
+}
+
+void rename_attr(Program& prog, const std::string& from, const std::string& to) {
+    for (auto& st : prog) {
+        rename_attr(st.query, from, to);
+        rename_attr(st.target_query, from, to);
+        for (auto& f : st.command.fields) {
+            if (f == from) f = to;
+            else if (f.size() > from.size() && f.compare(f.size() - from.size() - 1, std::string::npos, "." + from) == 0)
+                f = f.substr(0, f.size() - from.size()) + to;
+        }
+    }
+}
+
 Program parse_dialect_only(const std::string& text, const std::string& d, ParserOptions parse_opts,
                            const Corpus* corpus, int debug_level, std::string* trace_out) {
     if (d == "cwb") return translate_cwb_program(text, debug_level, trace_out);
-    if (d == "pmltq") return translate_pmltq_program(text, debug_level, trace_out);
+    if (d == "pmltq") {
+        Program p = translate_pmltq_program(text, debug_level, trace_out);
+        // Not PML-TQ itself but the UD treebanks on LINDAT's PML-TQ server call the UD part of speech
+        // `tag`: so that queries written for them run here, a corpus with `upos` and no `tag` of its
+        // own reads `tag` as `upos` (a fallback only; a corpus's own `tag` always wins)
+        if (corpus && !corpus->has_attr("tag") && corpus->has_attr("upos"))
+            rename_attr(p, "tag", "upos");
+        return p;
+    }
     if (d == "manatee") return translate_manatee_program(text, debug_level, trace_out);
     if (d == "tiger") {
         // the node layer's category attribute: `cat` (TEITOK) when the corpus has it, else `type`

@@ -68,6 +68,13 @@ static void test_parse_empty() {
         assert(std::string(e.what()).find("empty query") != std::string::npos);
     }
     assert(threw);
+    threw = false;
+    try {
+        parse_pmltq_query("a-root [ descendant a-node $v := [ upos = \"VERB\" ]");
+    } catch (const std::runtime_error& e) {
+        threw = std::string(e.what()).find("'[' at byte 7 is not closed") != std::string::npos;
+    }
+    assert(threw);
 }
 
 static void test_json_roundtrip() {

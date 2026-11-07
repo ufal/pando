@@ -1905,7 +1905,13 @@ void QueryExecutor::compile_conditions(const ConditionPtr& cond) const {
             // (text_genre, contr_form) keep their fallbacks, as a corpus may lack the structure on purpose
             if (name.find_first_of("_/#.-") == std::string::npos && !corpus_.has_attr(name)
                 && !feats_is_subkey(name, feat_name))
-                throw std::runtime_error("Unknown attribute '" + ac.attr + "' (this corpus has no such token attribute)");
+            {
+                // the usual other names of the part of speech (PML-TQ treebanks' `tag`, CWB's `pos`)
+                std::string hint;
+                if ((name == "tag" || name == "pos") && corpus_.has_attr("upos")) hint = "; did you mean upos?";
+                else if ((name == "upos" || name == "pos") && corpus_.has_attr("tag")) hint = "; did you mean tag?";
+                throw std::runtime_error("Unknown attribute '" + ac.attr + "' (this corpus has no such token attribute" + hint + ")");
+            }
             const bool plain = !feats_is_subkey(name, feat_name) && corpus_.has_attr(name)
                                && !corpus_.is_multivalue(name);
             ac.plain_attr = plain ? static_cast<const void*>(&corpus_.attr(name)) : nullptr;

@@ -114,10 +114,16 @@ private:
     /// The part of a selector after its name: `[ conditions ]`.
     void parse_selector_body(PmltqSelector& s) {
         expect(PmltqTok::LBRACKET, "'['");
+        const size_t open_at = cur_.byte_offset;
         bump();
         if (cur_.type != PmltqTok::RBRACKET) {
             s.has_cond = true;
             s.cond = parse_conditions();
+        }
+        if (cur_.type == PmltqTok::END) {
+            std::ostringstream o;
+            o << "PMLTQ: a ']' is missing at the end of the query: the '[' at byte " << open_at << " is not closed";
+            throw std::runtime_error(o.str());
         }
         expect(PmltqTok::RBRACKET, "']' or ',' between conditions");
         bump();
