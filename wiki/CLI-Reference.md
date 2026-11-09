@@ -4,6 +4,20 @@ Exact options change over time; always run **`pando --help`**, **`pando-index --
 
 ## `pando`
 
+```
+pando [options] [corpus_dir] [query]
+```
+
+Without `corpus_dir`, pando uses `./pando` (TEITOK layout) or the current directory when either holds a `corpus.info`; all arguments are then the query.
+
+**Shell quoting.** CQL string literals use double quotes, so wrap the whole query in double quotes and escape the inner ones:
+
+```bash
+pando CORP "[form=\"can't\" | contr_form=\"can't\"]+"
+```
+
+Nesting single quotes (`'"can''t"'`) loses the apostrophe.
+
 ### Output and format
 
 | Flag | Role |
@@ -38,6 +52,9 @@ Exact options change over time; always run **`pando --help`**, **`pando-index --
 | `--seed N` | RNG seed for `--sample` (reproducible runs) |
 | `--threads N` | Count a total (`--total`, `--count-only`) or a `count by` over N position ranges in parallel; same result as one thread, first page in the same order (default: 1). See [Parallel counting](#parallel-counting-threads) |
 | `--preload` | Load mmap pages eagerly at corpus open (slower open, can speed first queries) |
+| `--subcorpus DEF` | Restrict every query to a subcorpus (`t:<text genre="fiction">`, `[upos="NOUN"]`, `(A) & (B)`; [Subcorpora](PANDO-CQL-Reference.md#subcorpora-use-and-within-s)). The program then runs as on pando-server `/run` and prints its JSON answer (also for a program with `use S;` or `S = (A) \| (B);`) |
+| `--subcorpus-mode use\|within` | `use` (default): the subcorpus is the corpus of the statistics; `within`: a filter |
+| `--subcorpus-name N` | The name the answer's `"subcorpus"` reports |
 
 ### Quoting and string semantics
 
@@ -67,7 +84,7 @@ More detail: [Collocations and keyness](Collocations-and-Keyness.md).
 
 ### Interactive REPL
 
-When stdin is a TTY and no query is given, `pando` runs an interactive loop (`set`, `show settings`, etc.). Settings there may mirror some of the flags above (e.g. limits for grouped output).
+Without a query, `pando` reads queries from stdin, one per line. On a terminal it shows a `pando>` prompt with line editing and history (`~/.pando_history`), plus session commands (`set`, `show settings`, etc.); from a pipe it reads without a prompt. So a bare `pando` inside a corpus folder opens the prompt on that corpus. `--interactive` opens the prompt even when a query is given (the query is then ignored). Settings there may mirror some of the flags above (e.g. limits for grouped output).
 
 ## `pando-index`
 
@@ -276,6 +293,14 @@ default 2^20 tokens) override, for tests. `--timing` reports the ranges as
 | `GET /sessions` | Open sessions, their memory, the budget |
 | `POST /warm`, `GET /warm` | Start reading the hot (`{"level": "hot"}`, default) or all (`"all"`) index files into the page cache in the background, e.g. when a front-end selects the corpus; the warm-up status. `GET /warm?residency=hot\|all` adds `"residency"`: `bytes`, `resident_bytes`, `resident` (share) of those files in the page cache now (mincore; on demand only) |
 | `GET /info`, `/values/ATTR`, `/regions/TYPE`, `/context?pos=`, `/health` | Corpus description, values, regions, KWIC context |
+| `POST /subcorpus` | Resolve (and cache) a subcorpus definition without running a query: `{"definition": "…", "session_id": optional}` (with a session, names in it are the session's subcorpora and named queries) → `{tokens, ranges, encoding, index_id}`; an invalid definition is a 400 |
+
+`/query` and `/run` take `"subcorpus": {"definition": "…", "mode": "use" | "within", "name": "…"}`
+(or just the definition as a string; mode `use` by default): the request's queries are restricted to
+it, and with `use` the subcorpus is the corpus of the statistics (N, ipm, collocation baselines,
+keyness reference). On `/run` it overrides the session's own `use` for that request. The answer has
+`"subcorpus": {name, mode, tokens, ranges, encoding}`; resolved subcorpora are cached by index and
+definition, the result cache and background totals keep subcorpora apart.
 
 ### Token fragments (`"fragment": true`)
 

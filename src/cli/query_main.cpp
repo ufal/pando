@@ -4,6 +4,7 @@
 #include "api/group_counts.h"
 #include "corpus/corpus.h"
 #include "api/query_json.h"
+#include "api/program_subcorpora.h"
 #include "api/coll_counts.h"
 #include "core/json_utils.h"
 #include "core/match_display.h"
@@ -130,6 +131,8 @@ struct Options {
     std::string anchor_binding = "fanout";  // "fanout" | "innermost"
     // Alignment filters (`:: a.attr = b.attr`): default ignores empty/"_" values.
     bool allow_empty_alignment = false;
+    // EF-12: `--subcorpus DEF [--subcorpus-mode use|within] [--subcorpus-name N]`
+    std::string subcorpus, subcorpus_mode = "use", subcorpus_name;
 };
 
 struct QueryTiming {
@@ -3670,6 +3673,9 @@ static Options parse_args(int argc, char* argv[]) {
         else if (arg == "--sample" && i + 1 < argc) { opts.sample = std::stoul(argv[++i]); }
         else if (arg == "--seed" && i + 1 < argc)  { opts.sample_seed = static_cast<uint32_t>(std::stoul(argv[++i])); }
         else if (arg == "--threads" && i + 1 < argc) { opts.threads = static_cast<unsigned>(std::stoul(argv[++i])); }
+        else if (arg == "--subcorpus" && i + 1 < argc) { opts.subcorpus = argv[++i]; }
+        else if (arg == "--subcorpus-mode" && i + 1 < argc) { opts.subcorpus_mode = argv[++i]; }
+        else if (arg == "--subcorpus-name" && i + 1 < argc) { opts.subcorpus_name = argv[++i]; }
         else if (arg == "--cql" && i + 1 < argc) {
             opts.cql_dialect = argv[++i];
         }
@@ -3746,19 +3752,20 @@ static Options parse_args(int argc, char* argv[]) {
         std::exit(0);
     }
 
+    // No arguments inside a corpus (./pando TEITOK-style, or the index itself): open the REPL there.
+    if (positional.empty() && !opts.pmltq_export_sql) {
+        if (is_corpus_dir("pando")) opts.corpus_dir = "pando";
+        else if (is_corpus_dir(".")) opts.corpus_dir = ".";
+        if (!opts.corpus_dir.empty()) {
+            opts.interactive = true;
+            return opts;
+        }
+    }
+
     if (positional.empty()) {
-        std::cerr << "Usage: pando [options] <corpus_dir> [query]\n\n"
-                  << "If the first argument is not a corpus directory but ./pando/ contains corpus.info "
-                     "(TEITOK-style layout), the corpus defaults to ./pando and all arguments are the query. "
-                     "If the current directory is already a corpus (./corpus.info), it is used the same way.\n\n"
-                  << "If [query] is omitted, CQL is read from stdin. With a terminal (stdin is a TTY), "
-                     "an interactive REPL runs with a pando> prompt; with a pipe, queries are read "
-                     "line by line with no prompt. Use --interactive to open the same REPL even when "
-                     "a query string is present on the command line (it is then ignored).\n\n"
-                  << "Shell quoting: CQL string literals often use double quotes (e.g. form=\"can't\"). "
-                     "Wrap the whole query in double quotes and backslash-escape those inner quotes:\n"
-                  << "  ./pando CORP \"[form=\\\"can't\\\" | contr_form=\\\"can't\\\"]+\"\n"
-                  << "Avoid nesting single quotes like '\"can''t\"' — the shell drops the apostrophe.\n\n"
+        std::cerr << "Usage: pando [options] [corpus_dir] [query]\n\n"
+                  << "corpus_dir defaults to ./pando or the current directory. Without a query, queries\n"
+                  << "are read from stdin (interactive prompt on a terminal).\n\n"
                   << "Options:\n"
                   << "  --version, -V    Print version and exit\n"
                   << "  --json           Output as JSON (human-/tool-friendly)\n"
@@ -3802,6 +3809,13 @@ static Options parse_args(int argc, char* argv[]) {
                   << "  --max-gap N      Cap for + and * quantifiers (default: " << REPEAT_UNBOUNDED << ")\n"
                   << "  --strict-quoted-strings  Only /pattern/ is regex; quoted strings are always literal\n"
                   << "  --no-mv-explode  count/freq: keep pipe-joined multivalue keys (no per-component buckets)\n"
+                  << "  --subcorpus DEF  Restrict every query to a subcorpus (EF-12): a region query\n"
+                  << "                   (t:<text genre=\"fiction\">), a token query, or (A) & (B) | (C) - (D);\n"
+                  << "                   the program then runs as on pando-server /run (JSON answer)\n"
+                  << "  --subcorpus-mode use|within  use (default): the subcorpus is the corpus (N, ipm,\n"
+                  << "                   collocates, keyness); within: a filter, statistics of the whole corpus\n"
+                  << "  --subcorpus-name N  The name the answer reports\n"
+                  << "  Programs with `use S;`, `use;` or `S = (A) & (B);` also run as on /run.\n"
                   << "\nCollocation options (coll/dcoll commands):\n"
                   << "  --window N       Symmetric window size (default: 5)\n"
                   << "  --left N         Left window size (overrides --window)\n"
@@ -3924,6 +3938,34 @@ int main(int argc, char* argv[]) {
 
     if (opts.interactive && !opts.query.empty() && !opts.json && !opts.api)
         std::cerr << "Note: --interactive reads CQL from stdin; the command-line query is ignored.\n";
+
+    // EF-12: a subcorpus (option or statements): the program runs as on pando-server /run
+    if (!opts.interactive && (!opts.subcorpus.empty() || has_subcorpus_statements(opts.query))) {
+        try {
+            ProgramOptions po;
+            po.limit = opts.limit; po.offset = opts.offset; po.max_total = opts.max_total;
+            po.context = opts.context; po.total = opts.total; po.attrs = opts.attrs;
+            po.strict_quoted_strings = opts.strict_quoted_strings;
+            po.dialect = opts.cql_dialect == "native" ? std::string() : opts.cql_dialect;
+            po.allow_empty_alignment = opts.allow_empty_alignment;
+            po.group_limit = opts.group_limit; po.child_limit = opts.child_limit;
+            po.coll_left = opts.coll_left; po.coll_right = opts.coll_right; po.coll_min_freq = opts.coll_min_freq;
+            po.coll_max_items = opts.coll_max_items; po.coll_stoplist = opts.coll_stoplist;
+            po.coll_measures = opts.coll_measures; po.dcoll_baseline = opts.dcoll_baseline;
+            po.threads = opts.threads;
+            if (!opts.subcorpus.empty()) {
+                if (opts.subcorpus_mode != "use" && opts.subcorpus_mode != "within")
+                    throw std::runtime_error("--subcorpus-mode is use or within, not " + opts.subcorpus_mode);
+                po.subcorpus_request = SubcorpusRequest{opts.subcorpus, opts.subcorpus_mode, opts.subcorpus_name};
+            }
+            ProgramSession ps;
+            std::cout << run_program_json(corpus, ps, opts.query, po);
+        } catch (const std::exception& e) {
+            std::cout << "{\"ok\": false, \"error\": {\"stage\": \"query\", \"message\": " << jstr(e.what()) << "}}\n";
+            return 1;
+        }
+        return 0;
+    }
 
     if (!opts.interactive) {
         try {

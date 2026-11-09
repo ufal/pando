@@ -1,0 +1,15 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/subcorpus",
+  "body": {
+   "definition": "[upos=\"NOUN\""
+  }
+ },
+ "status": 400,
+ "answer": {
+  "ok": false,
+  "error": "invalid subcorpus definition: Expected ']' but got '' at position 12 (in: [upos=\"NOUN\")",
+  "format_version": 1
+ }
+}

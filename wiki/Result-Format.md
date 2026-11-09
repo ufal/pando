@@ -41,6 +41,7 @@ Two other emitters exist and are **not yet** under this contract. They are being
 | `reused` | for programs: named queries that were reused instead of run again |
 | `result.warnings` | notes worth reading, only when there are any: on hits (a `with` without a linking condition), and on any answer whose date functions read values that are not EDTF, are no date, or do not give what was asked ([Dates](PANDO-CQL-Reference.md)); when `result` is no object, `warnings` is the answer's own |
 | `session_id`, `hitset` | with a client session |
+| `subcorpus` | when the answer's hits or statistics are restricted to a subcorpus (EF-12): `{name, mode, tokens, ranges, encoding}` — `name` as given (`null` when none), `mode` `"use"` (the subcorpus is the corpus of the statistics) or `"within"` (a filter), `tokens` its size, `ranges` its pieces (runs of consecutive positions), `encoding` `"ranges"` or `"roaring"`. On `/query` and `/run` answers (also `pando_query` / `pando_run`), after `use S` on every answer of the session that depends on it. |
 | `format_version` | this page's version |
 
 A program (`/run`) answers with the output of its **last** output-producing statement.
@@ -86,6 +87,10 @@ Pages are cut by pair.
 
 ### Programs (`/run`)
 
+Under `use S` (or a request's `"subcorpus"` in mode `use`), `corpus_size`, `ipm`, `subcorpus_size`
+(per group: the part inside S), the collocates' `freq` and `keyness`'s `ref_size` are those of the
+subcorpus; in mode `within` they stay those of the corpus.
+
 | `operation` | `result` | items |
 |---|---|---|
 | `count` (one field) | `total_matches, groups, groups_returned, fields[], rows[]` | `{key, count, pct}` |
@@ -108,7 +113,9 @@ Pages are cut by pair.
 | `values` (`show values A`) | `attr, type, unique, returned, values[]` | `{value, count}` |
 | `show_named` | a list | `{name, matches, materialised, total_known}` |
 | `show_settings` | the settings | |
-| `set` | no `result`; `setting, value` | |
+| `set` | no `result`; `setting, value` |
+| `subcorpus` (`S = (A) & (B)`) | no `result`; `name, definition, tokens, ranges, encoding, index_id` |
+| `use` (`use S`, `use;`) | no `result`; `corpus_size` (the whole corpus) and `subcorpus` (`null` after `use;`) | |
 | `drop` | no `result` | |
 
 ### Grouped counts (`count` / `group` by several fields)
@@ -163,6 +170,7 @@ A node:
 | `GET /status?job=`, `POST /cancel`, `GET /jobs` | the job, `{job, cancelled}`, `{jobs[]}` |
 | `POST /session`, `GET /session`, `POST /session/close`, `GET /sessions` | session id, its stored sets, closing, all sessions |
 | `GET /warm` | `{warm{}, residency?}` |
+| `POST /subcorpus` `{"definition": …}` | `{operation: "subcorpus", tokens, ranges, encoding, index_id, corpus_size, definition}` (no `result`); an invalid definition is a 400 |
 
 `contract/answers/` has a complete example of each.
 

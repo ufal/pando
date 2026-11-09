@@ -10,6 +10,8 @@
 #include "api/coll_counts.h"
 #include "api/group_counts.h"
 #include "api/result_cache.h"
+#include "api/program_subcorpora.h"
+#include "api/subcorpus_stats.h"
 #include "core/json_utils.h"
 #include "query/parser.h"
 #include "query/executor.h"
@@ -182,6 +184,8 @@ struct HitSet {
     /// for result cache keys; empty when the query depends on the session (labels
     /// of earlier statements, `where` sets, dep_subtree sources): not cached.
     std::string recipe;
+    /// EF-12: the subcorpus the hits were restricted to, and the statistics it implies
+    SubcorpusStatsPtr sc_stats;
     NameIndexMap nm, tnm;
     bool total_known = false;
     size_t total = 0;
@@ -305,6 +309,7 @@ struct ProgramSession::Impl {
     ResultCache* cache = nullptr;            // P6.4 (shared by the server's sessions)
     size_t max_hits = 0;                     // 0 = no limit
     ProgramSession::AdmitFn admit;
+    SessionSubcorpora subcorpora;            // EF-12: `S = (…) & (…)`, `use S`
 
     HitSetPtr find(const std::string& name) const {
         auto it = sets.find(name);
@@ -578,7 +583,7 @@ MatchSet query_page_of(const Corpus& corpus, QueryExecutor& ex, const HitSet& hs
 
 void ProgramSession::store_query(const Corpus& corpus, const std::string& name, const std::string& query_text,
                                  const QueryOptions& opts, const MatchSet& result) {
-    auto prog = std::make_shared<Program>(parse_in_dialect(query_text, opts.dialect, ParserOptions{opts.strict_quoted_strings}, &corpus));
+    auto prog = std::make_shared<Program>(parse_query_program(corpus, query_text, opts));   // with its subcorpus
     size_t si = 0;
     while (si < prog->size() && !(*prog)[si].has_query) ++si;
     if (si == prog->size()) throw std::runtime_error("not a query: " + query_text);
@@ -590,6 +595,15 @@ void ProgramSession::store_query(const Corpus& corpus, const std::string& name, 
     hs->allow_empty_alignment = opts.allow_empty_alignment;
     const Statement& st = hs->st();
     hs->recipe = recipe_of(st, opts.strict_quoted_strings, opts.allow_empty_alignment);
+    if (std::string sk = subcorpus_cache_key(opts); !sk.empty() && !hs->recipe.empty())
+        hs->recipe += "\x1fsubcorpus=" + sk;
+    if (opts.subcorpus && opts.subcorpus->sc) {
+        auto st_sc = std::make_shared<SubcorpusStats>();
+        st_sc->use = opts.subcorpus->is_use() ? opts.subcorpus : nullptr;
+        st_sc->inside = opts.subcorpus->sc;
+        st_sc->reported = opts.subcorpus;
+        hs->sc_stats = st_sc;
+    }
     hs->nm = st.is_parallel ? build_name_map(st.query) : QueryExecutor::build_name_map_for_stripped_query(st.query);
     hs->tnm = st.is_parallel ? build_name_map(st.target_query) : NameIndexMap{};
     if (opts.total && result.total_exact) {
@@ -706,6 +720,19 @@ size_t ProgramSession::drop_caches() {
 
 void ProgramSession::set_result_cache(ResultCache* cache) { impl_->cache = cache; }
 
+std::optional<std::string> ProgramSession::subcorpus_definition(const std::string& name) const {
+    auto d = impl_->subcorpora.defs.find(name);
+    if (d != impl_->subcorpora.defs.end()) return d->second;
+    if (HitSetPtr hs = impl_->find(name)) {
+        const Statement& st = hs->st();
+        if (st.is_parallel || !st.has_query) return std::nullopt;
+        std::string src = !hs->text.empty() ? hs->text : st.source;
+        if (src.empty()) return std::nullopt;
+        return src;
+    }
+    return std::nullopt;
+}
+
 void ProgramSession::set_max_hits(size_t n) { impl_->max_hits = n; }
 void ProgramSession::set_admission(AdmitFn admit) { impl_->admit = std::move(admit); }
 size_t ProgramSession::size() const { return impl_->sets.size(); }
@@ -817,11 +844,12 @@ static std::optional<FreqSubcorpusSpec> resolve_freq_subcorpus_spec(
 static std::unordered_map<std::string, double> build_freq_subcorpus_sizes(
         const FreqSubcorpusSpec& spec,
         const std::vector<std::string>& keys,
-        double corpus_size) {
+        double corpus_size, const SubcorpusStats* sc = nullptr) {
     std::unordered_map<std::string, double> out;
     if (!spec.sa) return out;
 
-    if (spec.fields.size() == 1 && !spec.fields[0].part) {
+    // (under `use`: the part of each region inside the subcorpus, from the loop below)
+    if (spec.fields.size() == 1 && !spec.fields[0].part && !(sc && sc->use)) {
         const auto& f0 = spec.fields[0];
         for (const auto& key : keys) {
             size_t span = spec.sa->token_span_sum_for_attr_eq(f0.region_attr, key);
@@ -844,7 +872,7 @@ static std::unordered_map<std::string, double> build_freq_subcorpus_sizes(
         if (!ok) continue;
         Region rg = spec.sa->get(ri);
         if (rg.end < rg.start) continue;
-        span_by_key[key] += static_cast<size_t>(rg.end - rg.start + 1);
+        span_by_key[key] += static_cast<size_t>(stats_span_tokens(sc, rg.start, rg.end));
     }
     for (const auto& key : keys) {
         auto it = span_by_key.find(key);
@@ -1139,12 +1167,12 @@ static void emit_freq_compare_json(std::ostream& out, const Corpus& corpus, cons
                   return compare_group_keys(a, b);
               });
 
-    double corpus_size = static_cast<double>(corpus.size());
+    const double corpus_size = static_cast<double>(stats_corpus_size(corpus, opts.stats.get()));   // EF-12: N
     auto freq_spec = resolve_freq_subcorpus_spec(corpus, cmd.fields);
     const bool use_subcorpus_ipm = freq_spec.has_value();
     std::unordered_map<std::string, double> subcorpus_sizes =
             use_subcorpus_ipm
-                ? build_freq_subcorpus_sizes(*freq_spec, sorted_keys, corpus_size)
+                ? build_freq_subcorpus_sizes(*freq_spec, sorted_keys, corpus_size, opts.stats.get())
                 : std::unordered_map<std::string, double>{};
     auto ipm_denom = [&](const std::string& key) -> double {
         if (use_subcorpus_ipm) {
@@ -1160,7 +1188,7 @@ static void emit_freq_compare_json(std::ostream& out, const Corpus& corpus, cons
         if (i > 0) out << ", ";
         out << jstr(srcs[i].label);
     }
-    out << "],\n  \"corpus_size\": " << corpus.size() << ",\n";
+    out << "],\n  \"corpus_size\": " << stats_corpus_size(corpus, opts.stats.get()) << ",\n";
     out << "  \"freq_mode\": \"compare\",\n";
     out << "  \"per_subcorpus_ipm\": " << (use_subcorpus_ipm ? "true" : "false") << ",\n";
     out << "  \"fields\": [";
@@ -1219,7 +1247,7 @@ static void emit_freq_json(std::ostream& out, const Corpus& corpus, const MatchS
                               cmd.fields.size() == 1 && corpus.is_multivalue(cmd.fields[0]));
     const auto& sorted = gr.rows;
     const size_t total_matches = gr.total;
-    double corpus_size = static_cast<double>(corpus.size());
+    const double corpus_size = static_cast<double>(stats_corpus_size(corpus, opts.stats.get()));   // EF-12: N
 
     // Per-subcorpus IPM: when grouping by a single region attribute, use per-group
     // token counts as IPM denominator for meaningful relative frequencies.
@@ -1230,7 +1258,7 @@ static void emit_freq_json(std::ostream& out, const Corpus& corpus, const MatchS
     for (const auto& kv : sorted) sorted_keys.push_back(kv.first);
     std::unordered_map<std::string, double> subcorpus_sizes =
             use_subcorpus_ipm
-                ? build_freq_subcorpus_sizes(*freq_spec, sorted_keys, corpus_size)
+                ? build_freq_subcorpus_sizes(*freq_spec, sorted_keys, corpus_size, opts.stats.get())
                 : std::unordered_map<std::string, double>{};
 
     auto ipm_denom = [&](const std::string& key) -> double {
@@ -1242,7 +1270,7 @@ static void emit_freq_json(std::ostream& out, const Corpus& corpus, const MatchS
     };
 
     out << "{\"ok\": true, \"operation\": \"freq\", \"last_command\": \"freq\", \"result\": {\n";
-    out << "  \"corpus_size\": " << corpus.size() << ",\n";
+    out << "  \"corpus_size\": " << stats_corpus_size(corpus, opts.stats.get()) << ",\n";
     out << "  \"total_matches\": " << total_matches << ",\n";
     out << "  \"freq_mode\": \"single\",\n";
     out << "  \"source_query\": " << jstr(source_query_name) << ",\n";
@@ -1518,8 +1546,10 @@ static void emit_raw_json(std::ostream& out, const Corpus& corpus, const MatchSe
 /// `coll` counts over materialised hits (the sink path counts in the executor).
 static CollCounts count_coll_hits(const Corpus& corpus, const PositionalAttr& pa, const MatchSet& ms,
                                   const GroupCommand& cmd, int left, int right,
-                                  const NameIndexMap& name_map, const NameIndexMap* target_name_map) {
+                                  const NameIndexMap& name_map, const NameIndexMap* target_name_map,
+                                  const PositionSet* inside = nullptr) {
     CollCounter counter(pa, left, right, corpus.size());
+    counter.set_inside(inside);   // EF-12: collocates outside the subcorpus do not count
     auto envelope = [&](const Match& m) {
         if (m.named_dep_subtrees.empty()) {
             counter.add_envelope(m.first_pos(), m.last_pos());
@@ -1576,7 +1606,7 @@ static void emit_coll_json(std::ostream& out, const Corpus& corpus, const MatchS
                            const NameIndexMap& name_map, const NameIndexMap* target_name_map) {
     const auto& pa = corpus.attr(coll_attr_of(corpus, cmd));
     const CollCounts cc = count_coll_hits(corpus, pa, ms, cmd, opts.coll_left, opts.coll_right,
-                                          name_map, target_name_map);
+                                          name_map, target_name_map, stats_inside(opts.stats.get()));
     const size_t coll_match_n =
             !ms.parallel_matches.empty() ? ms.parallel_matches.size() : ms.matches.size();
     emit_coll_result_json(out, corpus, cmd, opts, cc, coll_match_n);
@@ -1593,13 +1623,15 @@ static void emit_coll_result_json(std::ostream& out, const Corpus& corpus, const
     const size_t total_window_positions = cc.total;
 
     std::vector<CollEntry> entries;
-    size_t N = corpus.size();
+    // EF-12: under `use` the subcorpus is the corpus (N, the collocate's frequency)
+    const size_t N = static_cast<size_t>(stats_corpus_size(corpus, opts.stats.get()));
+    const StatsFreqs freqs(corpus, opts.stats.get(), coll_attr);
     for (const auto& [id, obs] : obs_counts) {
         if (stop_ids.count(id)) continue;
         if (obs < opts.coll_min_freq) continue;
         std::string w = std::string(pa.lexicon().get(id));
         if (w.empty()) continue;
-        entries.push_back({id, std::move(w), obs, pa.count_of_id(id), total_window_positions, N});
+        entries.push_back({id, std::move(w), obs, static_cast<size_t>(freqs.of(id)), total_window_positions, N});
     }
     std::sort(entries.begin(), entries.end(), [&](const CollEntry& a, const CollEntry& b) {
         // ties: more observations first, then by value (deterministic order)
@@ -1638,8 +1670,9 @@ static void emit_coll_result_json(std::ostream& out, const Corpus& corpus, const
 /// `dcoll` counts over materialised hits.
 static CollCounts count_dcoll_hits(const Corpus& corpus, const PositionalAttr& pa, const MatchSet& ms,
                                    const GroupCommand& cmd, const NameIndexMap& name_map,
-                                   const NameIndexMap* target_name_map) {
+                                   const NameIndexMap* target_name_map, const PositionSet* inside = nullptr) {
     DcollCounter counter(corpus, pa, cmd.relations, cmd.dcoll_layer);
+    counter.set_inside(inside);   // EF-12: relatives outside the subcorpus do not count
     const std::string bd = dcoll_breakdown_name(cmd);
     if (!bd.empty() && corpus.has_attr(bd)) counter.set_breakdown(&corpus.attr(bd));
     auto emit_one = [&](const Match& m, const Match* tgt) {
@@ -1678,7 +1711,8 @@ static void emit_dcoll_json(std::ostream& out, const Corpus& corpus, const Match
         return;
     }
     const auto& pa = corpus.attr(coll_attr_of(corpus, cmd));
-    const CollCounts cc = count_dcoll_hits(corpus, pa, ms, cmd, name_map, target_name_map);
+    const CollCounts cc = count_dcoll_hits(corpus, pa, ms, cmd, name_map, target_name_map,
+                                           stats_inside(opts.stats.get()));
     const size_t n = !ms.parallel_matches.empty() ? ms.parallel_matches.size() : ms.matches.size();
     emit_dcoll_result_json(out, corpus, cmd, opts, cc, n);
 }
@@ -1707,11 +1741,13 @@ static bool sink_coll_json(std::ostream& out, const Corpus& corpus, HitSet& hs, 
     std::unique_ptr<HitSink> sink;
     if (coll) {
         cc.emplace(pa, opts.coll_left, opts.coll_right, corpus.size());
+        cc->set_inside(stats_inside(opts.stats.get()));
         sink = std::make_unique<CollHitSink>(*cc, index_of(cmd.coll_on_label, -2));
     } else {
         const std::string bd = dcoll_breakdown_name(cmd);
         if (!bd.empty() && !corpus.has_attr(bd)) return false;   // emit_dcoll_json reports it
         dc.emplace(corpus, pa, cmd.relations, cmd.dcoll_layer);
+        dc->set_inside(stats_inside(opts.stats.get()));
         if (!bd.empty()) dc->set_breakdown(&corpus.attr(bd));
         sink = std::make_unique<DcollHitSink>(*dc, index_of(cmd.dcoll_anchor, -1));
     }
@@ -1737,7 +1773,11 @@ static void emit_dcoll_result_json(std::ostream& out, const Corpus& corpus, cons
     const size_t total_related = cc.total;
 
     // the collocate's frequency and N in the same space as `obs` (dcoll_totals.h)
-    const DcollTotals totals = opts.dcoll_baseline == DcollBaseline::Corpus
+    // EF-12: under `use`, counted inside the subcorpus (subcorpus_stats.h)
+    const auto in_sub = stats_dcoll_counts(corpus, opts.stats.get(), coll_attr, opts.dcoll_baseline, cmd.relations,
+                                           cmd.dcoll_layer);
+    const DcollTotals totals = in_sub ? DcollTotals::counted(opts.dcoll_baseline, in_sub)
+        : opts.dcoll_baseline == DcollBaseline::Corpus
         ? DcollTotals::corpus(pa, corpus.size()) : DcollTotals::relation(corpus, coll_attr, cc.pairs);
     const bool by_relation = totals.baseline() == DcollBaseline::Relation;
     std::vector<CollEntry> entries;
@@ -1777,7 +1817,7 @@ static void emit_dcoll_result_json(std::ostream& out, const Corpus& corpus, cons
     for (size_t i = 0; i < show; ++i) {
         if (i > 0) out << ",\n";
         out << "    {\"word\": " << jstr(entries[i].form) << ", \"obs\": " << entries[i].obs
-            << ", \"freq\": " << pa.count_of_id(entries[i].id);
+            << ", \"freq\": " << StatsFreqs(corpus, opts.stats.get(), coll_attr).of(entries[i].id);
         if (by_relation) out << ", \"relation_freq\": " << entries[i].f_coll;
         for (const auto& meas : measures)
             out << ", " << jstr(meas) << ": " << std::fixed << std::setprecision(3) << compute_measure(meas, entries[i]);
@@ -1837,8 +1877,11 @@ static void emit_keyness_json(std::ostream& out, const Corpus& corpus, const Mat
             }
         }
     } else {
-        ref_size = corpus.size() - focus_size;
+        // EF-12: under `use` the rest of the subcorpus
+        const uint64_t n = stats_corpus_size(corpus, opts.stats.get());
+        ref_size = n > focus_size ? static_cast<size_t>(n) - focus_size : 0;
     }
+    const StatsFreqs corpus_freqs(corpus, opts.stats.get(), attr);
 
     double N = static_cast<double>(focus_size + ref_size);
 
@@ -1862,7 +1905,7 @@ static void emit_keyness_json(std::ostream& out, const Corpus& corpus, const Mat
             auto rit = ref_counts.find(id);
             if (rit != ref_counts.end()) rfreq = rit->second;
         } else {
-            size_t corpus_freq = pa.count_of_id(id);
+            size_t corpus_freq = static_cast<size_t>(corpus_freqs.of(id));
             rfreq = corpus_freq > ffreq ? corpus_freq - ffreq : 0;
         }
 
@@ -1899,7 +1942,7 @@ static void emit_keyness_json(std::ostream& out, const Corpus& corpus, const Mat
     out << "  \"attribute\": " << jstr(attr) << ",\n";
     out << "  \"focus_size\": " << focus_size << ",\n";
     out << "  \"ref_size\": " << ref_size << ",\n";
-    out << "  \"corpus_size\": " << corpus.size() << ",\n";
+    out << "  \"corpus_size\": " << stats_corpus_size(corpus, opts.stats.get()) << ",\n";
     out << "  \"stoplist\": " << opts.coll_stoplist << ",\n";
     out << "  \"rows\": [\n";
     for (size_t i = 0; i < show; ++i) {
@@ -1993,8 +2036,21 @@ static void emit_show_named_json(std::ostream& out, const ProgramSession& ps) {
 
 // ── Main dispatch ───────────────────────────────────────────────────────
 
-std::string run_program_json(Corpus& corpus, ProgramSession& ps,
-                             const std::string& cql, ProgramOptions opts) {
+namespace {
+
+/// EF-12: the subcorpora a program piece runs under.
+struct PieceContext {
+    AppliedSubcorpusPtr use;              // the session's `use`, or the request's subcorpus in mode use
+    AppliedSubcorpusPtr request_within;   // the request's subcorpus in mode within
+    SubcorpusResolveOptions ro;           // names: the session's subcorpora and hit sets
+    AppliedSubcorpusPtr reported;         // what the answer of the last statement reports
+};
+
+}  // namespace
+
+// The statements of a program without subcorpus statements (see run_program_json).
+static std::string run_program_piece(Corpus& corpus, ProgramSession& ps, const std::string& cql,
+                                     ProgramOptions& opts, PieceContext& ctx) {
     auto& S = *ps.impl_;
 
     auto prog = std::make_shared<Program>(parse_in_dialect(cql, opts.dialect, ParserOptions{opts.strict_quoted_strings}, &corpus));
@@ -2045,6 +2101,10 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
         auto& stmt = (*prog)[si];
         bool next_is_command = (si + 1 < prog->size() && (*prog)[si + 1].has_command);
 
+        ctx.reported = nullptr;
+        // EF-12: `use` / `within NAME` / the request's subcorpus restrict the query
+        SubcorpusStatsPtr sc_stats;
+        if (stmt.has_query) sc_stats = restrict_statement(corpus, stmt, ctx.use, ctx.request_within, ctx.ro);
         if (stmt.has_query) {
             immediate.reset();
             // Persistent names: `:: eng.s_tuid = nld.s_tuid` with `eng` bound by an
@@ -2077,6 +2137,9 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
             hs->display = cql;
             hs->allow_empty_alignment = opts.allow_empty_alignment;
             hs->recipe = recipe_of(stmt, opts.strict_quoted_strings, opts.allow_empty_alignment, external_labels);
+            hs->sc_stats = sc_stats;
+            if (sc_stats && !hs->recipe.empty()) hs->recipe += "\x1fsubcorpus=" + sc_stats->cache_key();
+            ctx.reported = sc_stats ? sc_stats->reported : nullptr;
             hs->nm = stmt.is_parallel ? build_name_map(stmt.query)
                                       : QueryExecutor::build_name_map_for_stripped_query(stmt.query);
             hs->tnm = stmt.is_parallel ? build_name_map(stmt.target_query) : NameIndexMap{};
@@ -2146,8 +2209,8 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
         if (stmt.has_command) {
             // Commands that don't need a MatchSet
             if (stmt.command.type == CommandType::DROP) {
-                if (stmt.command.query_name == "all") S.sets.clear();
-                else S.sets.erase(stmt.command.query_name);
+                if (stmt.command.query_name == "all") { S.sets.clear(); S.subcorpora.defs.clear(); }
+                else { S.sets.erase(stmt.command.query_name); S.subcorpora.defs.erase(stmt.command.query_name); }
                 out.str(""); out.clear();
                 out << "{\"ok\": true, \"operation\": \"drop\"}\n";
                 continue;
@@ -2172,6 +2235,7 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                 continue;
             }
             if (stmt.command.type == CommandType::SHOW_INFO) {
+                ctx.reported = ctx.use;   // EF-12: the corpus is the subcorpus
                 out.str(""); out.clear(); emit_show_info_json(out, corpus); continue;
             }
             if (stmt.command.type == CommandType::SET) {
@@ -2250,6 +2314,7 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                 continue;
             }
             if (stmt.command.type == CommandType::SIZE && stmt.command.query_name.empty() && !S.find("Last")) {
+                ctx.reported = ctx.use;
                 out.str(""); out.clear(); emit_show_info_json(out, corpus); continue;
             }
 
@@ -2275,6 +2340,8 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
                 continue;
             }
             hs->touch();
+            opts.stats = hs->sc_stats;   // EF-12: N, frequencies and collocates of its subcorpus
+            ctx.reported = hs->sc_stats ? hs->sc_stats->reported : nullptr;
             const std::string ckey = command_key(*hs, stmt, dcoll_cmd.has_value());
             if (!ckey.empty()) {
                 if (auto e = S.cache->get(ckey)) {
@@ -2498,8 +2565,68 @@ std::string run_program_json(Corpus& corpus, ProgramSession& ps,
         if (brace != std::string::npos) result.insert(brace + 1, m + "], ");
     }
     // dates read by its date functions: values read the old way, no date, or not giving what was asked
-    if (result.find("\"ok\": false") == std::string::npos && result.find("\"ok\":false") == std::string::npos)
+    if (result.find("\"ok\": false") == std::string::npos && result.find("\"ok\":false") == std::string::npos) {
         result = with_result_warnings(std::move(result), date_value_notes(corpus, date_uses(*prog)));
+        if (ctx.reported) result = with_subcorpus_member(std::move(result), *ctx.reported);
+    }
+    return result;
+}
+
+// EF-12: the subcorpus statements (`use …;`, `use;`, `NAME = <set expression>;`) are taken
+// out of the program (api/program_subcorpora.h); the other statements run in pieces between
+// them, under the `use` in effect. The answer is the last statement's.
+std::string run_program_json(Corpus& corpus, ProgramSession& ps,
+                             const std::string& cql, ProgramOptions opts) {
+    auto& S = *ps.impl_;
+    PieceContext ctx;
+    ctx.ro.progress = opts.progress;
+    ctx.ro.lookup = [&ps](const std::string& n) { return ps.subcorpus_definition(n); };
+    AppliedSubcorpusPtr request;
+    if (opts.subcorpus_request) request = applied_subcorpus(corpus, *opts.subcorpus_request, ctx.ro);
+    auto current = [&]() {
+        ctx.use = request && request->is_use() ? request : S.subcorpora.use;
+        ctx.request_within = request && !request->is_use() ? request : nullptr;
+    };
+    const std::vector<ProgramPiece> pieces = split_subcorpus_statements(cql);
+    if (pieces.empty() || (pieces.size() == 1 && pieces[0].kind == ProgramPiece::Kind::Plain)) {
+        current();
+        return run_program_piece(corpus, ps, cql, opts, ctx);   // (the program as written)
+    }
+    std::string result;
+    for (const ProgramPiece& piece : pieces) {
+        switch (piece.kind) {
+            case ProgramPiece::Kind::Plain:
+                current();
+                result = run_program_piece(corpus, ps, piece.text, opts, ctx);
+                break;
+            case ProgramPiece::Kind::Define: {
+                if (corpus.has_structure(piece.name))
+                    throw SubcorpusError("'" + piece.name + "' is a structure of this corpus: choose another name");
+                ResolvedSubcorpusPtr sc = resolve_subcorpus(corpus, piece.text, ctx.ro);
+                S.subcorpora.defs[piece.name] = piece.text;
+                result = "{\"ok\": true, \"operation\": \"subcorpus\", \"name\": " + jstr(piece.name)
+                    + ", \"definition\": " + jstr(piece.text) + ", \"tokens\": " + std::to_string(sc->set().tokens())
+                    + ", \"ranges\": " + std::to_string(sc->set().runs()) + ", \"encoding\": "
+                    + jstr(sc->set().encoding_name()) + ", \"index_id\": " + jstr(sc->index_id()) + "}\n";
+                break;
+            }
+            case ProgramPiece::Kind::Use: {
+                auto a = std::make_shared<AppliedSubcorpus>();
+                a->name = piece.name;
+                a->mode = "use";
+                a->sc = resolve_subcorpus(corpus, piece.text, ctx.ro);
+                S.subcorpora.use = a;
+                result = with_subcorpus_member("{\"ok\": true, \"operation\": \"use\", \"corpus_size\": "
+                                               + std::to_string(corpus.size()) + "}\n", *a);
+                break;
+            }
+            case ProgramPiece::Kind::UseReset:
+                S.subcorpora.use.reset();
+                result = "{\"subcorpus\": null, \"ok\": true, \"operation\": \"use\", \"corpus_size\": "
+                    + std::to_string(corpus.size()) + "}\n";
+                break;
+        }
+    }
     return result;
 }
 

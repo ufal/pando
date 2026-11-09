@@ -10,6 +10,8 @@
 
 namespace pando {
 
+class PositionSet;   // subcorpus/position_set.h
+
 // ── Relation types between query tokens ─────────────────────────────────
 
 enum class RelationType {
@@ -119,6 +121,8 @@ struct AttrCondition {
     std::shared_ptr<const std::vector<int64_t>> in_regions;
     std::string in_region_struct;
     size_t in_region_tokens = 0;
+    /// op == IN, alternatively: the token lies in this subcorpus (EF-12, subcorpus/restrict.h)
+    std::shared_ptr<const PositionSet> in_set;
 };
 
 // ── Boolean combination of conditions ───────────────────────────────────

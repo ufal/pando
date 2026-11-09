@@ -9,6 +9,7 @@
 #include "api/dcoll_totals.h"
 #include "corpus/corpus.h"
 #include "query/executor.h"
+#include "subcorpus/position_set.h"
 
 #include <cstdint>
 #include <string>
@@ -50,8 +51,12 @@ public:
 
     CollCounts finish() const;
 
+    /// EF-12: count only collocates at these positions (a subcorpus; nullptr = all)
+    void set_inside(const PositionSet* s) { inside_ = s; }
+
 private:
     void count(CorpusPos p);
+    const PositionSet* inside_ = nullptr;
     const PositionalAttr& pa_;
     CorpusPos left_, right_, n_;
     LexiconId empty_id_;
@@ -79,6 +84,8 @@ public:
     /// node's deprel (over a relation layer the link's label), not the head's own
     /// relation upwards; other attributes are the collocate's own.
     void set_breakdown(const PositionalAttr* attr) { bd_ = attr; }
+    /// EF-12: count only relatives at these positions (a subcorpus; nullptr = all)
+    void set_inside(const PositionSet* s) { inside_ = s; }
 
     /// Does the counting (the nodes are buffered, so the children can be found
     /// from the child side when there are many).
@@ -96,6 +103,7 @@ private:
     CollCounts done() const;
     CollCounts finish_layer();
     const RelationLayer* layer_ = nullptr;
+    const PositionSet* inside_ = nullptr;
     std::string layer_name_;
     std::vector<std::string> deprel_names_;   // the deprels asked for, as the layer's labels
     const PositionalAttr* bd_ = nullptr;

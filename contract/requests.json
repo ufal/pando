@@ -49,6 +49,17 @@
     {"name": "version", "method": "GET", "path": "/version"},
     {"name": "warm", "method": "GET", "path": "/warm"},
 
+    {"name": "subcorpus_route", "method": "POST", "path": "/subcorpus", "body": {"definition": "t:<text lang=\"en\">"}},
+    {"name": "subcorpus_route_tokens", "method": "POST", "path": "/subcorpus", "body": {"definition": "([upos=\"NOUN\"]) - (t:<text lang=\"nl\">)"}},
+    {"name": "query_subcorpus_use", "method": "POST", "path": "/query", "body": {"query": "[upos=\"NOUN\"]", "limit": 2, "total": true, "subcorpus": {"definition": "t:<text lang=\"en\">", "name": "English"}}},
+    {"name": "query_subcorpus_within", "method": "POST", "path": "/query", "body": {"query": "[upos=\"NOUN\"]", "limit": 2, "subcorpus": {"definition": "t:<text lang=\"en\">", "mode": "within"}}},
+    {"name": "run_subcorpus_freq", "method": "POST", "path": "/run", "body": {"cql": "[upos=\"NOUN\"]; freq by lemma", "limit": 5, "subcorpus": {"definition": "t:<text lang=\"en\">", "name": "English"}}},
+    {"name": "run_subcorpus_define", "method": "POST", "path": "/run", "body": {"cql": "EN = (t:<text lang=\"en\">) | (t:<text year=\"1990\">)", "limit": 5}},
+    {"name": "run_use", "method": "POST", "path": "/run", "body": {"cql": "use (t:<text lang=\"en\">); [upos=\"NOUN\"]; freq by lemma", "limit": 5}},
+    {"name": "run_use_reset", "method": "POST", "path": "/run", "body": {"cql": "use", "limit": 5}},
+    {"name": "error_subcorpus_definition", "method": "POST", "path": "/subcorpus", "body": {"definition": "[upos=\"NOUN\""}, "status": 400},
+    {"name": "error_subcorpus_mode", "method": "POST", "path": "/query", "body": {"query": "[]", "subcorpus": {"definition": "[]", "mode": "inside"}}, "status": 400},
+
     {"name": "session_create", "method": "POST", "path": "/session", "body": {}, "save": {"session": "session_id"}},
     {"name": "query_in_session", "method": "POST", "path": "/query", "body": {"query": "[upos=\"NOUN\"]", "limit": 2, "session_id": "{session}", "name": "N"}},
     {"name": "query_from_named_set", "method": "POST", "path": "/query", "body": {"from": "N", "limit": 2, "offset": 1, "session_id": "{session}"}},

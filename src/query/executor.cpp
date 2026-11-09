@@ -1,4 +1,5 @@
 #include "query/executor.h"
+#include "subcorpus/position_set.h"
 #include "corpus/equivalence_classes.h"
 #include "core/dates.h"
 #include "core/geo.h"
@@ -2393,6 +2394,7 @@ void QueryExecutor::validate_query_name_bindings(const TokenQuery& query,
 
 size_t QueryExecutor::estimate_leaf(const AttrCondition& ac) const {
     if (ac.op == CompOp::IN) {
+        if (ac.in_set) return static_cast<size_t>(ac.in_set->tokens());
         if (ac.in_regions) return ac.in_region_tokens;
         return ac.in_positions ? ac.in_positions->size() : 0;
     }
@@ -2632,6 +2634,7 @@ std::optional<int64_t> QueryExecutor::nvals_cardinality_at(
 
 bool QueryExecutor::check_leaf(CorpusPos pos, const AttrCondition& ac) const {
     if (ac.op == CompOp::IN) {
+        if (ac.in_set) return ac.in_set->contains(pos);
         if (ac.in_regions) {
             if (ac.in_regions->empty() || !corpus_.has_structure(ac.in_region_struct)) return false;
             const StructuralAttr& sa = corpus_.structure(ac.in_region_struct);
@@ -3273,6 +3276,17 @@ static std::vector<CorpusPos> union_id_postings(const PositionalAttr& pa, const 
 
 std::vector<CorpusPos> QueryExecutor::resolve_leaf(
         const AttrCondition& ac) const {
+    if (ac.op == CompOp::IN && ac.in_set) {
+        // the subcorpus's positions (in the operand window when windowed)
+        std::vector<CorpusPos> out;
+        CorpusPos lo = 0, hi = corpus_.size();
+        if (windowed()) { lo = operand_window_.lo; hi = std::min(operand_window_.hi, corpus_.size()); }
+        out.reserve(static_cast<size_t>(ac.in_set->count_in(lo, hi - 1)));
+        ac.in_set->for_each_run([&](int64_t a, int64_t b) {
+            for (CorpusPos p = std::max<CorpusPos>(a, lo); p <= b && p < hi; ++p) out.push_back(p);
+        });
+        return out;
+    }
     if (ac.op == CompOp::IN && ac.in_regions) {
         // the tokens of the regions (in the operand window when windowed)
         std::vector<CorpusPos> out;

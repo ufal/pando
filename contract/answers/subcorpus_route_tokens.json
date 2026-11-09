@@ -1,0 +1,21 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/subcorpus",
+  "body": {
+   "definition": "([upos=\"NOUN\"]) - (t:<text lang=\"nl\">)"
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "operation": "subcorpus",
+  "tokens": 3,
+  "ranges": 3,
+  "encoding": "ranges",
+  "index_id": "20261109T140807468Z-103972c4",
+  "corpus_size": 24,
+  "definition": "([upos=\"NOUN\"]) - (t:<text lang=\"nl\">)",
+  "format_version": 1
+ }
+}

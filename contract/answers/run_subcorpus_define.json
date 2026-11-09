@@ -1,0 +1,22 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/run",
+  "body": {
+   "cql": "EN = (t:<text lang=\"en\">) | (t:<text year=\"1990\">)",
+   "limit": 5
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "operation": "subcorpus",
+  "name": "EN",
+  "definition": "(t:<text lang=\"en\">) | (t:<text year=\"1990\">)",
+  "tokens": 12,
+  "ranges": 1,
+  "encoding": "ranges",
+  "index_id": "20261109T140807468Z-103972c4",
+  "format_version": 1
+ }
+}

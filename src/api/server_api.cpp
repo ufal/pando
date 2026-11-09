@@ -1,6 +1,7 @@
 #include "query/dialect/dialect.h"
 #include "query/date_notes.h"
 #include "api/server_api.h"
+#include "api/subcorpus_request.h"
 
 #include "core/build_info.h"
 #include "core/json_utils.h"
@@ -329,6 +330,7 @@ const std::vector<ServerApi::Route>& ServerApi::routes() {
         {"GET", "/status"},  {"POST", "/cancel"}, {"GET", "/jobs"},
         {"POST", "/session"}, {"GET", "/session"}, {"POST", "/session/close"}, {"GET", "/sessions"},
         {"GET", "/warm"}, {"POST", "/warm"},
+        {"POST", "/subcorpus"},
     };
     return r;
 }
@@ -350,6 +352,7 @@ const std::vector<std::string>& ServerApi::features() {
         "tiers",            // "tier" per request: timeouts, hit limits, denied features (limits.h)
         "page_cache",       // pages, command results and sort indexes reused across requests (P6.4)
         "warm",             // GET / POST /warm: index files read into the page cache in the background
+        "subcorpus",        // "subcorpus" on /query and /run, POST /subcorpus (EF-12)
     };
     return f;
 }
@@ -503,6 +506,7 @@ ServerResponse ServerApi::dispatch(std::string_view method_in, std::string_view 
         else if ((r = route_is("GET", "/context"))) { if (r > 0) return context(params); }
         else if ((r = route_is("POST", "/run"))) { if (r > 0) return run(body); }
         else if ((r = route_is("POST", "/query"))) { if (r > 0) return query(body); }
+        else if ((r = route_is("POST", "/subcorpus"))) { if (r > 0) return subcorpus(body); }
         else if ((r = route_is("GET", "/status"))) { if (r > 0) return status(params); }
         else if ((r = route_is("POST", "/cancel"))) { if (r > 0) return cancel(params, body); }
         else if ((r = route_is("GET", "/jobs"))) { if (r > 0) return list_jobs(); }
@@ -647,12 +651,39 @@ ServerResponse ServerApi::context(const std::map<std::string, std::string>& para
     return json_ok(out.str());
 }
 
+// POST /subcorpus — resolve (and cache) a subcorpus definition without running a query (EF-12).
+// Body: {"definition": "…", "session_id": …}; with a session, names in the definition are its
+// subcorpora and hit sets.
+ServerResponse ServerApi::subcorpus(const std::string& body) {
+    const std::string sid = json_extract_str(body, "session_id");
+    try {
+        if (sid.empty()) return json_ok(subcorpus_route_json(corpus_, body));
+        SessionManager::Lease lease = sessions_.acquire(sid);
+        if (!lease) return unknown_session(sid);
+        lease.lock();
+        SubcorpusResolveOptions o;
+        ProgramSession& ps = lease.ps();
+        o.lookup = [&ps](const std::string& n) { return ps.subcorpus_definition(n); };
+        return json_ok(subcorpus_route_json(corpus_, json_without_member(body, "session_id"), o));
+    } catch (const SubcorpusError& e) {
+        return json_error(400, e.what());
+    }
+}
+
 // POST /run — run a full CQL program (queries + commands), session-aware.
 // Body: {"cql": "...", "limit": 20, "offset": 0, "session_id": …, "timeout_ms": …};
 // "sentence" / "fragment" as on /query, for the hit pages the program returns.
 // Without "session_id" the program runs in the one shared session (requests one
 // at a time); with it, in that client session (P6.1: its named sets and Last).
-ServerResponse ServerApi::run(const std::string& body) {
+ServerResponse ServerApi::run(const std::string& body_in) {
+    // EF-12: "subcorpus" for this request (resolved in the program's session: names of its subcorpora)
+    std::string body;
+    std::optional<SubcorpusRequest> sub_req;
+    try {
+        sub_req = take_subcorpus_request(body_in, body);
+    } catch (const SubcorpusError& e) {
+        return json_error(400, e.what());
+    }
     std::string cql = json_extract_str(body, "cql");
     if (cql.empty()) cql = json_extract_str(body, "query");
     if (cql.empty()) return json_error(400, "missing 'cql' field");
@@ -668,6 +699,7 @@ ServerResponse ServerApi::run(const std::string& body) {
     opts.fragment   = json_extract_bool(body, "fragment", false);
     opts.group_limit = json_extract_num(body, "group_limit", 1000);
     opts.child_limit = json_extract_num(body, "child_limit", 20);
+    opts.subcorpus_request = sub_req;
     opts.strict_quoted_strings = json_extract_bool(body, "strict_quoted_strings", false);
     // the program's language (pando-cql by default; cwb-cql, pmltq, tiger: query/dialect/dialect.h)
     opts.dialect = json_extract_str(body, "dialect");
@@ -745,7 +777,15 @@ ServerResponse ServerApi::run(const std::string& body) {
 // (default: only Last) for later /run commands and pages. With "from": <set>
 // (and "session_id"), no query runs: the page comes from the stored set (sorted
 // sets in their sorted order); "query" is ignored.
-ServerResponse ServerApi::query(const std::string& body) {
+ServerResponse ServerApi::query(const std::string& body_in) {
+    // EF-12: "subcorpus" (taken out first: its "name" is not the hit set's)
+    std::string body;
+    std::optional<SubcorpusRequest> sub_req;
+    try {
+        sub_req = take_subcorpus_request(body_in, body);
+    } catch (const SubcorpusError& e) {
+        return json_error(400, e.what());
+    }
     const std::string sid = json_extract_str(body, "session_id");
     const std::string set_name = json_extract_str(body, "name");
     const std::string from = json_extract_str(body, "from");
@@ -786,6 +826,15 @@ ServerResponse ServerApi::query(const std::string& body) {
     opts.shuffle   = json_extract_bool(body, "shuffle", false);
     opts.seed      = static_cast<uint32_t>(json_extract_num(body, "seed", 0));
     const bool sampled = opts.sample > 0 || opts.shuffle;
+    if (sub_req) {
+        if (!from.empty())
+            return json_error(400, "'subcorpus' restricts a query; a stored set ('from') keeps the one it was made with");
+        try {
+            opts.subcorpus = applied_subcorpus(corpus_, *sub_req);
+        } catch (const SubcorpusError& e) {
+            return json_error(400, e.what());
+        }
+    }
     if (sampled && (!sid.empty() || !from.empty()))
         return json_error(400, "'sample' / 'shuffle' are not stored in sessions (use them without session_id)");
     const RequestLimits rl = request_limits(body);
@@ -850,7 +899,7 @@ ServerResponse ServerApi::query(const std::string& body) {
         if (cache_.max_bytes() && !(sampled_now && o.seed == 0)) {
             const std::string flags = std::string(o.total ? "t" : "-") + (o.shuffle ? "s" : "-")
                 + (o.strict_quoted_strings ? "q" : "-") + (o.allow_empty_alignment ? "e" : "-") + ","
-                + normalize_dialect(o.dialect);
+                + normalize_dialect(o.dialect) + "," + subcorpus_cache_key(o);
             std::string sig;
             if (parallel_q) {
                 ck_all = cache_key({"query/1", query_text, "parallel," + std::to_string(o.max_total) + "," + flags});

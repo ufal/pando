@@ -228,6 +228,50 @@ session's result is reused instead of running the query again, and the answer li
 `"reused": ["Matches"]`; a changed query, a result sorted since, and the last statement of a program
 run as usual.
 
+## Subcorpora: `use` and `within S`
+
+A subcorpus is a part of the corpus searched as a corpus of its own (KonText's subcorpora, CQP's
+`use`), or used as a filter. It is defined by a query and kept as the positions it covers:
+
+| definition | positions |
+|---|---|
+| `t:<text genre="fiction">`, `t:<text> :: t.text_year >= "1990"` | region-based (preferred): each region's span; stored as ranges |
+| `[upos="NOUN"]` | token-based: the tokens, merged into runs; fragmented sets are stored as a compressed (roaring) bitmap |
+| `(A) & (B)`, `(A) \| (B)`, `(A) - (B)` | intersection, union, difference of parenthesised definitions or names; `&` binds tighter than `\|` and `-` |
+
+```
+Fiction = t:<text genre="fiction">;            # a named query: also a subcorpus
+Recent  = t:<text> :: t.text_year >= "2000";
+Both    = (Fiction) & (Recent);                # a set expression defines a subcorpus
+X = [lemma="go"] within Fiction;               # a filter: statistics of the whole corpus
+use Both;                                      # from here on Both is the corpus
+X = [lemma="go"]; freq X by lemma               # N = the tokens of Both
+X = [lemma="go"] within Recent;                # N of Both, Recent a filter inside it
+use;                                           # the whole corpus again
+```
+
+- **Hits:** a hit counts only when all its tokens are inside (Manatee's rule). A query of regions
+  only (`s:<s>`) gives the regions with a part inside. The context shown with a hit is not cut.
+- **`within S`** (also `not within S`) where `S` is a subcorpus or a named query, not a structure
+  of the corpus (a structure with the same name wins; a set expression may not take a structure's
+  name). It is a filter: `freq`, `coll`, `keyness` compare with the whole corpus.
+- **`use S;`** (`use (definition);` too) holds for the rest of the session (a client session, or
+  the server's shared `/run` session: use a client session or the request's `"subcorpus"` there);
+  `use;` ends it. Under `use` the subcorpus *is* the corpus: `corpus_size` and ipm (`freq`), the
+  per-group sizes of `freq by <region attribute>` (the part of each region inside), the
+  collocates' frequencies and N (`coll`, `dcoll`; `dcoll`'s relation totals counted inside),
+  and `keyness` without `vs` compares with the rest of the subcorpus.
+- In both, window collocates and dependency relatives outside the subcorpus do not count.
+- A named set keeps the subcorpus it was made under; answers report it as `"subcorpus"`
+  ([Result-Format.md](Result-Format.md)).
+- Definitions are pando-CQL (or begin with a language word: `CWB …`); a named query used as a
+  subcorpus is its query on the whole corpus, whatever `use` was in effect when it ran.
+- Resolved subcorpora are cached by index and definition (names expanded): defining one again,
+  or using it in another session, does not run its query again. A reindex resolves it anew.
+- pando-server: `"subcorpus": {"definition", "mode": "use" | "within", "name"}` on `/query` and
+  `/run`, and `POST /subcorpus` to resolve one without a query ([CLI-Reference.md](CLI-Reference.md)).
+  The `pando` command line: `--subcorpus DEF [--subcorpus-mode within] [--subcorpus-name N]`.
+
 ## Global functions
 
 Used after `::`, mostly with named tokens:

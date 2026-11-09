@@ -95,6 +95,21 @@ int main(int argc, char** argv) {
         CHECK(starts(sorted).size() == 3 && starts(cat) == starts(sorted));
         CHECK(has(cat, "\"fragment\"") && !has(cat, "not yet implemented"));
     }
+    // EF-12: "subcorpus" on pando_query and pando_run; `use` / `use;` in a program
+    {
+        const char* en = R"({"limit": 1000, "total": true, "subcorpus": {"definition": "t:<text lang=\"English\">", "name": "en"}})";
+        const std::string q = take(pando_query(h, nouns, en));
+        const std::string all = take(pando_query(h, nouns, R"({"limit": 1000, "total": true})"));
+        CHECK(has(q, "\"subcorpus\": {\"name\": \"en\", \"mode\": \"use\"") && !has(all, "\"subcorpus\""));
+        CHECK(!starts(q).empty() && starts(q).size() < starts(all).size());
+        const std::string r = take(pando_run(h, "N = [upos=\"NOUN\"]; size N", en));
+        CHECK(has(r, ("\"result\": " + std::to_string(starts(q).size()) + "}").c_str()) && has(r, "\"mode\": \"use\""));
+        const std::string u = take(pando_run(h, "use (t:<text lang=\"English\">); N = [upos=\"NOUN\"]; size N; ", "{}"));
+        CHECK(has(u, ("\"result\": " + std::to_string(starts(q).size()) + "}").c_str()));
+        const std::string reset = take(pando_run(h, "use; N = [upos=\"NOUN\"]; size N", "{}"));
+        CHECK(has(reset, ("\"result\": " + std::to_string(starts(all).size()) + "}").c_str()) && !has(reset, "\"subcorpus\""));
+        CHECK(has(take(pando_query(h, nouns, R"({"subcorpus": {"definition": "[upos=\"NOUN\""}})")), "\"ok\":false"));
+    }
     // pando_cancel from another thread: a count of ~30 s stops at once
     {
         std::string out;

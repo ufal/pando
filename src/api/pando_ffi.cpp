@@ -207,8 +207,17 @@ char* pando_query(pando_handle_t handle, const char* cql, const char* opts_json)
     if (!handle || !cql) return nullptr;
     try {
         auto* h = static_cast<PandoHandle*>(handle);
-        auto opts = parse_query_opts(opts_json);
+        // EF-12: "subcorpus" (api/subcorpus_request.h); names: the handle's session
+        std::string rest;
+        auto sub = pando::take_subcorpus_request(opts_json ? opts_json : "", rest);
+        auto opts = parse_query_opts(opts_json ? rest.c_str() : nullptr);
         reset_progress(h->progress);
+        if (sub) {
+            pando::SubcorpusResolveOptions ro;
+            ro.progress = &h->progress;
+            ro.lookup = [h](const std::string& n) { return h->session.subcorpus_definition(n); };
+            opts.subcorpus = pando::applied_subcorpus(h->corpus, *sub, ro);
+        }
         auto [ms, elapsed] = pando::run_single_query(h->corpus, cql, opts, &h->progress);
         std::string json = pando::to_query_result_json(h->corpus, cql, ms, opts, elapsed);
         return to_c_string(json);
@@ -225,7 +234,10 @@ char* pando_run(pando_handle_t handle, const char* cql, const char* opts_json) {
     if (!handle || !cql) return nullptr;
     try {
         auto* h = static_cast<PandoHandle*>(handle);
-        auto opts = parse_program_opts(opts_json);
+        std::string rest;
+        auto sub = pando::take_subcorpus_request(opts_json ? opts_json : "", rest);   // EF-12
+        auto opts = parse_program_opts(opts_json ? rest.c_str() : nullptr);
+        opts.subcorpus_request = sub;
         reset_progress(h->progress);
         opts.progress = &h->progress;
         std::string json = pando::run_program_json(h->corpus, h->session, cql, opts);

@@ -3,6 +3,8 @@
 #include "api/dcoll_totals.h"
 #include "corpus/corpus.h"
 #include "query/executor.h"
+#include "api/subcorpus_request.h"
+#include "api/subcorpus_stats.h"
 #include <string>
 #include <string_view>
 #include <vector>
@@ -59,7 +61,16 @@ struct QueryOptions {
     std::string aligned;
     std::string aligned_where;
     size_t aligned_max = 0;
+    /// EF-12: the subcorpus the query is restricted to (request "subcorpus"); the answer reports
+    /// it as "subcorpus". Its key is part of the result cache's and the count jobs' keys.
+    AppliedSubcorpusPtr subcorpus;
 };
+
+/// The query's statements (`parse_in_dialect` with the options' language), restricted to
+/// opts.subcorpus when there is one: every path that runs a /query text parses it so.
+Program parse_query_program(const Corpus& corpus, const std::string& query_text, const QueryOptions& opts);
+/// The key part of opts.subcorpus for caches ("" without one).
+std::string subcorpus_cache_key(const QueryOptions& opts);
 
 // Run a single query (one statement, no trailing command). Returns (MatchSet, elapsed_ms).
 /// True when the first statement is an aligned `… with …` query (run_single_query
@@ -232,6 +243,9 @@ struct ProgramSession {
     /// P6.4: results of commands, pages and sort indexes of sets whose query is
     /// self-contained are kept in / taken from this cache (nullptr = none).
     void set_result_cache(class ResultCache* cache);
+    /// EF-12: the definition of a subcorpus name: a subcorpus defined in the session
+    /// (`S = (…) & (…);`) or a named hit set's query; nullopt for an unknown name.
+    std::optional<std::string> subcorpus_definition(const std::string& name) const;
 };
 
 struct ProgramOptions {
@@ -269,6 +283,12 @@ struct ProgramOptions {
     /// raw / coll / dcoll / keyness / sort) refuse a set with more hits: the hits are
     /// counted up to this bound first; HitSetTooLarge (0 = no limit).
     size_t max_count_hits = 0;
+    /// EF-12: the request's "subcorpus" (api/subcorpus_request.h), applied like `use` (or as a
+    /// `within` filter) to every query of this program; resolved in the program's session
+    /// (names of its subcorpora). Overrides the session's `use` for this request.
+    std::optional<SubcorpusRequest> subcorpus_request;
+    /// EF-12 (internal): the subcorpus statistics of the hit set a command runs on (set per command).
+    SubcorpusStatsPtr stats;
 };
 
 // Run a full CQL program and return the JSON output.

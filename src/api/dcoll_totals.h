@@ -65,6 +65,8 @@ class DcollTotals {
 public:
     static DcollTotals corpus(const PositionalAttr& pa, size_t corpus_size);
     static DcollTotals relation(const Corpus& corpus, const std::string& attr, const DcollPairKinds& kinds);
+    /// Totals counted elsewhere (EF-12: inside a subcorpus): of(id) = part->of(id), N = part->total().
+    static DcollTotals counted(DcollBaseline b, std::shared_ptr<const PairCounts> part);
 
     DcollBaseline baseline() const { return baseline_; }
     /// relation totals read from the index (index/dcoll_totals_file.h), not counted for this query

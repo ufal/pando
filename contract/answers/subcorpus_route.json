@@ -1,0 +1,21 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/subcorpus",
+  "body": {
+   "definition": "t:<text lang=\"en\">"
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "operation": "subcorpus",
+  "tokens": 12,
+  "ranges": 1,
+  "encoding": "ranges",
+  "index_id": "20261109T140807468Z-103972c4",
+  "corpus_size": 24,
+  "definition": "t:<text lang=\"en\">",
+  "format_version": 1
+ }
+}

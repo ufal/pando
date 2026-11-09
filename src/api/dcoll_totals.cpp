@@ -198,6 +198,14 @@ DcollTotals DcollTotals::corpus(const PositionalAttr& pa, size_t corpus_size) {
     return t;
 }
 
+DcollTotals DcollTotals::counted(DcollBaseline b, std::shared_ptr<const PairCounts> part) {
+    DcollTotals t;
+    t.baseline_ = b;
+    t.total_ = part ? part->total() : 0;
+    t.parts_.push_back(std::move(part));
+    return t;
+}
+
 DcollTotals DcollTotals::relation(const Corpus& corpus, const std::string& attr, const DcollPairKinds& kinds) {
     DcollTotals t;
     t.baseline_ = DcollBaseline::Relation;
@@ -244,7 +252,7 @@ DcollTotals DcollTotals::relation(const Corpus& corpus, const std::string& attr,
 
 uint64_t DcollTotals::of(LexiconId id) const {
     if (id < 0) return 0;
-    if (baseline_ == DcollBaseline::Corpus) return pa_ ? pa_->count_of_id(id) : 0;
+    if (baseline_ == DcollBaseline::Corpus && parts_.empty()) return pa_ ? pa_->count_of_id(id) : 0;
     uint64_t sum = 0;
     for (const auto& p : parts_)
         if (p) sum += p->of(id);

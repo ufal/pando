@@ -154,6 +154,7 @@ private:
     ServerResponse context(const std::map<std::string, std::string>& params);
     ServerResponse run(const std::string& body);
     ServerResponse query(const std::string& body);
+    ServerResponse subcorpus(const std::string& body);   // POST /subcorpus (EF-12)
     ServerResponse query_from(const QueryOptions& opts, bool total_async, size_t timeout_ms, ExecProgress* progress,
                               const std::string& from, SessionManager::Lease& lease, const std::string& tier,
                               std::chrono::milliseconds job_limit);

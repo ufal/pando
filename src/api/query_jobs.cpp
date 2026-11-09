@@ -70,6 +70,7 @@ std::string QueryJobManager::key_for(const std::string& query, const QueryOption
     k += std::to_string(opts.max_total);
     k += '\x1f';
     k += normalize_dialect(opts.dialect);   // the same text in another language is another query
+    if (std::string sc = subcorpus_cache_key(opts); !sc.empty()) k += "\x1fsubcorpus=" + sc;   // EF-12
     return k;
 }
 
@@ -295,7 +296,7 @@ void QueryJobManager::run_job(Job& j) {
     bool exact = false;
     std::string error;
     try {
-        Program prog = parse_in_dialect(j.query, j.opts.dialect, ParserOptions{j.opts.strict_quoted_strings}, &corpus_);
+        Program prog = parse_query_program(corpus_, j.query, j.opts);   // with its subcorpus (EF-12)
         if (prog.empty() || !prog[0].has_query) throw std::runtime_error("not a query");
         // the request's tier: its thread cap for scans, its threads for the ranges
         ThreadBudgetScope budget(j.opts.thread_cap);

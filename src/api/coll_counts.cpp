@@ -20,6 +20,7 @@ CollCounter::CollCounter(const PositionalAttr& pa, int left, int right, size_t c
 inline void CollCounter::count(CorpusPos p) {
     // parallel tiers often leave lemma (etc.) empty: one huge "" bucket would hide
     // the real collocates
+    if (inside_ && !inside_->contains(p)) return;
     const LexiconId id = pa_.id_at(p);
     if (id == empty_id_ || id < 0 || static_cast<size_t>(id) >= counts_.size()) return;
     ++counts_[static_cast<size_t>(id)];
@@ -112,6 +113,7 @@ DcollCounter::DcollCounter(const Corpus& corpus, const PositionalAttr& pa,
 }
 
 inline void DcollCounter::count(CorpusPos p, uint32_t times, LexiconId bd) {
+    if (inside_ && !inside_->contains(p)) return;
     const LexiconId id = pa_.id_at(p);
     if (id < 0 || static_cast<size_t>(id) >= counts_.size()) return;
     counts_[static_cast<size_t>(id)] += times;

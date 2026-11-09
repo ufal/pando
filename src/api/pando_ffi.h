@@ -68,7 +68,9 @@ PANDO_API void pando_cancel(pando_handle_t h);
  *              gets its context as TEITOK-style XML with every token attribute),
  *              sample (N random hits), shuffle, seed (the same seed, the same
  *              sample / order), aligned, aligned_where, aligned_max (the sentences
- *              aligned with each hit), as on pando-server's /query.
+ *              aligned with each hit), subcorpus ({"definition", "mode": "use" |
+ *              "within", "name"}: the query restricted to a subcorpus; the answer
+ *              reports it as "subcorpus"), as on pando-server's /query.
  *              Pass NULL or "{}" for defaults.
  *              This is the minimal API: sessions (paging a sorted set), background
  *              totals and stopping one request of many are in server_capi.h
@@ -90,7 +92,9 @@ PANDO_API char* pando_query(pando_handle_t h, const char* cql, const char* opts_
  *              coll / dcoll: coll_left, coll_right (window), coll_min_freq,
  *              coll_max_items, measures (array, e.g. ["logdice","mi"]),
  *              dcoll_baseline ("relation", the default, or "corpus": what dcoll
- *              scores compare with, dcoll_totals.h).
+ *              scores compare with, dcoll_totals.h), subcorpus (as for pando_query,
+ *              for every query of the program; mode "use" makes it the corpus of
+ *              the statistics). `use S;` / `use;` and `S = (A) & (B);` in the program.
  *              Pass NULL or "{}" for defaults.
  * Errors come back as {"ok":false,"error":"…"} (a syntax error says where).
  * Session state (named queries) persists across calls on the same handle.

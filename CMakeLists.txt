@@ -197,6 +197,9 @@ add_library(pando_core STATIC
     src/query/executor_tabulate.cpp
     src/query/date_notes.cpp
     src/query/geo_fields.cpp
+    src/subcorpus/position_set.cpp
+    src/subcorpus/subcorpus.cpp
+    src/subcorpus/restrict.cpp
     src/api/index_api.cpp
 )
 target_include_directories(pando_core PUBLIC src)
@@ -227,7 +230,8 @@ target_link_libraries(cwb-import PRIVATE pando_core)
 # API layer: query execution + JSON (used by CLI and server)
 add_library(pando_api STATIC src/api/query_json.cpp src/api/aligned_pieces.cpp src/api/program_api.cpp src/api/query_jobs.cpp src/api/group_counts.cpp src/api/coll_counts.cpp src/api/dcoll_totals.cpp src/api/result_cache.cpp src/api/corpus_warm.cpp
     src/api/server_api.cpp src/api/server_capi.cpp src/api/sessions.cpp
-    src/api/limits.cpp)
+    src/api/limits.cpp
+    src/api/subcorpus_request.cpp src/api/subcorpus_stats.cpp src/api/program_subcorpora.cpp)
 target_include_directories(pando_api PUBLIC src)
 find_package(Threads REQUIRED)
 target_link_libraries(pando_api PUBLIC pando_core Threads::Threads)
@@ -317,6 +321,11 @@ if(BUILD_TESTING)
     add_executable(mv_stage1_executor_test src/index/mv_stage1_executor_test.cpp)
     target_link_libraries(mv_stage1_executor_test PRIVATE pando_core)
     add_test(NAME mv_stage1_executor COMMAND mv_stage1_executor_test)
+
+    # EF-12: position sets (ranges / roaring), set operations, subcorpus definitions
+    add_executable(position_set_test src/subcorpus/position_set_test.cpp)
+    target_link_libraries(position_set_test PRIVATE pando_core)
+    add_test(NAME position_set COMMAND position_set_test)
 
     add_executable(bitmap_index_test src/index/bitmap_index_test.cpp)
     target_link_libraries(bitmap_index_test PRIVATE pando_core)
@@ -589,6 +598,12 @@ if(BUILD_TESTING)
         add_test(NAME contract
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/contract/contract_test.py
                 --server $<TARGET_FILE:pando-server> --pando-index $<TARGET_FILE:pando-index>)
+        # EF-12 subcorpora: /subcorpus, "subcorpus" on /query and /run, use / within / set expressions,
+        # statistics under use, against brute force (both encodings, fast paths off), the CLI
+        add_test(NAME subcorpus
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/subcorpus_test.py
+                --server $<TARGET_FILE:pando-server> --pando-index $<TARGET_FILE:pando-index>
+                --pando $<TARGET_FILE:pando>)
         # dates (core/dates): every date function agrees on tabulate, count by, freq by and :: filters
         add_test(NAME dates_functions
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/dates_functions_test.py

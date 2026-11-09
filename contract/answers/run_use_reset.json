@@ -1,0 +1,18 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/run",
+  "body": {
+   "cql": "use",
+   "limit": 5
+  }
+ },
+ "status": 200,
+ "answer": {
+  "subcorpus": null,
+  "ok": true,
+  "operation": "use",
+  "corpus_size": 24,
+  "format_version": 1
+ }
+}

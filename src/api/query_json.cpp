@@ -5,6 +5,7 @@
 #include "core/json_utils.h"
 #include "core/build_info.h"
 #include "query/parser.h"
+#include "subcorpus/restrict.h"
 #include "index/bitmap_index.h"
 #include "index/dep_pair_index.h"
 #include "index/fold_index.h"
@@ -187,6 +188,18 @@ std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
     return run_single_query(corpus, query_text, opts, nullptr);
 }
 
+Program parse_query_program(const Corpus& corpus, const std::string& query_text, const QueryOptions& opts) {
+    Program prog = parse_in_dialect(query_text, opts.dialect, ParserOptions{opts.strict_quoted_strings}, &corpus);
+    if (opts.subcorpus && opts.subcorpus->sc)
+        for (auto& st : prog) restrict_statement_to_subcorpus(corpus, st, opts.subcorpus->sc->set_ptr());
+    return prog;
+}
+
+std::string subcorpus_cache_key(const QueryOptions& opts) {
+    if (!opts.subcorpus || !opts.subcorpus->sc) return {};
+    return opts.subcorpus->sc->key();   // the mode changes no hit (only statistics)
+}
+
 bool query_is_parallel(const std::string& query_text, bool strict_quoted_strings, const std::string& dialect) {
     if (query_text.find("with") == std::string::npos) return false;
     try {
@@ -213,7 +226,7 @@ std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
                                             const std::string& query_text,
                                             const QueryOptions& opts,
                                             ExecProgress* progress) {
-    Program prog = parse_in_dialect(query_text, opts.dialect, ParserOptions{opts.strict_quoted_strings}, &corpus);
+    Program prog = parse_query_program(corpus, query_text, opts);
     if (prog.empty() || !prog[0].has_query)
         return {MatchSet{}, 0.0};
 
@@ -622,6 +635,7 @@ std::string to_query_result_json(const Corpus& corpus,
             out << "]";
         }
         emit_debug_and_extra();
+        if (opts.subcorpus) return with_subcorpus_member(out.str(), *opts.subcorpus);
         return out.str();
     }
 
@@ -675,6 +689,7 @@ std::string to_query_result_json(const Corpus& corpus,
     }
 
     emit_debug_and_extra();
+    if (opts.subcorpus) return with_subcorpus_member(out.str(), *opts.subcorpus);
     return out.str();
 }
 
