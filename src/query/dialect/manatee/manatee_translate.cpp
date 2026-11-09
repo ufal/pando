@@ -7,10 +7,11 @@
 
 namespace pando {
 
-Program translate_manatee_program(const std::string& input, int debug_level, std::string* trace_out) {
+Program translate_manatee_program(const std::string& input, int debug_level, std::string* trace_out,
+                                  const std::string& default_attr) {
     const manatee::Query q = manatee::parse(input);
     std::ostringstream trace;
-    Program p = manatee::lower(q, debug_level > 0 && trace_out ? &trace : nullptr);
+    Program p = manatee::lower(q, debug_level > 0 && trace_out ? &trace : nullptr, default_attr);
     if (!p.empty()) p[0].source = input;
     if (debug_level > 0 && trace_out) *trace_out += trace.str();
     return p;

@@ -110,7 +110,7 @@ Program Parser::parse() {
 bool Parser::is_command_keyword(const std::string& text) {
     static const std::vector<std::string> cmds = {
         "count", "group", "sort", "freq", "coll", "dcoll",
-        "cat", "size", "raw", "show", "tabulate", "describe", "stats", "keyness", "set", "drop",
+        "cat", "size", "arf", "raw", "show", "tabulate", "describe", "stats", "keyness", "set", "drop",
         "filter", "shuffle", "sample"
     };
     std::string lower = text;
@@ -450,6 +450,7 @@ GroupCommand Parser::parse_command() {
     }
     else if (kw == "cat") cmd.type = CommandType::CAT;
     else if (kw == "size") cmd.type = CommandType::SIZE;
+    else if (kw == "arf") cmd.type = CommandType::ARF;
     else if (kw == "raw") cmd.type = CommandType::RAW;
     else if (kw == "describe") {
         cmd.type = CommandType::DESCRIBE;

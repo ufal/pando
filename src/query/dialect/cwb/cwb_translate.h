@@ -11,7 +11,8 @@ namespace pando {
 //
 // Throws std::runtime_error with a clear message for unsupported constructs
 // (e.g. merge, unclosed bracket).
+// `default_attr`: the attribute a bare "pattern" is on (empty: word, CQP's default).
 Program translate_cwb_program(const std::string& input, int debug_level,
-                              std::string* trace_out);
+                              std::string* trace_out, const std::string& default_attr = "");
 
 } // namespace pando

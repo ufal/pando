@@ -53,6 +53,11 @@ int main() {
         TokenQuery q = tq("\"the\"");
         check(q.tokens.size() == 1 && q.tokens[0].conditions->leaf.attr == "word" &&
                   q.tokens[0].conditions->leaf.op == CompOp::EQ, "bare string → word = literal");
+        // a front-end's default attribute (KonText's simple query `alemma,"dog"`): the query unchanged
+        Program p = translate_manatee_program("\"dog\" [word=\"x\"]", 0, nullptr, "lemma");
+        check(p.at(0).query.tokens.at(0).conditions->leaf.attr == "lemma" &&
+                  p.at(0).query.tokens.at(1).conditions->leaf.attr == "word",
+              "default_attr: a bare string on it, [word=…] stays word");
         q = tq("[lemma=\"un.*\"]");
         check(q.tokens[0].conditions->leaf.op == CompOp::REGEX && q.tokens[0].conditions->leaf.regex_full_match,
               "a pattern is a whole-value regex");

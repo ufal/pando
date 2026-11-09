@@ -147,7 +147,7 @@ void rename_attr(Program& prog, const std::string& from, const std::string& to) 
 
 Program parse_dialect_only(const std::string& text, const std::string& d, ParserOptions parse_opts,
                            const Corpus* corpus, int debug_level, std::string* trace_out) {
-    if (d == "cwb") return translate_cwb_program(text, debug_level, trace_out);
+    if (d == "cwb") return translate_cwb_program(text, debug_level, trace_out, parse_opts.default_attr);
     if (d == "pmltq") {
         Program p = translate_pmltq_program(text, debug_level, trace_out);
         // Not PML-TQ itself but the UD treebanks on LINDAT's PML-TQ server call the UD part of speech
@@ -157,7 +157,7 @@ Program parse_dialect_only(const std::string& text, const std::string& d, Parser
             rename_attr(p, "tag", "upos");
         return p;
     }
-    if (d == "manatee") return translate_manatee_program(text, debug_level, trace_out);
+    if (d == "manatee") return translate_manatee_program(text, debug_level, trace_out, parse_opts.default_attr);
     if (d == "tiger") {
         // the node layer's category attribute: `cat` (TEITOK) when the corpus has it, else `type`
         std::string cat_attr = "type";

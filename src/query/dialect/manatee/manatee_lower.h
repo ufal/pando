@@ -16,6 +16,7 @@
 
 namespace pando::manatee {
 
-Program lower(const Query& q, std::ostream* trace = nullptr);
+/// `default_attr`: what a bare "re" is on (empty: `word`).
+Program lower(const Query& q, std::ostream* trace = nullptr, const std::string& default_attr = "");
 
 }  // namespace pando::manatee

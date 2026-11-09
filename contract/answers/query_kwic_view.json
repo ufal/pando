@@ -1,0 +1,307 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/query",
+  "body": {
+   "query": "[lemma=\"cat\"]",
+   "limit": 2,
+   "dialect": "manatee-cql",
+   "kwic_view": {
+    "left": "-40#",
+    "right": "40#",
+    "attrs": "word,lemma",
+    "ctxattrs": "word,lemma",
+    "structs": "s,text.id",
+    "refs": "=text.id,#"
+   }
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "backend": "pando",
+  "operation": "query",
+  "last_command": "query",
+  "result": {
+   "query": {
+    "language": "manatee-cql",
+    "text": "[lemma=\"cat\"]"
+   },
+   "page": {
+    "start": 0,
+    "size": 2,
+    "returned": 2,
+    "total": 2,
+    "total_exact": false
+   },
+   "hits": [
+    {
+     "doc_id": "en",
+     "match_start": 2,
+     "match_end": 2,
+     "context": {
+      "left": "The black",
+      "match": "cat",
+      "right": "sleeps . A dog barks"
+     },
+     "kwic_view": {
+      "pos": 2,
+      "kwiclen": 1,
+      "ctxbeg": 0,
+      "ctxend": 15,
+      "linegroup": 0,
+      "refs": [
+       "en",
+       "#2"
+      ],
+      "left": [
+       "<s><text id=en>",
+       "strc",
+       "The",
+       "{}",
+       "\u001fthe",
+       "attr",
+       " black",
+       "{}",
+       "\u001fblack",
+       "attr"
+      ],
+      "kwic": [
+       " cat",
+       "{col0 coll}",
+       "\u001fcat",
+       "attr"
+      ],
+      "right": [
+       " sleeps",
+       "{}",
+       "\u001fsleep",
+       "attr",
+       " .",
+       "{}",
+       "\u001f.",
+       "attr",
+       "</s><s>",
+       "strc",
+       "A",
+       "{}",
+       "\u001fa",
+       "attr",
+       " dog",
+       "{}",
+       "\u001fdog",
+       "attr",
+       " barks",
+       "{}",
+       "\u001fbark",
+       "attr",
+       " at",
+       "{}",
+       "\u001fat",
+       "attr",
+       " the",
+       "{}",
+       "\u001fthe",
+       "attr",
+       " cat",
+       "{}",
+       "\u001fcat",
+       "attr",
+       " .",
+       "{}",
+       "\u001f.",
+       "attr",
+       "</text></s><s><text id=nl>",
+       "strc",
+       "De",
+       "{}",
+       "\u001fde",
+       "attr",
+       " zwarte",
+       "{}",
+       "\u001fzwart",
+       "attr",
+       " kat",
+       "{}",
+       "\u001fkat",
+       "attr"
+      ]
+     },
+     "tokens": [
+      {
+       "pos": 2,
+       "group": 0,
+       "deprel": "nsubj",
+       "form": "cat",
+       "lemma": "cat",
+       "upos": "NOUN"
+      }
+     ],
+     "groups": [
+      {
+       "index": 0,
+       "id": "t1",
+       "name": "t1",
+       "start": 2,
+       "end": 2
+      }
+     ]
+    },
+    {
+     "doc_id": "en",
+     "match_start": 10,
+     "match_end": 10,
+     "context": {
+      "left": "A dog barks at the",
+      "match": "cat",
+      "right": ". De zwarte kat slaapt"
+     },
+     "kwic_view": {
+      "pos": 10,
+      "kwiclen": 1,
+      "ctxbeg": 0,
+      "ctxend": 23,
+      "linegroup": 0,
+      "refs": [
+       "en",
+       "#10"
+      ],
+      "left": [
+       "<s><text id=en>",
+       "strc",
+       "The",
+       "{}",
+       "\u001fthe",
+       "attr",
+       " black",
+       "{}",
+       "\u001fblack",
+       "attr",
+       " cat",
+       "{}",
+       "\u001fcat",
+       "attr",
+       " sleeps",
+       "{}",
+       "\u001fsleep",
+       "attr",
+       " .",
+       "{}",
+       "\u001f.",
+       "attr",
+       "</s><s>",
+       "strc",
+       "A",
+       "{}",
+       "\u001fa",
+       "attr",
+       " dog",
+       "{}",
+       "\u001fdog",
+       "attr",
+       " barks",
+       "{}",
+       "\u001fbark",
+       "attr",
+       " at",
+       "{}",
+       "\u001fat",
+       "attr",
+       " the",
+       "{}",
+       "\u001fthe",
+       "attr"
+      ],
+      "kwic": [
+       " cat",
+       "{col0 coll}",
+       "\u001fcat",
+       "attr"
+      ],
+      "right": [
+       " .",
+       "{}",
+       "\u001f.",
+       "attr",
+       "</text></s><s><text id=nl>",
+       "strc",
+       "De",
+       "{}",
+       "\u001fde",
+       "attr",
+       " zwarte",
+       "{}",
+       "\u001fzwart",
+       "attr",
+       " kat",
+       "{}",
+       "\u001fkat",
+       "attr",
+       " slaapt",
+       "{}",
+       "\u001fslapen",
+       "attr",
+       " .",
+       "{}",
+       "\u001f.",
+       "attr",
+       "</s><s>",
+       "strc",
+       "Een",
+       "{}",
+       "\u001feen",
+       "attr",
+       " hond",
+       "{}",
+       "\u001fhond",
+       "attr",
+       " blaft",
+       "{}",
+       "\u001fblaffen",
+       "attr",
+       " naar",
+       "{}",
+       "\u001fnaar",
+       "attr",
+       " de",
+       "{}",
+       "\u001fde",
+       "attr",
+       " kat",
+       "{}",
+       "\u001fkat",
+       "attr"
+      ]
+     },
+     "tokens": [
+      {
+       "pos": 10,
+       "group": 0,
+       "deprel": "obl",
+       "form": "cat",
+       "lemma": "cat",
+       "upos": "NOUN"
+      }
+     ],
+     "groups": [
+      {
+       "index": 0,
+       "id": "t1",
+       "name": "t1",
+       "start": 10,
+       "end": 10
+      }
+     ]
+    }
+   ],
+   "groups": [
+    {
+     "index": 0,
+     "id": "t1",
+     "name": "t1"
+    }
+   ]
+  },
+  "format_version": 1
+ }
+}

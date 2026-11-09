@@ -70,6 +70,7 @@ std::string QueryJobManager::key_for(const std::string& query, const QueryOption
     k += std::to_string(opts.max_total);
     k += '\x1f';
     k += normalize_dialect(opts.dialect);   // the same text in another language is another query
+    if (!opts.default_attr.empty()) k += "\x1f" "default_attr=" + opts.default_attr;   // and with another default attribute
     if (std::string sc = subcorpus_cache_key(opts); !sc.empty()) k += "\x1fsubcorpus=" + sc;   // EF-12
     return k;
 }

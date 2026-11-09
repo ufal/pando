@@ -189,7 +189,7 @@ std::pair<MatchSet, double> run_single_query(const Corpus& corpus,
 }
 
 Program parse_query_program(const Corpus& corpus, const std::string& query_text, const QueryOptions& opts) {
-    Program prog = parse_in_dialect(query_text, opts.dialect, ParserOptions{opts.strict_quoted_strings}, &corpus);
+    Program prog = parse_in_dialect(query_text, opts.dialect, ParserOptions{opts.strict_quoted_strings, opts.default_attr}, &corpus);
     if (opts.subcorpus && opts.subcorpus->sc)
         for (auto& st : prog) restrict_statement_to_subcorpus(corpus, st, opts.subcorpus->sc->set_ptr());
     return prog;
@@ -321,6 +321,7 @@ static void emit_hit_json(std::ostringstream& out, const Corpus& corpus, const M
     out << ", \"match_start\": " << match_start << ", \"match_end\": " << match_end;
     out << ", \"context\": {\"left\": " << jstr(ctx.left)
         << ", \"match\": " << jstr(ctx.match) << ", \"right\": " << jstr(ctx.right) << "}";
+    if (opts.kwic_view.on) write_kwic_view(out, corpus, opts.kwic_view, match_start, match_end + 1);
     write_aligned_json(out, corpus, m, opts.aligned, opts.aligned_where, opts.aligned_max);
     // named regions (`np:<node …>`): span and id, so a UI can show the whole region
     struct NamedSpan {
@@ -537,7 +538,7 @@ std::string to_query_result_json(const Corpus& corpus,
         try {
             // in the query's own language: a PML-TQ node keeps its name (n1, $v, …) whatever its
             // place in the chain pando searches
-            Program prog = parse_in_dialect(query_text, opts.dialect, ParserOptions{opts.strict_quoted_strings}, &corpus);
+            Program prog = parse_in_dialect(query_text, opts.dialect, ParserOptions{opts.strict_quoted_strings, opts.default_attr}, &corpus);
             if (!prog.empty() && prog[0].has_query) {
                 auto add = [&](const TokenQuery& q) {
                     // region anchors (`ip:<node …>`) are not query tokens: they bind a

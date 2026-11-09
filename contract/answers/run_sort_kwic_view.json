@@ -1,0 +1,150 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/run",
+  "body": {
+   "cql": "A = \"cat\"; sort A by lemma",
+   "limit": 2,
+   "dialect": "manatee-cql",
+   "default_attr": "lemma",
+   "kwic_view": {
+    "left": "-3",
+    "right": "3",
+    "attrs": "word",
+    "structs": "s"
+   }
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "backend": "pando",
+  "operation": "query",
+  "last_command": "query",
+  "result": {
+   "query": {
+    "language": "pando-cql",
+    "text": "(sorted)"
+   },
+   "page": {
+    "start": 0,
+    "size": 2,
+    "returned": 2,
+    "total": 2,
+    "total_exact": true
+   },
+   "hits": [
+    {
+     "doc_id": "en",
+     "match_start": 2,
+     "match_end": 2,
+     "context": {
+      "left": "The black",
+      "match": "cat",
+      "right": "sleeps . A dog barks"
+     },
+     "kwic_view": {
+      "pos": 2,
+      "kwiclen": 1,
+      "ctxbeg": 0,
+      "ctxend": 6,
+      "linegroup": 0,
+      "refs": [],
+      "left": [
+       "<s>",
+       "strc",
+       "The black",
+       "{}"
+      ],
+      "kwic": [
+       " cat",
+       "{col0 coll}"
+      ],
+      "right": [
+       " sleeps .",
+       "{}",
+       "</s><s>",
+       "strc",
+       "A",
+       "{}"
+      ]
+     },
+     "tokens": [
+      {
+       "pos": 2,
+       "group": 0,
+       "deprel": "nsubj",
+       "form": "cat",
+       "lemma": "cat",
+       "upos": "NOUN"
+      }
+     ],
+     "groups": [
+      {
+       "index": 0,
+       "id": "t1",
+       "name": "t1",
+       "start": 2,
+       "end": 2
+      }
+     ]
+    },
+    {
+     "doc_id": "en",
+     "match_start": 10,
+     "match_end": 10,
+     "context": {
+      "left": "A dog barks at the",
+      "match": "cat",
+      "right": ". De zwarte kat slaapt"
+     },
+     "kwic_view": {
+      "pos": 10,
+      "kwiclen": 1,
+      "ctxbeg": 7,
+      "ctxend": 14,
+      "linegroup": 0,
+      "refs": [],
+      "left": [
+       "barks at the",
+       "{}"
+      ],
+      "kwic": [
+       " cat",
+       "{col0 coll}"
+      ],
+      "right": [
+       " .",
+       "{}",
+       "</s><s>",
+       "strc",
+       "De zwarte",
+       "{}"
+      ]
+     },
+     "tokens": [
+      {
+       "pos": 10,
+       "group": 0,
+       "deprel": "obl",
+       "form": "cat",
+       "lemma": "cat",
+       "upos": "NOUN"
+      }
+     ],
+     "groups": [
+      {
+       "index": 0,
+       "id": "t1",
+       "name": "t1",
+       "start": 10,
+       "end": 10
+      }
+     ]
+    }
+   ],
+   "groups": []
+  },
+  "format_version": 1
+ }
+}

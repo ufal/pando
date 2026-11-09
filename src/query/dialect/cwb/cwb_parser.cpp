@@ -26,6 +26,7 @@ struct TokStream {
     const std::vector<CwbToken>* v = nullptr;
     std::size_t i = 0;
     std::string_view src;   // the statement's text (CwbToken::offset points into it)
+    std::string default_attr = "word";   // what a bare "pattern" is on
 
     const CwbToken& peek() const { return (*v)[i]; }
     void bump() { ++i; }
@@ -365,7 +366,7 @@ QueryToken parse_wordform_pattern(TokStream& ts, std::ostringstream* trace) {
     if (k == CwbTok::STRING) {
         // CQP: a bare "pattern" [flags] is [word="pattern" flags] (word is the default attribute)
         AttrCondition ac;
-        ac.attr = "word";
+        ac.attr = ts.default_attr;
         ac.value = ts.peek().text;
         ts.bump();
         std::string flags;
@@ -1097,11 +1098,12 @@ static Statement parse_cwb_query_statement_after_keywords(TokStream& ts, std::os
 }
 
 Statement parse_statement_tokens(std::vector<CwbToken>& toks, std::ostringstream* trace,
-                                 std::string_view src = {}) {
+                                 std::string_view src = {}, const std::string& default_attr = "") {
     TokStream ts;
     ts.v = &toks;
     ts.i = 0;
     ts.src = src;
+    if (!default_attr.empty()) ts.default_attr = default_attr;
     if (ts.eof())
         throw std::runtime_error("Empty CWB statement");
 
@@ -1159,7 +1161,7 @@ Statement parse_statement_tokens(std::vector<CwbToken>& toks, std::ostringstream
 } // namespace
 
 Program translate_cwb_program_parsed(const std::string& input, int debug_level,
-                                   std::string* trace_out) {
+                                   std::string* trace_out, const std::string& default_attr) {
     std::ostringstream trace;
     std::ostringstream* tp = (debug_level > 0) ? &trace : nullptr;
 
@@ -1177,7 +1179,7 @@ Program translate_cwb_program_parsed(const std::string& input, int debug_level,
             continue;
 
         std::vector<CwbToken> toks = tokenize_all(sv);
-        Statement st = parse_statement_tokens(toks, tp, sv);
+        Statement st = parse_statement_tokens(toks, tp, sv, default_attr);
         prog.push_back(std::move(st));
         if (tp)
             *tp << "  ---\n";

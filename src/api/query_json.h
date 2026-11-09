@@ -5,6 +5,7 @@
 #include "query/executor.h"
 #include "api/subcorpus_request.h"
 #include "api/subcorpus_stats.h"
+#include "api/kwic_view.h"
 #include <string>
 #include <string_view>
 #include <vector>
@@ -40,6 +41,12 @@ struct QueryOptions {
     /// The query's language (query/dialect/dialect.h): "" / "native" = pando CQL, "cwb", "pmltq", "tiger"
     /// (the CLI's --cql; the server's "dialect"). Part of the result cache's and the count jobs' keys.
     std::string dialect;
+    /// The attribute a bare "string" stands for in the Manatee / CWB dialects (empty: word): a front
+    /// end's chosen default attribute (KonText's simple query), the query unchanged. Part of the
+    /// result cache's and the count jobs' keys.
+    std::string default_attr;
+    /// KonText's KWIC lines: each hit also gets `"kwic_view"` (kwic_view.h).
+    KwicViewSpec kwic_view;
     /// Alignment filters (`:: a.attr = b.attr`): include empty/"_" values (legacy behavior).
     bool allow_empty_alignment = false;
     /// P4.1: count the total over this many position ranges in parallel (1 = one thread).
@@ -260,6 +267,9 @@ struct ProgramOptions {
     bool strict_quoted_strings = false;
     /// The program's language (as QueryOptions::dialect).
     std::string dialect;
+    /// As QueryOptions::default_attr / ::kwic_view (the hit pages the program returns).
+    std::string default_attr;
+    KwicViewSpec kwic_view;
     bool allow_empty_alignment = false;
     size_t group_limit = 1000;
     /// P6.6: `count by A, B`: values of B (and further fields) under each A (0 = all).

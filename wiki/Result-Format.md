@@ -69,7 +69,8 @@ A hit:
 - `groups[]`: per query token `{index, id, name, start, end}`; per region anchor also `region`,
   `region_id`, `attrs`, `tok_ids[]`;
 - optional: `named_regions`, `aligned[]` (option `aligned`), `fragment` and `highlight_map`
-  (option `fragment`).
+  (option `fragment`), `kwic_view` (option `kwic_view`: KonText's line, see
+  [CLI Reference](CLI-Reference.md#kontexts-lines-kwic_view-default_attr)).
 
 With `total: "async"`, `page.total` is the count so far, `page.total_exact` is `false`, and
 `job.*` says how far the count is. `GET /status?job=` answers `{result: <job>, job: <job>}`. With
@@ -105,6 +106,7 @@ subcorpus; in mode `within` they stay those of the corpus.
 | `dcoll` | `attribute, relations[], matches, stoplist, baseline, relation_total?, measures[], collocates[]` | as `coll`, with `relation_freq?`, `breakdown{}`; `freq` stays the corpus frequency, `relation_freq` and `relation_total` are what the scores compare with when `baseline` is `relation` ([Collocations](Collocations-and-Keyness.md#what-dcoll-scores-compare-with)) |
 | `keyness` | `attribute, focus_size, ref_size, corpus_size, stoplist, rows[]` | `{word, focus_freq, ref_freq, keyness, effect}` |
 | `size` | a **number** | |
+| `arf` (`arf [Name]`) | a **number** (always a real) | Manatee's average reduced frequency of the hits |
 | `query` (`sort`, `filter`, `shuffle`, `sample`, an assignment) | as hits (`page.total`: the hits kept) | |
 | `info` (`show info`) | as `GET /info` | |
 | `show_attrs` | a list | `{name, vocab}` |

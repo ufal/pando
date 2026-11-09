@@ -1,0 +1,190 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/query",
+  "body": {
+   "query": "[upos=\"DET\"] [upos=\"NOUN\"]",
+   "limit": 2,
+   "kwic_view": {
+    "left": "-1:s",
+    "right": "1:s",
+    "attrs": "word",
+    "structs": "s",
+    "refs": "s"
+   }
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "backend": "pando",
+  "operation": "query",
+  "last_command": "query",
+  "result": {
+   "query": {
+    "language": "pando-cql",
+    "text": "[upos=\"DET\"] [upos=\"NOUN\"]"
+   },
+   "page": {
+    "start": 0,
+    "size": 2,
+    "returned": 2,
+    "total": 2,
+    "total_exact": false
+   },
+   "hits": [
+    {
+     "doc_id": "en",
+     "match_start": 5,
+     "match_end": 6,
+     "context": {
+      "left": "The black cat sleeps .",
+      "match": "A dog",
+      "right": "barks at the cat ."
+     },
+     "kwic_view": {
+      "pos": 5,
+      "kwiclen": 2,
+      "ctxbeg": 5,
+      "ctxend": 12,
+      "linegroup": 0,
+      "refs": [
+       "s#1"
+      ],
+      "left": [
+       "<s>",
+       "strc"
+      ],
+      "kwic": [
+       "A dog",
+       "{col0 coll}"
+      ],
+      "right": [
+       " barks at the cat .",
+       "{}",
+       "</s>",
+       "strc"
+      ]
+     },
+     "tokens": [
+      {
+       "pos": 5,
+       "group": 0,
+       "deprel": "det",
+       "form": "A",
+       "lemma": "a",
+       "upos": "DET"
+      },
+      {
+       "pos": 6,
+       "group": 1,
+       "deprel": "nsubj",
+       "form": "dog",
+       "lemma": "dog",
+       "upos": "NOUN"
+      }
+     ],
+     "groups": [
+      {
+       "index": 0,
+       "id": "t1",
+       "name": "t1",
+       "start": 5,
+       "end": 5
+      },
+      {
+       "index": 1,
+       "id": "t2",
+       "name": "t2",
+       "start": 6,
+       "end": 6
+      }
+     ]
+    },
+    {
+     "doc_id": "en",
+     "match_start": 9,
+     "match_end": 10,
+     "context": {
+      "left": ". A dog barks at",
+      "match": "the cat",
+      "right": ". De zwarte kat slaapt"
+     },
+     "kwic_view": {
+      "pos": 9,
+      "kwiclen": 2,
+      "ctxbeg": 5,
+      "ctxend": 12,
+      "linegroup": 0,
+      "refs": [
+       "s#1"
+      ],
+      "left": [
+       "<s>",
+       "strc",
+       "A dog barks at",
+       "{}"
+      ],
+      "kwic": [
+       " the cat",
+       "{col0 coll}"
+      ],
+      "right": [
+       " .",
+       "{}",
+       "</s>",
+       "strc"
+      ]
+     },
+     "tokens": [
+      {
+       "pos": 9,
+       "group": 0,
+       "deprel": "det",
+       "form": "the",
+       "lemma": "the",
+       "upos": "DET"
+      },
+      {
+       "pos": 10,
+       "group": 1,
+       "deprel": "obl",
+       "form": "cat",
+       "lemma": "cat",
+       "upos": "NOUN"
+      }
+     ],
+     "groups": [
+      {
+       "index": 0,
+       "id": "t1",
+       "name": "t1",
+       "start": 9,
+       "end": 9
+      },
+      {
+       "index": 1,
+       "id": "t2",
+       "name": "t2",
+       "start": 10,
+       "end": 10
+      }
+     ]
+    }
+   ],
+   "groups": [
+    {
+     "index": 0,
+     "id": "t1",
+     "name": "t1"
+    },
+    {
+     "index": 1,
+     "id": "t2",
+     "name": "t2"
+    }
+   ]
+  },
+  "format_version": 1
+ }
+}

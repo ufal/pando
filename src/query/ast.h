@@ -427,6 +427,7 @@ enum class CommandType {
     DCOLL,
     CAT,
     SIZE,
+    ARF,           // arf [Name] — Manatee's average reduced frequency of the hits (KonText shows it)
     RAW,
     SHOW_ATTRS,
     SHOW_REGIONS,

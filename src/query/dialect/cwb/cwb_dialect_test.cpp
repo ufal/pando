@@ -65,6 +65,10 @@ int main() {
     {
         using namespace pando;
         auto q = [](const char* s) { return translate_cwb_program(s, 0, nullptr).at(0).query; };
+        // a front-end's default attribute: a bare "pattern" on it (CQP's own default stays word)
+        const TokenQuery da = translate_cwb_program("\"dog\" [word=\"x\"]", 0, nullptr, "lemma").at(0).query;
+        assert(da.tokens.at(0).conditions->leaf.attr == "lemma" && da.tokens.at(1).conditions->leaf.attr == "word");
+        assert(q("\"dog\"").tokens.at(0).conditions->leaf.attr == "word");
         const TokenQuery g = q("[lemma=\"go\"] :: match.text_langcode=\"en\" within text");
         assert(g.within == "text" && g.global_region_filters.size() == 1);
         const TokenQuery l = q("a:[upos=\"ADJ\"] b:[upos=\"NOUN\"] :: a.lemma != b.lemma");

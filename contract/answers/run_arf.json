@@ -1,0 +1,18 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/run",
+  "body": {
+   "cql": "[upos=\"NOUN\"]; arf",
+   "limit": 5
+  }
+ },
+ "status": 200,
+ "answer": {
+  "ok": true,
+  "operation": "arf",
+  "last_command": "arf",
+  "result": 6.0,
+  "format_version": 1
+ }
+}

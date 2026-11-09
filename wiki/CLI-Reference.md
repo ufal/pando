@@ -280,13 +280,13 @@ default 2^20 tokens) override, for tests. `--timing` reports the ranges as
 
 | Endpoint | Role |
 | --- | --- |
-| `POST /query` | One query: `query`, `limit`, `offset`, `total`, `max_total`, `context`, `sentence`, `attrs`, `fragment`, `debug`, `strict_quoted_strings` (see "Token fragments" below) |
+| `POST /query` | One query: `query`, `limit`, `offset`, `total`, `max_total`, `context`, `sentence`, `attrs`, `fragment`, `debug`, `strict_quoted_strings` (see "Token fragments" below), `kwic_view`, `default_attr` (see "KonText's lines" below) |
 | `GET /status?job=ID` | State of a background total (404 once it has expired: re-send the `/query`) |
 | `POST /cancel?job=ID` | Stop a queued / running count (send a body, even `{}`, or `Content-Length: 0`) |
 | `POST /cancel?request=ID` | Stop a running `/query` or `/run` sent with `"request_id": "ID"` (an id of the client's choosing, unique while it runs: a second request with the same id gets 409). It answers 499 with `"cancelled": true`; `"cancelled": false` here when no such request runs |
 | `GET /jobs` | All cached results and running counts |
 | `GET /version` | The pando build answering, its `features` and the served corpus (also in `/health`) |
-| `POST /run` | A full CQL program (named queries, `count`, `coll`, …); `session_id`, `timeout_ms`; `sentence` and `fragment` as for `/query`, for the hit pages the program returns (a query, `sort`, `cat`) |
+| `POST /run` | A full CQL program (named queries, `count`, `coll`, …); `session_id`, `timeout_ms`; `sentence`, `fragment`, `kwic_view` and `default_attr` as for `/query`, for the hit pages the program returns (a query, `sort`, `cat`); `arf` gives Manatee's ARF of a set |
 | `POST /session` | Create a client session (`{"session_id": optional, "ttl_s": optional}`; an existing id is reused: `created: false`) |
 | `GET /session?session_id=` | The session's hit sets (query, materialised, hits, total, bytes, sort steps, aliases) |
 | `POST /session/close` | Close a session (`session_id` in the body or the query string) |
@@ -301,6 +301,21 @@ it, and with `use` the subcorpus is the corpus of the statistics (N, ipm, colloc
 keyness reference). On `/run` it overrides the session's own `use` for that request. The answer has
 `"subcorpus": {name, mode, tokens, ranges, encoding}`; resolved subcorpora are cached by index and
 definition, the result cache and background totals keep subcorpora apart.
+
+### KonText's lines (`"kwic_view"`, `"default_attr"`)
+
+For KonText (through FQS): `"kwic_view": {"left": "-40#", "right": "40#", "attrs": "word,lemma",
+"ctxattrs": "word,lemma", "structs": "s,text.id", "refs": "=text.id", "maxctx": 0}` gives each hit
+`"kwic_view": {pos, kwiclen, ctxbeg, ctxend, linegroup, refs[], left[], kwic[], right[]}`: the line as
+Manatee's `KWICLines` makes it (strings and classes alternating: `" dog", "{col0 coll}"`, attribute
+chunks `"\u001fdog", "attr"`, structure tags `"</s><s>", "strc"`), from which KonText builds its page.
+The context is in characters (`-40#`), tokens (`-5`) or structures (`-1:s`); `word` is `form`. A pando
+index has no registry: structures show as tags (no DISPLAYTAG / DISPLAYCLASS), refs have no LABEL,
+MAXCONTEXT is `maxctx`, and Manatee's numbered labels (`1:[…]`, filter collocations) are not marked.
+
+`"default_attr": "lemma"`: the attribute a bare `"string"` stands for in the Manatee and CWB
+languages (KonText's simple query with a chosen attribute); the query itself is not changed, and the
+result cache, background totals and stored sets keep queries with another default attribute apart.
 
 ### Token fragments (`"fragment": true`)
 

@@ -12,6 +12,10 @@ struct ParserOptions {
     /// the CWB dialect — if `x` contains no regex metacharacters, literal equality; otherwise
     /// anchored whole-token regex `^x$`.
     bool strict_quoted_strings = false;
+    /// The attribute a bare "string" stands for in the Manatee and CWB dialects (`word` when empty):
+    /// a front-end's chosen default attribute (KonText's simple query, Manatee's DEFAULTATTR), the
+    /// query itself unchanged.
+    std::string default_attr;
 };
 
 // Recursive-descent parser for ClickCQL.

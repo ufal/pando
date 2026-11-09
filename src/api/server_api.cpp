@@ -710,6 +710,8 @@ ServerResponse ServerApi::run(const std::string& body_in) {
     } catch (const SubcorpusError& e) {
         return json_error(400, e.what());
     }
+    const KwicViewSpec kwic_view = parse_kwic_view(json_extract_raw(body, "kwic_view"));   // as on /query
+    if (kwic_view.on) body = json_without_member(body, "kwic_view");
     std::string cql = json_extract_str(body, "cql");
     if (cql.empty()) cql = json_extract_str(body, "query");
     if (cql.empty()) return json_error(400, "missing 'cql' field");
@@ -727,6 +729,8 @@ ServerResponse ServerApi::run(const std::string& body_in) {
     opts.child_limit = json_extract_num(body, "child_limit", 20);
     opts.subcorpus_request = sub_req;
     opts.strict_quoted_strings = json_extract_bool(body, "strict_quoted_strings", false);
+    opts.kwic_view = kwic_view;
+    opts.default_attr = json_extract_str(body, "default_attr");
     // the program's language (pando-cql by default; cwb-cql, pmltq, tiger: query/dialect/dialect.h)
     opts.dialect = json_extract_str(body, "dialect");
     if (!opts.dialect.empty() && normalize_dialect(opts.dialect).empty())
@@ -812,6 +816,9 @@ ServerResponse ServerApi::query(const std::string& body_in) {
     } catch (const SubcorpusError& e) {
         return json_error(400, e.what());
     }
+    // KonText's KWIC lines (kwic_view.h): taken out first too (its keys are not the request's)
+    const KwicViewSpec kwic_view = parse_kwic_view(json_extract_raw(body, "kwic_view"));
+    if (kwic_view.on) body = json_without_member(body, "kwic_view");
     const std::string sid = json_extract_str(body, "session_id");
     const std::string set_name = json_extract_str(body, "name");
     const std::string from = json_extract_str(body, "from");
@@ -842,6 +849,8 @@ ServerResponse ServerApi::query(const std::string& body_in) {
     opts.aligned_where = json_extract_str(body, "aligned_where");
     opts.aligned_max = json_extract_num(body, "aligned_max", 0);
     opts.strict_quoted_strings = json_extract_bool(body, "strict_quoted_strings", false);
+    opts.kwic_view = kwic_view;
+    opts.default_attr = json_extract_str(body, "default_attr");   // a bare "string"'s attribute (dialects)
     // the query's language (pando-cql by default; cwb-cql, pmltq, tiger: query/dialect/dialect.h)
     opts.dialect = json_extract_str(body, "dialect");
     if (!opts.dialect.empty() && normalize_dialect(opts.dialect).empty())
@@ -925,7 +934,7 @@ ServerResponse ServerApi::query(const std::string& body_in) {
         if (cache_.max_bytes() && !(sampled_now && o.seed == 0)) {
             const std::string flags = std::string(o.total ? "t" : "-") + (o.shuffle ? "s" : "-")
                 + (o.strict_quoted_strings ? "q" : "-") + (o.allow_empty_alignment ? "e" : "-") + ","
-                + normalize_dialect(o.dialect) + "," + subcorpus_cache_key(o);
+                + normalize_dialect(o.dialect) + "," + subcorpus_cache_key(o) + "," + o.default_attr;
             std::string sig;
             if (parallel_q) {
                 ck_all = cache_key({"query/1", query_text, "parallel," + std::to_string(o.max_total) + "," + flags});
@@ -952,7 +961,7 @@ ServerResponse ServerApi::query(const std::string& body_in) {
     std::vector<std::string> date_notes;
     try {
         date_notes = date_value_notes(corpus_, date_uses(parse_in_dialect(query_text, opts.dialect,
-                                                                         ParserOptions{opts.strict_quoted_strings}, &corpus_)));
+                                                                         ParserOptions{opts.strict_quoted_strings, opts.default_attr}, &corpus_)));
     } catch (const std::exception&) {}   // a query that does not parse is reported where it runs
     auto ok = [&](const MatchSet& ms, double elapsed, std::string_view extra = {}) {
         std::string js = with_result_warnings(to_query_result_json(corpus_, query_text, ms, opts, elapsed, extra),

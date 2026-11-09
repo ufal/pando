@@ -5,7 +5,7 @@
 
 namespace pando {
 
-Program translate_manatee_program(const std::string&, int, std::string*) {
+Program translate_manatee_program(const std::string&, int, std::string*, const std::string&) {
     throw std::runtime_error(
         "The Manatee CQL dialect was not built in this binary. Configure with -DPANDO_MANATEE_DIALECT=ON.");
 }

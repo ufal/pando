@@ -671,6 +671,7 @@ void ProgramSession::store_query(const Corpus& corpus, const std::string& name, 
     hs->allow_empty_alignment = opts.allow_empty_alignment;
     const Statement& st = hs->st();
     hs->recipe = recipe_of(st, opts.strict_quoted_strings, opts.allow_empty_alignment);
+    if (!opts.default_attr.empty() && !hs->recipe.empty()) hs->recipe += "\x1f" "default_attr=" + opts.default_attr;
     if (std::string sk = subcorpus_cache_key(opts); !sk.empty() && !hs->recipe.empty())
         hs->recipe += "\x1fsubcorpus=" + sk;
     if (opts.subcorpus && opts.subcorpus->sc) {
@@ -2036,6 +2037,7 @@ static QueryOptions query_options_of(const ProgramOptions& opts) {
     qopts.limit = opts.limit; qopts.offset = opts.offset; qopts.max_total = opts.max_total;
     qopts.context = opts.context; qopts.total = opts.total; qopts.attrs = opts.attrs;
     qopts.sentence = opts.sentence; qopts.fragment = opts.fragment;
+    qopts.default_attr = opts.default_attr; qopts.kwic_view = opts.kwic_view;
     return qopts;
 }
 
@@ -2127,7 +2129,7 @@ static std::string run_program_piece(Corpus& corpus, ProgramSession& ps, const s
                                      ProgramOptions& opts, PieceContext& ctx) {
     auto& S = *ps.impl_;
 
-    auto prog = std::make_shared<Program>(parse_in_dialect(cql, opts.dialect, ParserOptions{opts.strict_quoted_strings}, &corpus));
+    auto prog = std::make_shared<Program>(parse_in_dialect(cql, opts.dialect, ParserOptions{opts.strict_quoted_strings, opts.default_attr}, &corpus));
     const unsigned threads = std::max(1u, opts.threads);
 
     QueryExecutor executor(corpus);
@@ -2214,6 +2216,7 @@ static std::string run_program_piece(Corpus& corpus, ProgramSession& ps, const s
             hs->recipe = recipe_of(stmt, opts.strict_quoted_strings, opts.allow_empty_alignment, external_labels);
             hs->sc_stats = sc_stats;
             if (sc_stats && !hs->recipe.empty()) hs->recipe += "\x1fsubcorpus=" + sc_stats->cache_key();
+            if (!opts.default_attr.empty() && !hs->recipe.empty()) hs->recipe += "\x1f" "default_attr=" + opts.default_attr;
             ctx.reported = sc_stats ? sc_stats->reported : nullptr;
             hs->nm = stmt.is_parallel ? build_name_map(stmt.query)
                                       : QueryExecutor::build_name_map_for_stripped_query(stmt.query);
@@ -2532,6 +2535,30 @@ static std::string run_program_piece(Corpus& corpus, ProgramSession& ps, const s
                     else n = set_total_count(corpus, *hs, threads, opts.progress);
                     out << "{\"ok\": true, \"operation\": \"size\", \"last_command\": \"size\", \"result\": "
                         << n << "}\n";
+                    break;
+                }
+                case CommandType::ARF: {
+                    // Manatee's ARF (finlib/fsstat.cc compute_ARF): the hits' starts in corpus order,
+                    // distances against the corpus size / hits, the first and last cyclic
+                    std::vector<CorpusPos> begs;
+                    for (const Match& m : full().matches) begs.push_back(m.first_pos());
+                    std::sort(begs.begin(), begs.end());
+                    const double size = static_cast<double>(corpus.size());
+                    double arf = 0.0;
+                    if (!begs.empty()) {
+                        const double v = size / static_cast<double>(begs.size());
+                        for (size_t i = 1; i < begs.size(); ++i) {
+                            const double d = static_cast<double>(begs[i] - begs[i - 1]);
+                            arf += d < v ? d / v : 1.0;
+                        }
+                        const double first = static_cast<double>(begs.front()) + size - static_cast<double>(begs.back());
+                        arf += first < v ? first / v : 1.0;
+                    }
+                    char buf[64];
+                    std::snprintf(buf, sizeof buf, "%.17g", arf);
+                    std::string num = buf;
+                    if (num.find_first_of(".eEn") == std::string::npos) num += ".0";   // always a JSON real
+                    out << "{\"ok\": true, \"operation\": \"arf\", \"last_command\": \"arf\", \"result\": " << num << "}\n";
                     break;
                 }
                 case CommandType::TABULATE: {

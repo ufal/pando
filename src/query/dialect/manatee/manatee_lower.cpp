@@ -95,7 +95,8 @@ void structure_pairs(const AttVal& a, std::vector<std::pair<std::string, std::st
 
 class Lowering {
 public:
-    explicit Lowering(std::ostream* trace) : trace_(trace) {}
+    Lowering(std::ostream* trace, const std::string& default_attr)
+        : trace_(trace), default_attr_(default_attr.empty() ? kDefaultAttr : default_attr) {}
 
     Program run(const Query& q) {
         TokenQuery tq;
@@ -152,6 +153,7 @@ public:
 
 private:
     std::ostream* trace_;
+    std::string default_attr_;
     using Tokens = std::vector<QueryToken>;
     // Manatee's limit on a repeated range (MAX_RANGE_SIZE): an unbounded group repeats while it fits in it
     static constexpr size_t kMaxRange = 100;
@@ -288,7 +290,7 @@ private:
         if (p.label >= 0) t.name = label_name(p.label);
         switch (p.kind) {
         case Position::Kind::Regexp:
-            t.conditions = regex_leaf(kDefaultAttr, p.regexp, negated);
+            t.conditions = regex_leaf(default_attr_, p.regexp, negated);
             break;
         case Position::Kind::Bracket:
             t.conditions = lower_attval(*p.attrs, negated);
@@ -423,8 +425,8 @@ private:
 
 }  // namespace
 
-Program lower(const Query& q, std::ostream* trace) {
-    return Lowering(trace).run(q);
+Program lower(const Query& q, std::ostream* trace, const std::string& default_attr) {
+    return Lowering(trace, default_attr).run(q);
 }
 
 }  // namespace pando::manatee
