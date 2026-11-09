@@ -107,10 +107,11 @@ Program Parser::parse() {
     return prog;
 }
 
-bool Parser::is_command_keyword(const std::string& text) const {
+bool Parser::is_command_keyword(const std::string& text) {
     static const std::vector<std::string> cmds = {
         "count", "group", "sort", "freq", "coll", "dcoll",
-        "cat", "size", "raw", "show", "tabulate", "describe", "stats", "keyness", "set", "drop"
+        "cat", "size", "raw", "show", "tabulate", "describe", "stats", "keyness", "set", "drop",
+        "filter", "shuffle", "sample"
     };
     std::string lower = text;
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
@@ -375,6 +376,74 @@ GroupCommand Parser::parse_command() {
                     field += "." + lexer_.expect(TokType::IDENT).text;
                 }
                 cmd.fields.push_back(field);
+            }
+        }
+        return cmd;
+    }
+    else if (kw == "filter" || kw == "shuffle" || kw == "sample") {
+        cmd.type = kw == "filter" ? CommandType::FILTER : kw == "shuffle" ? CommandType::SHUFFLE : CommandType::SAMPLE;
+        auto peek_word = [&](const char* w) {
+            return lexer_.peek().type == TokType::IDENT && lexer_.peek().text == w;
+        };
+        auto parse_seed = [&]() {
+            if (!peek_word("seed")) return;
+            lexer_.consume();
+            const Token n = lexer_.expect(TokType::NUMBER);
+            if (n.text.empty() || n.text[0] == '-') throw std::runtime_error(kw + ": the seed is a number >= 0");
+            cmd.has_seed = true;
+            cmd.seed = std::stoull(n.text);
+        };
+        // the set (optional: Last)
+        if (lexer_.peek().type == TokType::IDENT && !peek_word("by") && !peek_word("not") && !peek_word("seed"))
+            cmd.query_name = lexer_.next().text;
+        if (cmd.type == CommandType::SHUFFLE) {
+            parse_seed();
+            return cmd;
+        }
+        if (cmd.type == CommandType::SAMPLE) {
+            const Token n = lexer_.peek();
+            if (n.type != TokType::NUMBER || n.text[0] == '-')
+                throw std::runtime_error("sample: the number of hits to keep is missing (`sample A 100`)");
+            lexer_.consume();
+            cmd.sample_n = std::stoull(n.text);
+            parse_seed();
+            return cmd;
+        }
+        // filter
+        if (peek_word("not")) { lexer_.consume(); cmd.filter_negative = true; }
+        if (!peek_word("by"))
+            throw std::runtime_error("filter: expected `by <query>` (`filter A by F on match[-5]..matchend[5]`)");
+        lexer_.consume();
+        cmd.filter_query = lexer_.expect(TokType::IDENT).text;
+        auto parse_anchor = [&]() -> std::string {
+            std::string a = lexer_.expect(TokType::IDENT).text;
+            if (lexer_.peek().type == TokType::LBRACKET) {
+                lexer_.consume();
+                a += "[" + lexer_.expect(TokType::NUMBER).text + "]";
+                lexer_.expect(TokType::RBRACKET);
+            }
+            return a;
+        };
+        while (lexer_.peek().type == TokType::IDENT) {
+            if (peek_word("on")) {
+                lexer_.consume();
+                cmd.filter_from = parse_anchor();
+                cmd.filter_to = cmd.filter_from;
+                if (lexer_.peek().type == TokType::DOT) {
+                    lexer_.consume();
+                    lexer_.expect(TokType::DOT);
+                    cmd.filter_to = parse_anchor();
+                }
+            } else if (peek_word("rank")) {
+                lexer_.consume();
+                cmd.filter_rank = std::stoi(lexer_.expect(TokType::NUMBER).text);
+            } else if (peek_word("excluding")) {
+                lexer_.consume();
+                if (!peek_word("match")) throw std::runtime_error("filter: expected `excluding match`");
+                lexer_.consume();
+                cmd.filter_excluding_match = true;
+            } else {
+                break;
             }
         }
         return cmd;
@@ -783,13 +852,16 @@ GroupCommand Parser::parse_command() {
     };
     auto parse_by_field = [&]() -> std::string {
         std::string field = parse_field_expr();
-        if (cmd.type != CommandType::SORT) return field;
+        // the options also for count / group / freq (a context position's frequency: KonText)
+        if (cmd.type != CommandType::SORT && cmd.type != CommandType::COUNT && cmd.type != CommandType::GROUP
+            && cmd.type != CommandType::FREQ)
+            return field;
         if (lexer_.peek().type == TokType::PERCENT) {
             lexer_.consume();
             const std::string flags = lexer_.expect(TokType::IDENT).text;
             for (char f : flags)
-                if (f != 'c' && f != 'd')
-                    throw std::runtime_error(std::string("sort: unsupported flag %") + f + " (use %c, %d)");
+                if (f != 'c' && f != 'd' && f != 'r')
+                    throw std::runtime_error(kw + ": unsupported flag %" + std::string(1, f) + " (use %c, %d, %r)");
             field += " %" + flags;
         }
         if (lexer_.peek().type == TokType::IDENT && lexer_.peek().text == "on") {

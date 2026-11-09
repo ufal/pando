@@ -11,6 +11,7 @@
 #include <exception>
 #include <iterator>
 #include <stdexcept>
+#include <vector>
 
 namespace pando {
 
@@ -62,6 +63,55 @@ size_t top_level_semicolon(const std::string& text) {
         else if (c == ';' && depth == 0) return i;
     }
     return std::string::npos;
+}
+
+/// The statements of a program, split at its top-level `;`, trimmed, empty ones left out.
+std::vector<std::string> split_statements(const std::string& text) {
+    std::vector<std::string> out;
+    std::string rest = text;
+    while (true) {
+        const size_t cut = top_level_semicolon(rest);
+        std::string piece = rest.substr(0, cut);
+        const size_t a = piece.find_first_not_of(" \t\r\n");
+        if (a != std::string::npos) {
+            const size_t b = piece.find_last_not_of(" \t\r\n");
+            out.push_back(piece.substr(a, b - a + 1));
+        }
+        if (cut == std::string::npos) break;
+        rest = rest.substr(cut + 1);
+    }
+    return out;
+}
+
+/// A statement whose first word is a pando command (`count`, `sort`, `filter`, …).
+bool is_command_statement(const std::string& piece) {
+    size_t e = 0;
+    while (e < piece.size() && (std::isalnum(static_cast<unsigned char>(piece[e])) || piece[e] == '_')) ++e;
+    if (e == 0) return false;
+    // `count = […]` names a query
+    size_t r = e;
+    while (r < piece.size() && std::isspace(static_cast<unsigned char>(piece[r]))) ++r;
+    if (r < piece.size() && piece[r] == '=' && (r + 1 >= piece.size() || piece[r + 1] != '=')) return false;
+    return Parser::is_command_keyword(piece.substr(0, e));
+}
+
+/// `Name = <query>` → the query (trimmed), `name` set; otherwise the statement itself.
+std::string named_query_body(const std::string& piece, std::string& name) {
+    name.clear();
+    size_t e = 0;
+    if (e < piece.size() && (std::isalpha(static_cast<unsigned char>(piece[e])) || piece[e] == '_')) {
+        ++e;
+        while (e < piece.size() && (std::isalnum(static_cast<unsigned char>(piece[e])) || piece[e] == '_')) ++e;
+    }
+    if (e == 0) return piece;
+    size_t r = e;
+    while (r < piece.size() && std::isspace(static_cast<unsigned char>(piece[r]))) ++r;
+    if (r >= piece.size() || piece[r] != '=' || (r + 1 < piece.size() && piece[r + 1] == '=')) return piece;
+    std::string body = piece.substr(r + 1);
+    const size_t a = body.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) throw std::runtime_error("`" + piece + "`: the query after '=' is missing");
+    name = piece.substr(0, e);
+    return body.substr(a);
 }
 
 // An attribute renamed throughout a program: in conditions (also of related and counted words),
@@ -133,19 +183,36 @@ Program parse_in_dialect(const std::string& text, const std::string& dialect, Pa
     try {
         return parse_dialect_only(text, d, parse_opts, corpus, debug_level, trace_out);
     } catch (const std::runtime_error&) {
-        // a query in the dialect followed by pando's own steps (`a-node [...]; freq by lemma`): the
-        // part up to the first top-level `;` in the dialect, the rest as pando CQL; when that does
-        // not parse either, the whole text's error
+        // a program: its query statements (`[…]`, `Name = […]`) in the dialect, its commands
+        // (`count …`, `sort …`, `filter …`) as pando CQL; when the first statement is not a
+        // query of the dialect either, the whole text's error
         const std::exception_ptr whole = std::current_exception();
-        const size_t cut = top_level_semicolon(text);
-        if (cut == std::string::npos) throw;
+        if (top_level_semicolon(text) == std::string::npos) throw;
+        bool first_ok = false;
         try {
-            Program prog = parse_dialect_only(text.substr(0, cut), d, parse_opts, corpus, debug_level, trace_out);
-            Parser rest(text.substr(cut + 1), parse_opts);
-            Program steps = rest.parse();
-            prog.insert(prog.end(), std::make_move_iterator(steps.begin()), std::make_move_iterator(steps.end()));
+            Program prog;
+            for (const std::string& piece : split_statements(text)) {
+                if (is_command_statement(piece)) {
+                    Parser p(piece, parse_opts);
+                    Program steps = p.parse();
+                    prog.insert(prog.end(), std::make_move_iterator(steps.begin()), std::make_move_iterator(steps.end()));
+                } else {
+                    std::string name;
+                    const std::string query = named_query_body(piece, name);
+                    Program q = parse_dialect_only(query, d, parse_opts, corpus, debug_level, trace_out);
+                    if (q.empty() || !q.back().has_query)
+                        throw std::runtime_error("not a query: " + piece);
+                    if (!name.empty()) {
+                        q.back().name = name;
+                        q.back().source = query;
+                    }
+                    prog.insert(prog.end(), std::make_move_iterator(q.begin()), std::make_move_iterator(q.end()));
+                }
+                first_ok = true;
+            }
             return prog;
         } catch (const std::runtime_error&) {
+            if (first_ok) throw;   // a program after all: the error of its statement
             std::rethrow_exception(whole);
         }
     }

@@ -189,6 +189,9 @@ int main(int argc, char** argv) {
         CHECK(r.status == 404);
         r = call(s, "GET", "/context", "pos=10&left=2&right=2");
         CHECK(r.status == 200 && has(r.body, "\"pos\":10"));
+        CHECK(!has(r.body, "\"regions\""));                     // only with regions=1 (additive)
+        r = call(s, "GET", "/context", "pos=10&left=2&right=2&regions=1");
+        CHECK(r.status == 200 && has(r.body, "\"regions\":{") && has(r.body, "\"sent_id\":\"sample-en_p1-s1\""));
         r = call(s, "GET", "/context");
         CHECK(r.status == 400 && has(r.body, "missing 'pos'"));
         r = call(s, "GET", "/context", "pos=99999999999");

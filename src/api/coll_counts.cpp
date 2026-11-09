@@ -23,8 +23,22 @@ inline void CollCounter::count(CorpusPos p) {
     if (inside_ && !inside_->contains(p)) return;
     const LexiconId id = pa_.id_at(p);
     if (id == empty_id_ || id < 0 || static_cast<size_t>(id) >= counts_.size()) return;
+    if (per_hit_) {
+        hit_ids_.push_back(id);
+        return;
+    }
     ++counts_[static_cast<size_t>(id)];
     ++total_;
+}
+
+// per_hit_: each distinct id of the hit's window once
+void CollCounter::end_hit() {
+    if (!per_hit_ || hit_ids_.empty()) return;
+    std::sort(hit_ids_.begin(), hit_ids_.end());
+    hit_ids_.erase(std::unique(hit_ids_.begin(), hit_ids_.end()), hit_ids_.end());
+    for (LexiconId id : hit_ids_) ++counts_[static_cast<size_t>(id)];
+    total_ += hit_ids_.size();
+    hit_ids_.clear();
 }
 
 void CollCounter::add_envelope(CorpusPos first, CorpusPos last, const std::vector<CorpusPos>* excl) {
@@ -38,6 +52,7 @@ void CollCounter::add_envelope(CorpusPos first, CorpusPos last, const std::vecto
     const CorpusPos hi = std::min(last + right_ + 1, n_);
     for (CorpusPos p = last + 1; p < hi; ++p)
         if (!excluded(p)) count(p);
+    end_hit();
 }
 
 void CollCounter::add_hub(CorpusPos hub, const std::vector<CorpusPos>& excl) {
@@ -53,6 +68,7 @@ void CollCounter::add_hub(CorpusPos hub, const std::vector<CorpusPos>& excl) {
     const CorpusPos hi = std::min(hub + right_ + 1, n_);
     for (CorpusPos p = hub + 1; p < hi; ++p)
         if (!excluded(p)) count(p);
+    end_hit();
 }
 
 static CollCounts collect(const std::vector<uint32_t>& counts, size_t total) {

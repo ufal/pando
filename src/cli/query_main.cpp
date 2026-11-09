@@ -2,6 +2,8 @@
 #include "pando_version.h"
 #include "core/build_info.h"
 #include "api/group_counts.h"
+#include "api/hit_steps.h"
+#include "query/sort_field.h"
 #include "corpus/corpus.h"
 #include "api/query_json.h"
 #include "api/program_subcorpora.h"
@@ -122,6 +124,7 @@ struct Options {
     size_t coll_min_freq = 5;
     size_t coll_max_items = 50;
     size_t coll_stoplist = 0; // 0 = disabled; otherwise top-N most frequent coll_attr forms are excluded
+    bool coll_count_hits = false; // `set coll-count hits`: once per hit (Manatee)
     std::vector<std::string> coll_measures;  // empty = default {"logdice"}
     DcollBaseline dcoll_baseline = DcollBaseline::Relation;  // --dcoll-baseline (dcoll_totals.h)
     // RG-REG-5: named-region binding policy when an anchor position is contained in
@@ -1977,6 +1980,7 @@ static void emit_coll(const Corpus& corpus, const MatchSet& ms,
                       const NameIndexMap* target_name_map) {
     const auto& pa = corpus.attr(coll_attr_of(corpus, cmd));
     CollCounter counter(pa, opts.coll_left, opts.coll_right, corpus.size());
+    counter.set_per_hit(opts.coll_count_hits);
     count_coll_hits(counter, ms, cmd, name_map, target_name_map);
     const CollCounts cc = counter.finish();
     emit_coll_result(corpus, cmd, opts, cc,
@@ -2558,7 +2562,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
             const std::vector<std::string>* aggregate_by = nullptr;
             if (next_is_command && !stmt.is_parallel && opts.sample == 0 && !opts.count_only) {
                 const GroupCommand& ncmd = prog[si + 1].command;
-                if (!ncmd.fields.empty()
+                if (!ncmd.fields.empty() && !fields_have_options(ncmd.fields)
                     && (ncmd.type == CommandType::COUNT || ncmd.type == CommandType::GROUP
                         || ncmd.type == CommandType::FREQ)
                     && aggregate_command_targets_stmt(stmt, ncmd))
@@ -2675,6 +2679,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                         sink_state.coll = std::make_unique<CollCounter>(
                                 corpus.attr(coll_attr_of(corpus, c)), opts.coll_left, opts.coll_right,
                                 corpus.size());
+                        sink_state.coll->set_per_hit(opts.coll_count_hits);
                         sink_state.sink = std::make_unique<CollHitSink>(*sink_state.coll,
                                                                         index_of(c.coll_on_label, -2));
                     } else if (targets && c.type == CommandType::DCOLL && (corpus.has_deps() || !dcoll_uses_basic_tree(c))
@@ -2906,6 +2911,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                 else if (name == "max-items" || name == "max_items")  to_size(opts.coll_max_items);
                 else if (name == "min-freq" || name == "min_freq")    to_size(opts.coll_min_freq);
                 else if (name == "stoplist") to_size(opts.coll_stoplist);
+                else if (name == "coll-count" || name == "coll_count") opts.coll_count_hits = (val == "hits");
                 else if (name == "group-limit" || name == "group_limit") to_size(opts.group_limit);
                 else if (name == "child-limit" || name == "child_limit") to_size(opts.child_limit);
                 else if (name == "no-mv-explode" || name == "no_mv_explode")
@@ -3350,6 +3356,35 @@ static void run_query(const Corpus& corpus, const std::string& input,
                 }
             }
 
+            // in-place steps (sort, filter, shuffle, sample) change only this name's hits:
+            // the sets are shared, so another name holding the same hits keeps them
+            auto own_copy = [&]() {
+                // the sets are shared: another name holding the same hits keeps
+                // its order, so this one changes a copy
+                // which slot the command changes: a named set, else `Last`
+                const std::string& qn = cmd_to_run.query_name;
+                auto ni = qn.empty() || qn == "Last" ? session.named_results.end()
+                                                     : session.named_results.find(qn);
+                const bool is_last = ni == session.named_results.end() || ni->second.get() != ms_to_use;
+                const std::string key = is_last ? "Last" : qn;
+                bool others = false;
+                for (const auto& [n, p] : session.named_results)
+                    others |= p.get() == ms_to_use && n != key && !(is_last && n == "Last");
+                if (!is_last && session.last.get() == ms_to_use) others = true;
+                if (others) {
+                    auto copy = std::make_shared<MatchSet>(*ms_to_use);
+                    if (is_last) {
+                        session.last = copy;
+                        auto li = session.named_results.find("Last");
+                        if (li != session.named_results.end() && li->second.get() == ms_to_use)
+                            li->second = copy;
+                    } else if (!key.empty()) {
+                        session.named_results[key] = copy;
+                    }
+                    ms_to_use = copy.get();
+                }
+            };
+
             switch (cmd_to_run.type) {
                 case CommandType::COUNT:
                 case CommandType::GROUP:
@@ -3368,37 +3403,45 @@ static void run_query(const Corpus& corpus, const std::string& input,
                         if (should_emit_output) emit_hits_text(corpus, "(sorted)", *ms_to_use, opts, 0);
                         break;
                     }
-                    {
-                        // the sets are shared: another name holding the same hits keeps
-                        // its order, so this one sorts a copy
-                        // which slot the command sorts: a named set, else `Last`
-                        const std::string& qn = cmd_to_run.query_name;
-                        auto ni = qn.empty() || qn == "Last" ? session.named_results.end()
-                                                             : session.named_results.find(qn);
-                        const bool is_last = ni == session.named_results.end() || ni->second.get() != ms_to_use;
-                        const std::string key = is_last ? "Last" : qn;
-                        bool others = false;
-                        for (const auto& [n, p] : session.named_results)
-                            others |= p.get() == ms_to_use && n != key && !(is_last && n == "Last");
-                        if (!is_last && session.last.get() == ms_to_use) others = true;
-                        if (others) {
-                            auto copy = std::make_shared<MatchSet>(*ms_to_use);
-                            if (is_last) {
-                                session.last = copy;
-                                auto li = session.named_results.find("Last");
-                                if (li != session.named_results.end() && li->second.get() == ms_to_use)
-                                    li->second = copy;
-                            } else if (!key.empty()) {
-                                session.named_results[key] = copy;
-                            }
-                            ms_to_use = copy.get();
-                        }
-                    }
+                    own_copy();
                     // P7.7: keys computed once per hit (bytewise order, as before)
                     sort_matches_by_key(corpus, ms_to_use->matches, *nm_to_use, cmd_to_run.fields,
                                         /*group_key_order=*/false);
                     if (should_emit_output) emit_hits_text(corpus, "(sorted)", *ms_to_use, opts, 0);
                     break;
+
+                case CommandType::FILTER:
+                case CommandType::SHUFFLE:
+                case CommandType::SAMPLE: {
+                    std::vector<size_t> keep;
+                    const size_t n = ms_to_use->matches.size();
+                    if (cmd_to_run.type == CommandType::FILTER) {
+                        const std::string& fq = cmd_to_run.filter_query;
+                        auto fi = session.named_results.find(fq);
+                        if (fi == session.named_results.end()) {
+                            std::cerr << "Error: filter: there is no query named " << fq << "\n";
+                            break;
+                        }
+                        const FilterSpans spans = filter_spans_of(fi->second->matches);
+                        for (size_t i = 0; i < n; ++i)
+                            if (filter_window_has(ms_to_use->matches[i], *nm_to_use, cmd_to_run, spans)
+                                != cmd_to_run.filter_negative)
+                                keep.push_back(i);
+                    } else if (cmd_to_run.type == CommandType::SHUFFLE) {
+                        keep = shuffled_order(n, step_seed(cmd_to_run));
+                    } else {
+                        keep = sample_indices(n, cmd_to_run.sample_n, step_seed(cmd_to_run));
+                    }
+                    own_copy();
+                    std::vector<Match> kept;
+                    kept.reserve(keep.size());
+                    for (size_t i : keep) kept.push_back(std::move(ms_to_use->matches[i]));
+                    ms_to_use->matches = std::move(kept);
+                    ms_to_use->total_count = ms_to_use->matches.size();
+                    ms_to_use->total_exact = true;
+                    if (should_emit_output) emit_hits_text(corpus, "(changed)", *ms_to_use, opts, 0);
+                    break;
+                }
 
                 case CommandType::CAT:
                     // a page of the set in its current order (after `sort`: the sorted order)

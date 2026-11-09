@@ -21,6 +21,7 @@
    "max_items": 50,
    "min_freq": 5,
    "stoplist": 0,
+   "coll_count": "occurrences",
    "group_limit": 1000,
    "child_limit": 20,
    "total": false,

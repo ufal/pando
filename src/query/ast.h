@@ -440,6 +440,9 @@ enum class CommandType {
     SET,           // set <name> <value> — change runtime option (#41)
     SHOW_SETTINGS, // show settings — display all runtime options (#41)
     DROP,          // drop <name> or drop all
+    FILTER,        // filter [M] [not] by F [on a..b] [rank N] [excluding match] — in place (KonText p/n filter)
+    SHUFFLE,       // shuffle [M] [seed N] — in place
+    SAMPLE,        // sample [M] N [seed S] — in place: N random hits, in M's order
 };
 
 struct GroupCommand {
@@ -488,6 +491,19 @@ struct GroupCommand {
     // (SIZE_MAX: not given; then the page is the options' offset / limit)
     size_t cat_from = SIZE_MAX;
     size_t cat_to = SIZE_MAX;
+
+    // filter M [not] by F on <from>..<to> [rank N] [excluding match] (Manatee's positive /
+    // negative filter): the window's anchors as sort's `on` writes them (`match[-5]`)
+    std::string filter_query;            // F
+    bool filter_negative = false;        // `not by`
+    std::string filter_from = "match", filter_to = "matchend";
+    int filter_rank = 1;                 // >= 1 / <= -1: at least |N| matches of F; 0: one spanning the window
+    bool filter_excluding_match = false; // matches of F overlapping the hit do not count
+
+    // shuffle / sample: the random seed (`seed N`; none: one chosen when the step runs)
+    bool has_seed = false;
+    uint64_t seed = 0;
+    size_t sample_n = 0;                 // sample: hits kept
 };
 
 /// dcoll over the basic dependency tree (no `(via L)`, or `(via head)`): needs the dependency index

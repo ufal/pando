@@ -9,6 +9,8 @@
 #include "query/keyness_select.h"
 #include "api/coll_counts.h"
 #include "api/group_counts.h"
+#include "api/hit_steps.h"
+#include "query/sort_field.h"
 #include "api/result_cache.h"
 #include "api/program_subcorpora.h"
 #include "api/subcorpus_stats.h"
@@ -169,7 +171,18 @@ struct CompactSink : HitSink {
     }
 };
 
-// One stored result: the recipe (query AST + sort steps) and, once a command
+// An in-place step on a set's hits, kept so that the hits can be built again (after
+// drop_caches): sort, filter (with its filter query's spans), shuffle, sample (with their seeds).
+struct HitStep {
+    CommandType kind = CommandType::SORT;
+    std::vector<std::string> fields;              // sort
+    GroupCommand filter;                          // filter: window, rank, not, excluding
+    std::shared_ptr<const FilterSpans> spans;     // filter: F's hits
+    uint64_t seed = 0;                            // shuffle / sample
+    size_t n = 0;                                 // sample
+};
+
+// One stored result: the recipe (query AST + its steps) and, once a command
 // needed every hit, the materialised hits (compact when they are plain).
 struct HitSet {
     std::shared_ptr<Program> prog;   // keeps the AST alive (compile state is corpus-bound)
@@ -178,6 +191,20 @@ struct HitSet {
     std::string display;             // shown in results / info
     bool allow_empty_alignment = false;
     std::vector<std::vector<std::string>> sorts;
+    /// every in-place step in order (the sorts too); replayed when the hits are built again
+    std::vector<HitStep> steps;
+    /// a filter or sample step: the hits are not the query's (counts, collocations and
+    /// pages need the kept hits, and no cached command result applies)
+    bool hits_changed() const {
+        for (const auto& st : steps)
+            if (st.kind == CommandType::FILTER || st.kind == CommandType::SAMPLE) return true;
+        return false;
+    }
+    bool only_sorted() const {
+        for (const auto& st : steps)
+            if (st.kind != CommandType::SORT) return false;
+        return true;
+    }
     /// P7.10: a single sort step done without the hits (keys counted, pages re-run)
     std::shared_ptr<const SortIndex> sort_index;
     /// P6.4: what determines the hits (parser options + the query statement's text),
@@ -253,10 +280,11 @@ struct HitSet {
         tmp->plan_path = ms.plan_path;
         return *tmp;
     }
-    // `sort … by fields` on the kept hits (stable; the order sort_matches_by_key gives).
+    // `sort … by fields` on the kept hits (stable; bytewise per field, as the CLI, CQP and
+    // Manatee sort: the order sort_matches_by_key gives with group_key_order = false).
     void sort_by(const Corpus& corpus, const std::vector<std::string>& fields) {
         if (!compact) {
-            sort_matches_by_key(corpus, ms.matches, nm, fields);
+            sort_matches_by_key(corpus, ms.matches, nm, fields, /*group_key_order=*/false);
             return;
         }
         std::vector<std::string> keys(compact->n);
@@ -267,10 +295,57 @@ struct HitSet {
         }
         std::vector<size_t> idx(compact->n);
         std::iota(idx.begin(), idx.end(), size_t{0});
-        std::stable_sort(idx.begin(), idx.end(),
-                         [&](size_t a, size_t b) { return compare_group_keys(keys[a], keys[b]); });
+        std::stable_sort(idx.begin(), idx.end(), [&](size_t a, size_t b) { return keys[a] < keys[b]; });
         compact->permute(idx);
         bytes = compact->bytes();
+    }
+    // Keep the hits at `idx`, in that order (a subset or a permutation).
+    void reorder(const std::vector<size_t>& idx) {
+        if (compact) {
+            compact->permute(idx);
+            compact->n = idx.size();
+            bytes = compact->bytes();
+        } else {
+            std::vector<Match> v;
+            v.reserve(idx.size());
+            for (size_t i : idx) v.push_back(std::move(ms.matches[i]));
+            ms.matches = std::move(v);
+            ms.total_count = ms.matches.size();
+            bytes = estimate_bytes(ms);
+        }
+        total_known = true;
+        total = idx.size();
+        total_exact = true;
+    }
+    // One step on the kept hits (plain, not aligned: the commands check).
+    void apply(const Corpus& corpus, const HitStep& st) {
+        const size_t n = hit_count();
+        switch (st.kind) {
+            case CommandType::SORT:
+                sort_by(corpus, st.fields);
+                return;
+            case CommandType::FILTER: {
+                std::vector<size_t> keep;
+                Match m;
+                for (size_t i = 0; i < n; ++i) {
+                    const Match* h = &m;
+                    if (compact) compact->fill(i, m);
+                    else h = &ms.matches[i];
+                    if (filter_window_has(*h, nm, st.filter, *st.spans) != st.filter.filter_negative)
+                        keep.push_back(i);
+                }
+                reorder(keep);
+                return;
+            }
+            case CommandType::SHUFFLE:
+                reorder(shuffled_order(n, st.seed));
+                return;
+            case CommandType::SAMPLE:
+                reorder(sample_indices(n, st.n, st.seed));
+                return;
+            default:
+                return;
+        }
     }
     // /query JSON for a page of the kept hits.
     std::string page(const Corpus& corpus, const QueryOptions& opts, std::string_view extra) {
@@ -431,14 +506,13 @@ void materialise(const Corpus& corpus, HitSet& hs, const std::string& name, cons
         ex.set_hit_sink(nullptr);
         if (sunk == 0) {
             // a path that returns its hits itself (no per-hit loop): as before
-            for (const auto& keys : hs.sorts)
-                sort_matches_by_key(corpus, ms.matches, hs.nm, keys);
             hs.keep(std::move(ms));
+            for (const auto& step : hs.steps) hs.apply(corpus, step);
             return;
         }
         if (!sink.bad && ms.matches.empty() && ms.total_exact && sink.n == ms.total_count) {
             hs.keep_compact(sink.take(), ms.plan_path);
-            for (const auto& keys : hs.sorts) hs.sort_by(corpus, keys);
+            for (const auto& step : hs.steps) hs.apply(corpus, step);
             return;
         }
         // mixed (should not happen): the plain run below
@@ -446,9 +520,8 @@ void materialise(const Corpus& corpus, HitSet& hs, const std::string& name, cons
     MatchSet ms = st.is_parallel
         ? ex.execute_parallel(st.query, st.target_query, 0, false)
         : ex.execute(st.query, 0, true, 0, 0, 0, std::max(1u, threads));
-    for (const auto& keys : hs.sorts)
-        sort_matches_by_key(corpus, ms.matches, hs.nm, keys);
     hs.keep(std::move(ms));
+    for (const auto& step : hs.steps) hs.apply(corpus, step);
 }
 
 // `count / freq … by fields` over a set without its hits: the aggregation sink.
@@ -490,11 +563,11 @@ std::string sorts_key(const std::vector<std::vector<std::string>>& sorts) {
 // the index does not cover).
 bool sort_lazily(const Corpus& corpus, HitSet& hs, const std::vector<std::string>& fields,
                  ExecProgress* progress, ResultCache* cache) {
-    if (hs.materialised || hs.parallel() || !hs.sorts.empty() || fields.empty()) return false;
+    if (hs.materialised || hs.parallel() || !hs.steps.empty() || fields.empty()) return false;
     std::string ck;
     std::shared_ptr<const SortIndex> idx;
     if (cache && !hs.recipe.empty()) {
-        ck = cache_key({"sortindex", hs.recipe, sorts_key({fields})});
+        ck = cache_key({"sortindex/2", hs.recipe, sorts_key({fields})});
         if (auto e = cache->get(ck)) idx = e->sort;
     }
     if (!idx) {
@@ -502,7 +575,7 @@ bool sort_lazily(const Corpus& corpus, HitSet& hs, const std::vector<std::string
         setup_executor(ex, hs, progress);
         const NameIndexMap& nm = hs.nm;
         auto key = [&](const Match& m) { return make_group_key(corpus, m, nm, fields); };
-        auto less = [](const std::string& a, const std::string& b) { return compare_group_keys(a, b); };
+        auto less = [](const std::string& a, const std::string& b) { return a < b; };   // bytewise (CLI, CQP, Manatee)
         idx = ex.build_sort_index(hs.st().query, fields, key, less);
         if (idx && !ck.empty()) {
             ResultCache::Entry e;
@@ -514,6 +587,9 @@ bool sort_lazily(const Corpus& corpus, HitSet& hs, const std::vector<std::string
     hs.know_total(idx->total, true);
     hs.sort_index = std::move(idx);
     hs.sorts.push_back(fields);
+    HitStep step;
+    step.fields = fields;
+    hs.steps.push_back(std::move(step));
     return true;
 }
 
@@ -533,7 +609,7 @@ std::optional<MatchSet> sorted_page_of(const Corpus& corpus, HitSet& hs, size_t 
     constexpr size_t kBlock = 1024;
     const size_t bfrom = from / kBlock * kBlock;
     const size_t bto = std::min(hs.sort_index->total, (to + kBlock - 1) / kBlock * kBlock);
-    const std::string ck = cache_key({"sortblock", hs.recipe, sorts_key(hs.sorts), std::to_string(bfrom),
+    const std::string ck = cache_key({"sortblock/2", hs.recipe, sorts_key(hs.sorts), std::to_string(bfrom),
                                       std::to_string(bto)});
     std::shared_ptr<const MatchSet> block;
     if (auto e = cache->get(ck); e && e->page) block = e->page;
@@ -657,7 +733,7 @@ std::string ProgramSession::page_json(const Corpus& corpus, const std::string& n
                                         std::min(opts.offset, page->total_count));
         }
     }
-    if (!hs->materialised && (!hs->sorts.empty() || hs->parallel()))
+    if (!hs->materialised && (!hs->steps.empty() || hs->parallel()))
         materialise(corpus, *hs, name, *impl_, threads, progress);
     // A deep page of a lazy set: materialise once (every later page is a slice)
     // instead of running the query to offset+limit again for each page.
@@ -744,12 +820,7 @@ void ProgramSession::clear() { impl_->sets.clear(); }
 static std::string make_key(const Corpus& corpus, const Match& m,
                             const NameIndexMap& name_map,
                             const std::vector<std::string>& fields) {
-    std::string key;
-    for (size_t i = 0; i < fields.size(); ++i) {
-        if (i > 0) key += '\t';
-        key += read_tabulate_field(corpus, m, name_map, fields[i]);
-    }
-    return key;
+    return make_group_key(corpus, m, name_map, fields);   // (fields with options too)
 }
 
 static std::unordered_set<LexiconId> build_stoplist_ids(const PositionalAttr& pa, size_t top_n) {
@@ -1547,8 +1618,9 @@ static void emit_raw_json(std::ostream& out, const Corpus& corpus, const MatchSe
 static CollCounts count_coll_hits(const Corpus& corpus, const PositionalAttr& pa, const MatchSet& ms,
                                   const GroupCommand& cmd, int left, int right,
                                   const NameIndexMap& name_map, const NameIndexMap* target_name_map,
-                                  const PositionSet* inside = nullptr) {
+                                  const PositionSet* inside = nullptr, bool per_hit = false) {
     CollCounter counter(pa, left, right, corpus.size());
+    counter.set_per_hit(per_hit);
     counter.set_inside(inside);   // EF-12: collocates outside the subcorpus do not count
     auto envelope = [&](const Match& m) {
         if (m.named_dep_subtrees.empty()) {
@@ -1606,7 +1678,8 @@ static void emit_coll_json(std::ostream& out, const Corpus& corpus, const MatchS
                            const NameIndexMap& name_map, const NameIndexMap* target_name_map) {
     const auto& pa = corpus.attr(coll_attr_of(corpus, cmd));
     const CollCounts cc = count_coll_hits(corpus, pa, ms, cmd, opts.coll_left, opts.coll_right,
-                                          name_map, target_name_map, stats_inside(opts.stats.get()));
+                                          name_map, target_name_map, stats_inside(opts.stats.get()),
+                                          opts.coll_count_hits);
     const size_t coll_match_n =
             !ms.parallel_matches.empty() ? ms.parallel_matches.size() : ms.matches.size();
     emit_coll_result_json(out, corpus, cmd, opts, cc, coll_match_n);
@@ -1723,7 +1796,7 @@ static void emit_dcoll_json(std::ostream& out, const Corpus& corpus, const Match
 /// the query has per-hit filters; count over its hits.
 static bool sink_coll_json(std::ostream& out, const Corpus& corpus, HitSet& hs, const GroupCommand& cmd,
                            const ProgramOptions& opts, ExecProgress* progress) {
-    if (hs.materialised || hs.parallel()) return false;
+    if (hs.materialised || hs.parallel() || hs.hits_changed()) return false;
     const bool coll = cmd.type == CommandType::COLL;
     if (!coll && !corpus.has_deps() && dcoll_uses_basic_tree(cmd)) return false;
     const Statement& st = hs.st();
@@ -1742,6 +1815,7 @@ static bool sink_coll_json(std::ostream& out, const Corpus& corpus, HitSet& hs, 
     if (coll) {
         cc.emplace(pa, opts.coll_left, opts.coll_right, corpus.size());
         cc->set_inside(stats_inside(opts.stats.get()));
+        cc->set_per_hit(opts.coll_count_hits);
         sink = std::make_unique<CollHitSink>(*cc, index_of(cmd.coll_on_label, -2));
     } else {
         const std::string bd = dcoll_breakdown_name(cmd);
@@ -2072,7 +2146,7 @@ static std::string run_program_piece(Corpus& corpus, ProgramSession& ps, const s
     // P6.4: a command's cached result: the set's recipe and sort steps, the
     // command as written and the options its output depends on
     auto command_key = [&](const HitSet& h, const Statement& cst, bool dcoll_fallback) -> std::string {
-        if (!S.cache || h.recipe.empty() || cst.source.empty()) return {};
+        if (!S.cache || h.recipe.empty() || cst.source.empty() || !h.only_sorted()) return {};
         const GroupCommand& c = cst.command;
         switch (c.type) {
             case CommandType::COUNT: case CommandType::GROUP: case CommandType::COLL:
@@ -2092,6 +2166,7 @@ static std::string run_program_piece(Corpus& corpus, ProgramSession& ps, const s
              + (opts.total ? ",t" : ",-") + (opts.sentence ? ",s" : ",-") + (opts.fragment ? ",f" : ",-");
         for (const auto& m : opts.coll_measures) o += "," + m;
         o += std::string(",b=") + dcoll_baseline_name(opts.dcoll_baseline);
+        if (opts.coll_count_hits) o += ",per-hit";
         o += "|";
         for (const auto& a : opts.attrs) o += a + ",";
         return cache_key({"cmd/1", h.recipe, sorts_key(h.sorts), cst.source, dcoll_fallback ? "rel" : "-", o});
@@ -2150,7 +2225,8 @@ static std::string run_program_piece(Corpus& corpus, ProgramSession& ps, const s
             // starts unsorted), nor a recipe that depends on the session.
             if (!stmt.name.empty() && stmt.name != "Last" && !hs->recipe.empty() && si + 1 < prog->size()) {
                 HitSetPtr prev = S.find(stmt.name);
-                if (prev && prev->recipe == hs->recipe && prev->sorts.empty() && !prev->parallel()) {
+                // (nor a set changed in place: sorted, filtered, shuffled, sampled)
+                if (prev && prev->recipe == hs->recipe && prev->steps.empty() && !prev->parallel()) {
                     S.bind(stmt.name, prev);
                     reused.push_back(stmt.name);
                     goto statement_command;
@@ -2160,7 +2236,7 @@ static std::string run_program_piece(Corpus& corpus, ProgramSession& ps, const s
             const std::vector<std::string>* aggregate_by = nullptr;
             if (next_is_command && !stmt.is_parallel) {
                 const GroupCommand& ncmd = (*prog)[si + 1].command;
-                if (!ncmd.fields.empty()
+                if (!ncmd.fields.empty() && !fields_have_options(ncmd.fields)
                     && (ncmd.type == CommandType::COUNT || ncmd.type == CommandType::GROUP
                         || ncmd.type == CommandType::FREQ)
                     && aggregate_command_targets_stmt(stmt, ncmd))
@@ -2264,6 +2340,15 @@ static std::string run_program_piece(Corpus& corpus, ProgramSession& ps, const s
                 else if (name == "max-items" || name == "max_items")  to_size(opts.coll_max_items);
                 else if (name == "min-freq" || name == "min_freq")    to_size(opts.coll_min_freq);
                 else if (name == "stoplist") to_size(opts.coll_stoplist);
+                else if (name == "coll-count" || name == "coll_count") {
+                    if (val != "hits" && val != "occurrences") {
+                        out.str(""); out.clear();
+                        out << "{\"ok\": false, \"error\": "
+                            << jstr("coll-count is hits or occurrences, not '" + val + "'") << "}\n";
+                        continue;
+                    }
+                    opts.coll_count_hits = val == "hits";
+                }
                 else if (name == "group-limit" || name == "group_limit") to_size(opts.group_limit);
                 else if (name == "child-limit" || name == "child_limit") to_size(opts.child_limit);
                 else if (name == "measures")  opts.coll_measures = split_csv(val);
@@ -2303,6 +2388,7 @@ static std::string run_program_piece(Corpus& corpus, ProgramSession& ps, const s
                 out << "  \"max_items\": " << opts.coll_max_items << ",\n";
                 out << "  \"min_freq\": " << opts.coll_min_freq << ",\n";
                 out << "  \"stoplist\": " << opts.coll_stoplist << ",\n";
+                out << "  \"coll_count\": " << jstr(opts.coll_count_hits ? "hits" : "occurrences") << ",\n";
                 out << "  \"group_limit\": " << opts.group_limit << ",\n";
                 out << "  \"child_limit\": " << opts.child_limit << ",\n";
                 out << "  \"total\": " << (opts.total ? "true" : "false") << ",\n";
@@ -2363,7 +2449,10 @@ static std::string run_program_piece(Corpus& corpus, ProgramSession& ps, const s
             // reads ids, faster than grouping a million Match objects; order-free)
             auto counting = [&]() -> const MatchSet& {
                 if (use_immediate) return *immediate;
-                if (hs->parallel() || stmt.command.fields.empty()) return full();
+                // fields with options (`form on match[-1]..match[-1]`) are keyed hit by hit
+                if (hs->parallel() || stmt.command.fields.empty() || hs->hits_changed()
+                    || fields_have_options(stmt.command.fields))
+                    return full();
                 agg_now = aggregate(corpus, *hs, stmt.command.fields, threads, opts.progress);
                 return *agg_now;
             };
@@ -2455,7 +2544,7 @@ static std::string run_program_piece(Corpus& corpus, ProgramSession& ps, const s
                     if (sorted_rows) {
                         emit_tabulate_json(out, corpus, *sorted_rows, tc, nm_to_use,
                                            std::min(tc.tabulate_offset, sorted_rows->total_count));
-                    } else if (!hs->materialised && hs->sorts.empty() && !hs->parallel()) {
+                    } else if (!hs->materialised && hs->steps.empty() && !hs->parallel()) {
                         // unsorted and not kept: only the rows asked for (and the total),
                         // as a /query page
                         const GroupCommand& t = stmt.command;
@@ -2518,6 +2607,7 @@ static std::string run_program_piece(Corpus& corpus, ProgramSession& ps, const s
                             // the page run did not fit the index: sort the kept hits below
                             hs->sort_index.reset();
                             hs->sorts.pop_back();
+                            hs->steps.pop_back();
                         }
                     } catch (const std::exception& e) {
                         out << "{\"ok\": false, \"error\": " << jstr(e.what()) << "}\n";
@@ -2529,11 +2619,63 @@ static std::string run_program_piece(Corpus& corpus, ProgramSession& ps, const s
                         if (!stmt.command.fields.empty()) {   // P7.7: one key per hit
                             hs->sort_by(corpus, stmt.command.fields);
                             hs->sorts.push_back(stmt.command.fields);
+                            HitStep step;
+                            step.fields = stmt.command.fields;
+                            hs->steps.push_back(std::move(step));
                         }
                         const std::string saved = hs->display;
                         hs->display = "(sorted)";
                         out << hs->page(corpus, query_options_of(opts), {});
                         hs->display = saved;
+                    } catch (const std::exception& e) {
+                        out << "{\"ok\": false, \"error\": " << jstr(e.what()) << "}\n";
+                    }
+                    break;
+                }
+                case CommandType::FILTER:
+                case CommandType::SHUFFLE:
+                case CommandType::SAMPLE: {
+                    // in place, as `sort`: the set's hits kept, the step applied and recorded
+                    // (replayed when the hits are built again); the answer is the set's page
+                    const GroupCommand& c = stmt.command;
+                    const char* what = c.type == CommandType::FILTER ? "filter"
+                                     : c.type == CommandType::SHUFFLE ? "shuffle" : "sample";
+                    try {
+                        if (hs->parallel())
+                            throw std::runtime_error(std::string(what) + " " + set_name
+                                                     + ": works on the hits of one query, not on aligned pairs");
+                        HitStep step;
+                        step.kind = c.type;
+                        if (c.type == CommandType::FILTER) {
+                            HitSetPtr f = S.find(c.filter_query);
+                            if (!f) throw std::runtime_error("filter " + set_name + " by " + c.filter_query
+                                                             + ": there is no query named " + c.filter_query);
+                            if (f->parallel())
+                                throw std::runtime_error("filter " + set_name + " by " + c.filter_query + ": "
+                                                         + c.filter_query + " is a query over aligned pairs");
+                            // F in memory (the session's size limit applies to it as to any kept set)
+                            materialise(corpus, *f, c.filter_query + " (the filter query of `filter " + set_name
+                                                        + " by " + c.filter_query + "`)",
+                                        S, threads, opts.progress);
+                            std::optional<MatchSet> ftmp;
+                            step.spans = std::make_shared<const FilterSpans>(filter_spans_of(f->full_view(ftmp).matches));
+                            step.filter = c;
+                            step.filter.fields.clear();
+                        } else {
+                            step.seed = step_seed(c);
+                            step.n = c.sample_n;
+                        }
+                        hs->sort_index.reset();   // a lazy sort: of the kept hits from now on
+                        materialise(corpus, *hs, set_name, S, threads, opts.progress);
+                        hs->apply(corpus, step);
+                        hs->steps.push_back(std::move(step));
+                        const std::string saved = hs->display;
+                        hs->display = std::string("(") + (c.type == CommandType::FILTER ? "filtered"
+                                                          : c.type == CommandType::SHUFFLE ? "shuffled" : "sampled") + ")";
+                        out << hs->page(corpus, query_options_of(opts), {});
+                        hs->display = saved;
+                    } catch (const HitSetTooLarge&) {
+                        throw;
                     } catch (const std::exception& e) {
                         out << "{\"ok\": false, \"error\": " << jstr(e.what()) << "}\n";
                     }

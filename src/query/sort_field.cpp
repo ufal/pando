@@ -46,6 +46,37 @@ std::string fold_sort_text(std::string_view s, bool fold_case, bool fold_accents
     return FoldMap::fold(s, fold_case, fold_accents);
 }
 
+std::string reverse_utf8(std::string_view s) {
+    std::string out(s.size(), '\0');
+    size_t w = s.size();
+    for (size_t i = 0; i < s.size();) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        size_t len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 1;
+        if (i + len > s.size()) len = 1;
+        for (size_t k = 1; k < len; ++k)
+            if ((static_cast<unsigned char>(s[i + k]) & 0xC0) != 0x80) { len = 1; break; }
+        w -= len;
+        out.replace(w, len, s.substr(i, len));
+        i += len;
+    }
+    return out;
+}
+
+int64_t sort_anchor_position(const Match& m, const NameIndexMap& name_map, const std::string& anchor) {
+    std::string a;
+    int off = 0;
+    parse_anchor(anchor, a, off);
+    return static_cast<int64_t>(anchor_position(m, name_map, a)) + off;
+}
+
+namespace {
+/// one token's value as the field's flags compare it
+std::string sort_value(std::string_view v, const SortFieldSpec& spec) {
+    std::string f = fold_sort_text(v, spec.fold_case, spec.fold_accents);
+    return spec.retrograde ? reverse_utf8(f) : f;
+}
+}  // namespace
+
 bool parse_sort_field(const std::string& field, SortFieldSpec& out) {
     const size_t sp = field.find(' ');
     if (sp == std::string::npos) return false;
@@ -65,6 +96,7 @@ bool parse_sort_field(const std::string& field, SortFieldSpec& out) {
             for (size_t c = 1; c < p.size(); ++c) {
                 if (p[c] == 'c') out.fold_case = true;
                 else if (p[c] == 'd') out.fold_accents = true;
+                else if (p[c] == 'r') out.retrograde = true;
                 else throw std::runtime_error("sort field '" + field + "': unsupported flag %" + p.substr(c, 1));
             }
         } else if (p == "on" && k + 1 < parts.size()) {
@@ -86,12 +118,21 @@ bool parse_sort_field(const std::string& field, SortFieldSpec& out) {
     return true;
 }
 
+bool fields_have_options(const std::vector<std::string>& fields) {
+    for (const auto& f : fields) {
+        SortFieldSpec spec;
+        if (parse_sort_field(f, spec)) return true;
+    }
+    return false;
+}
+
 std::string sort_field_text(const SortFieldSpec& spec) {
     std::string t = spec.attr;
-    if (spec.fold_case || spec.fold_accents) {
+    if (spec.fold_case || spec.fold_accents || spec.retrograde) {
         t += " %";
         if (spec.fold_case) t += 'c';
         if (spec.fold_accents) t += 'd';
+        if (spec.retrograde) t += 'r';
     }
     if (spec.range)
         t += " on " + anchor_text(spec.from_anchor, spec.from_off) + ".."
@@ -101,9 +142,7 @@ std::string sort_field_text(const SortFieldSpec& spec) {
 
 std::string read_sort_field(const Corpus& corpus, const Match& m, const NameIndexMap& name_map,
                             const SortFieldSpec& spec) {
-    if (!spec.range)
-        return fold_sort_text(read_tabulate_field(corpus, m, name_map, spec.attr), spec.fold_case,
-                              spec.fold_accents);
+    if (!spec.range) return sort_value(read_tabulate_field(corpus, m, name_map, spec.attr), spec);
     std::string attr_spec = spec.attr;
     if (attr_spec.rfind("match.", 0) == 0) attr_spec = attr_spec.substr(6);
     const std::string attr = normalize_query_attr_name(corpus, attr_spec);
@@ -122,7 +161,7 @@ std::string read_sort_field(const Corpus& corpus, const Match& m, const NameInde
     std::string out;
     for (int64_t p = from;; p += step) {
         if (p != from) out += ' ';
-        out += fold_sort_text(pa.value_at(static_cast<CorpusPos>(p)), spec.fold_case, spec.fold_accents);
+        out += sort_value(pa.value_at(static_cast<CorpusPos>(p)), spec);
         if (p == to) break;
     }
     return out;

@@ -105,7 +105,7 @@ subcorpus; in mode `within` they stay those of the corpus.
 | `dcoll` | `attribute, relations[], matches, stoplist, baseline, relation_total?, measures[], collocates[]` | as `coll`, with `relation_freq?`, `breakdown{}`; `freq` stays the corpus frequency, `relation_freq` and `relation_total` are what the scores compare with when `baseline` is `relation` ([Collocations](Collocations-and-Keyness.md#what-dcoll-scores-compare-with)) |
 | `keyness` | `attribute, focus_size, ref_size, corpus_size, stoplist, rows[]` | `{word, focus_freq, ref_freq, keyness, effect}` |
 | `size` | a **number** | |
-| `query` (`sort`, an assignment) | as hits | |
+| `query` (`sort`, `filter`, `shuffle`, `sample`, an assignment) | as hits (`page.total`: the hits kept) | |
 | `info` (`show info`) | as `GET /info` | |
 | `show_attrs` | a list | `{name, vocab}` |
 | `show_regions` | `structures[], region_attrs[]` | |
@@ -165,7 +165,7 @@ A node:
 |---|---|
 | `GET /info` | `{operation: "info", result: {name, size, tokens, has_deps, attributes[], structures[], region_attrs[], multivalue[], pando{}, index{}, …}}` |
 | `GET /values/A`, `GET /regions/T` | as `show values`, `show regions T` |
-| `GET /context?pos=` | `{pos, left, match, right, doc_id, id, corpus_size}` (no `result`) |
+| `GET /context?pos=` | `{pos, left, match, right, doc_id, id, corpus_size, regions?}` (no `result`; `regions` with `regions=1`: `{structure: {attr: value}}`) |
 | `GET /health`, `/version` | the build, features, index identity, sessions, warm-up, cache, tiers |
 | `GET /status?job=`, `POST /cancel`, `GET /jobs` | the job, `{job, cancelled}`, `{jobs[]}` |
 | `POST /session`, `GET /session`, `POST /session/close`, `GET /sessions` | session id, its stored sets, closing, all sessions |

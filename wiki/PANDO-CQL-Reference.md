@@ -338,10 +338,13 @@ For a named query `M` (default: the last one):
 | --- | --- |
 | `cat [M] [from [to]]` | a page of the hits in their current order (after `sort`: sorted); `from`/`to` as in CQP |
 | `size [M]` | number of hits |
-| `count [M] by att+` / `group` | frequency per value (combinations for several attributes); with a region attribute also the relative frequency |
-| `freq [M] by att` | as count, in instances per million |
+| `count [M] by att [%c\|%d\|%r] [on from..to]+` / `group` | frequency per value (combinations for several attributes); with a region attribute also the relative frequency |
+| `freq [M] by att [%c\|%d\|%r] [on from..to]` | as count, in instances per million |
 | `tabulate [M] [from n] att+` | a table; fields include `a.attr`, `a.cpos` (corpus position; for a region binding `t.cpos` is where it starts, with `tcnt(t)` its length), date functions, `tcnt(x)`, `gaps(x)`, `forms(x)`, `spellout(x, attr)` |
-| `sort [M] by att [%c\|%d\|%cd] [on from..to]` | sort the hits |
+| `sort [M] by att [%c\|%d\|%r] [on from..to]` | sort the hits (in place) |
+| `filter [M] [not] by F [on from..to] [rank N] [excluding match]` | keep (`not`: drop) the hits of M with a match of F in a window (in place) |
+| `shuffle [M] [seed N]` | the hits in random order (in place) |
+| `sample [M] N [seed S]` | N random hits of M, in M's order (in place; all when fewer) |
 | `stats avg(expr), median(expr) [by att+]` | numeric aggregates per group |
 | `raw [M]` | one line per hit with corpus positions and forms |
 | `coll [M] by att` | collocations in a window |
@@ -351,8 +354,26 @@ For a named query `M` (default: the last one):
 - `sort M by form` sorts on the first token of each hit; `on from..to` sorts on a range:
   `on match..matchend` (whole hit), `on matchend[1]..matchend[5]` (right context),
   `on match[-1]..match[-5]` (left context, nearest first); `from`/`to` are `match`, `matchend` or a
-  token label with an optional offset. Equal keys keep corpus order. The CWB dialect sorts on the whole
-  hit by default, as CQP does.
+  token label with an optional offset. Each field compares bytewise (as CQP and Manatee: `!` < `1789` <
+  `vi`; count tables order equal counts with numbers first). Flags combine: `%c` case, `%d`
+  diacritics, `%r` retrograde (each token's value read backwards, to sort by word endings: `%cr`).
+  Equal keys keep corpus order. The CWB dialect sorts on the whole hit by default, as CQP does.
+- `count M by form on match[-1]..match[-1]` counts a context position (the word before the hit);
+  a range is the tokens' values joined with a space, read from `from` to `to` (`on match[-3]..match[-1]`:
+  the three words to the left, left to right); positions outside the corpus are clamped. Also for
+  `group` and `freq`, and beside other fields (`count by form on match[-1], lemma`).
+- `filter M by F on match[-5]..matchend[5]` keeps the hits of M that have a match of F wholly inside the
+  window (Manatee's positive filter, KonText's p/n filter): the window is the corpus positions `from` to
+  `to` (anchors as for `sort`; default `match..matchend`), across sentence boundaries; `rank N` (N ≥ 1, or
+  ≤ -1 counted from the right): at least |N| such matches (default 1); `rank 0`: a match of F spanning
+  exactly the window; `excluding match`: matches of F that overlap the hit do not count. `not by` drops
+  them instead. F is kept in memory (the session's size limit applies to it).
+- `sort`, `filter`, `shuffle` and `sample` change M in place and answer with M's first page; later
+  `cat M`, `size M`, `count M by …` and `/query` with `"from": "M"` see the result, and they chain in any
+  order: `filter A by F on match[-1]; filter A not by G on match[-3]..match[-1]; sort A by form; cat A 0 9`.
+  `A = q` again gives q's whole result, not the changed set. `seed N` makes the order reproducible.
+- In the Manatee and CWB dialects a program's queries (`[…]`, `Name = […]`) are read in the dialect and
+  its commands as pando-CQL: `MANATEE A = [lemma="dog"]; F = [upos="ADJ"]; filter A by F on match[-1]; size A`.
 - `cat M` shows a page of M (the `offset` / `limit` settings) in its current order: corpus order,
   or the sorted order after `sort M by …`. `cat M 20 29` shows hits 20 to 29 (numbered from 0, as
   in CQP); `cat M 20` a page from hit 20 (CQP shows every hit to the end). It returns the same page
@@ -380,6 +401,7 @@ those of the command-line flags without `--`.
 | offset | 0 | skip the first N results |
 | measures | logdice | association measures for coll/dcoll/keyness (logdice, mi, mi3, tscore, ll, dice) |
 | min-freq | 5 | minimum co-occurrence frequency for collocations |
+| coll-count | occurrences | `hits`: a collocate counts at most once per hit (as Manatee / KonText) |
 | attrs | (all) | token attributes shown in output |
 | anchor-binding | fanout | `innermost`: one binding per anchor (CLI) |
 

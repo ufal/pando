@@ -617,7 +617,7 @@ ServerResponse ServerApi::regions(const std::string& type_name, const std::map<s
     return json_ok(std::move(json));
 }
 
-// GET /context?pos=&left=&right=&sentence= — KWIC window around one position
+// GET /context?pos=&left=&right=&sentence=&regions= — KWIC window around one position
 // (KonText widectx; Manatee CorpRegion cannot address Pando toknums).
 ServerResponse ServerApi::context(const std::map<std::string, std::string>& params) {
     const std::string* pos_s = param(params, "pos");
@@ -647,7 +647,33 @@ ServerResponse ServerApi::context(const std::map<std::string, std::string>& para
         << ",\"right\":" << jstr(ctx.right)
         << ",\"doc_id\":" << jstr(doc)
         << ",\"id\":" << jstr(tok_id)
-        << ",\"corpus_size\":" << corpus_.size() << "}\n";
+        << ",\"corpus_size\":" << corpus_.size();
+    // regions=1: the attributes of the regions at pos (innermost of each structure), for a
+    // full reference: "regions": {"text": {"id": "…", …}, "s": {…}}
+    bool with_regions = false;
+    if (auto v = param(params, "regions")) with_regions = (*v == "1" || *v == "true" || *v == "yes");
+    if (with_regions) {
+        out << ",\"regions\":{";
+        bool first = true;
+        for (const std::string& name : corpus_.structure_names()) {
+            if (!corpus_.has_structure(name)) continue;
+            const StructuralAttr& sa = corpus_.structure(name);
+            const int64_t r = sa.find_innermost_region(pos);
+            if (r < 0) continue;
+            out << (first ? "" : ",") << jstr(name) << ":{";
+            first = false;
+            bool f2 = true;
+            for (const std::string& an : sa.region_attr_names()) {
+                const std::string_view v = sa.region_value(an, static_cast<size_t>(r));
+                if (v.empty() || v == "_") continue;   // (no value)
+                out << (f2 ? "" : ",") << jstr(an) << ":" << jstr(v);
+                f2 = false;
+            }
+            out << "}";
+        }
+        out << "}";
+    }
+    out << "}\n";
     return json_ok(out.str());
 }
 

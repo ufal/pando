@@ -54,8 +54,15 @@ public:
     /// EF-12: count only collocates at these positions (a subcorpus; nullptr = all)
     void set_inside(const PositionSet* s) { inside_ = s; }
 
+    /// `set coll-count hits`: a collocate counts at most once per hit (Manatee's CollocItems);
+    /// default: every occurrence in the window
+    void set_per_hit(bool on) { per_hit_ = on; }
+
 private:
     void count(CorpusPos p);
+    void end_hit();
+    bool per_hit_ = false;
+    std::vector<LexiconId> hit_ids_;   // per_hit_: the ids of the current hit's window
     const PositionSet* inside_ = nullptr;
     const PositionalAttr& pa_;
     CorpusPos left_, right_, n_;

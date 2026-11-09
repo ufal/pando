@@ -292,7 +292,7 @@ default 2^20 tokens) override, for tests. `--timing` reports the ranges as
 | `POST /session/close` | Close a session (`session_id` in the body or the query string) |
 | `GET /sessions` | Open sessions, their memory, the budget |
 | `POST /warm`, `GET /warm` | Start reading the hot (`{"level": "hot"}`, default) or all (`"all"`) index files into the page cache in the background, e.g. when a front-end selects the corpus; the warm-up status. `GET /warm?residency=hot\|all` adds `"residency"`: `bytes`, `resident_bytes`, `resident` (share) of those files in the page cache now (mincore; on demand only) |
-| `GET /info`, `/values/ATTR`, `/regions/TYPE`, `/context?pos=`, `/health` | Corpus description, values, regions, KWIC context |
+| `GET /info`, `/values/ATTR`, `/regions/TYPE`, `/context?pos=`, `/health` | Corpus description, values, regions, KWIC context (`/context?…&regions=1` adds `"regions": {"text": {"id": …}, "s": {…}}`: the attributes with a value of the innermost region of each structure at `pos`) |
 | `POST /subcorpus` | Resolve (and cache) a subcorpus definition without running a query: `{"definition": "…", "session_id": optional}` (with a session, names in it are the session's subcorpora and named queries) → `{tokens, ranges, encoding, index_id}`; an invalid definition is a 400 |
 
 `/query` and `/run` take `"subcorpus": {"definition": "…", "mode": "use" | "within", "name": "…"}`

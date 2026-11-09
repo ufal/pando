@@ -33,13 +33,14 @@ public:
     /// dialect that reads CQP's global constraint with pando's own rules. Anything left over is an error.
     static void parse_global_filter_text(const std::string& text, TokenQuery& tq, ParserOptions opts = {});
 
+    /// A command keyword (count, sort, filter, size, show, …): a statement starting with it is a command.
+    static bool is_command_keyword(const std::string& text);
+
 private:
     Statement parse_statement();
     Statement parse_statement_with_source();
     std::string input_;
 
-    // Check if this is a command keyword (count, size, show, etc.)
-    bool is_command_keyword(const std::string& text) const;
     GroupCommand parse_command();
 
     TokenQuery  parse_token_query();
