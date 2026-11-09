@@ -539,7 +539,12 @@ void StreamingBuilder::add_region(const std::string& type,
                                   CorpusPos start, CorpusPos end) {
     struct_set_.insert(type);
     detect_structure_mode(type, start, end);
-    regions_[type].push_back({start, end});
+    auto& rows = regions_[type];
+    // readers may add a region late (a vertical's unclosed tag ended at the end of input):
+    // .rgn must still be in (start, -end) order
+    if (!rows.empty() && (start < rows.back().start || (start == rows.back().start && end > rows.back().end)))
+        struct_mode_detected_[type].out_of_order = true;
+    rows.push_back({start, end});
 }
 
 // SM-ROAD-6: Check the new region against existing regions of the same type
@@ -938,9 +943,12 @@ void StreamingBuilder::finalize() {
     std::unordered_set<std::string> nested_sort_set(declared_nested_);
     for (const auto& [stype, det] : struct_mode_detected_)
         if (det.nesting_seen) nested_sort_set.insert(stype);
+    std::unordered_set<std::string> sort_set(nested_sort_set);   // + flat types added out of order
+    for (const auto& [stype, det] : struct_mode_detected_)
+        if (det.out_of_order) sort_set.insert(stype);
 
     for (auto& [type, regions] : regions_) {
-        if (nested_sort_set.count(type) == 0) continue;
+        if (sort_set.count(type) == 0) continue;
         size_t n = regions.size();
         if (n < 2) continue;
 
@@ -950,7 +958,7 @@ void StreamingBuilder::finalize() {
         auto* rgn_ptr = &regions;
         std::vector<size_t> perm(n);
         std::iota(perm.begin(), perm.end(), size_t(0));
-        std::sort(perm.begin(), perm.end(), [rgn_ptr](size_t a, size_t b) {
+        std::stable_sort(perm.begin(), perm.end(), [rgn_ptr](size_t a, size_t b) {
             const auto& rgns = *rgn_ptr;
             if (rgns[a].start != rgns[b].start)
                 return rgns[a].start < rgns[b].start;
@@ -979,7 +987,7 @@ void StreamingBuilder::finalize() {
             vit->second = std::move(sorted_vals);
         }
 
-        std::cerr << "  sorted " << n << " nested " << type
+        std::cerr << "  sorted " << n << (nested_sort_set.count(type) ? " nested " : " ") << type
                   << " regions by (start, -end)\n";
     }
 

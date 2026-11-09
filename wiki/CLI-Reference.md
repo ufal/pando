@@ -90,6 +90,21 @@ Values may contain spaces (`# text_author = Jan Novák`); empty values give no a
 `# KEY_attr` line for a region that is not open (no `# newdoc` / `# newregion KEY` before it) is
 ignored, as are comments without `=` (or `:`).
 
+**Vertical files** (`--format vertical`: CWB / Manatee / Korp VRT, one token per line). Structure
+tags give regions as Manatee's `encodevert` makes them:
+
+| in the file | gives |
+| --- | --- |
+| `<!-- #vrt positional-attributes: word lemma tag -->` | the token columns, by these names (`word` is `form`); no others are added |
+| `<s id="s1">` … `</s>` | a sentence, with its attributes (`s_id`) |
+| `<p n="2">` … `</p>` | a `p` region (`p_n`) |
+| `<pb n="3"/>` | a zero-width `pb` region at the next token |
+| `<p>` never closed | ends right before the next `<p>`, or at the end of the file (with a warning naming the line) |
+| `name="a \"b\""`, `name='it&apos;s'` | `\"`, `\'`, `\\` and the XML entities (`&quot; &amp; &lt; &gt; &apos;`, `&#N;`) are decoded |
+
+Without the header line, columns are read as form, lemma, upos (or form, id, lemma, upos when the
+fourth column looks like a UD tag). Blank lines end a sentence outside `<s>` elements.
+
 `pando-index --upgrade <corpus_dir>` adds the sidecar indexes the current build
 knows (fold, bitmap, dependency edge postings, …) to an existing corpus. Options
 for `--upgrade`:

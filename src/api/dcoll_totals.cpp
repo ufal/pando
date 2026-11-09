@@ -203,8 +203,8 @@ DcollTotals DcollTotals::relation(const Corpus& corpus, const std::string& attr,
     t.baseline_ = DcollBaseline::Relation;
     const PositionalAttr& pa = corpus.attr(attr);
     t.pa_ = &pa;
-    if (!corpus.has_deps()) return t;
     const RelationLayer* L = kinds.layer;
+    if (!corpus.has_deps() && !L) return t;
     // the basic tree: from the index when pando-index stored the totals (checked once per attribute)
     std::shared_ptr<const DcollTotalsFile> file;
     if (!L) {

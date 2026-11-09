@@ -179,6 +179,8 @@ add_library(pando_core STATIC
     src/corpus/equivalence_layer.cpp
     src/corpus/corpus.cpp
     src/corpus/builder.cpp
+    src/corpus/vertical_tag.cpp
+    src/corpus/vertical_regions.cpp
     src/corpus/streaming_builder.cpp
     src/query/lexer.cpp
     src/query/parser.cpp
@@ -442,6 +444,11 @@ if(BUILD_TESTING)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/region_p0_test.py
                 --pando-index $<TARGET_FILE:pando-index> --server $<TARGET_FILE:pando-server>
                 --pando $<TARGET_FILE:pando>)
+        # input readers: vertical <s …> attributes, <x/>, escaped values, header columns, unclosed tags
+        # (Manatee's encodevert ranges); JSONL without heads gets no relation.head
+        add_test(NAME vertical_reader
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/vertical_reader_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
         # restricted `count by` (P4.1b / P4.13 / P4.14 / P4.15): ground truth from a generated corpus,
         # per-hit routes, fast paths off and forced partitions must all agree
         add_test(NAME restricted_count

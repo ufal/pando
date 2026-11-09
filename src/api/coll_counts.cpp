@@ -151,8 +151,9 @@ CollCounts DcollCounter::done() const {
 }
 
 CollCounts DcollCounter::finish() {
-    if (!corpus_.has_deps() || nodes_.empty()) return done();
-    if (layer_) return finish_layer();
+    if (nodes_.empty()) return done();
+    if (layer_) return finish_layer();   // a layer given edge by edge needs no basic tree
+    if (!corpus_.has_deps()) return done();
     const auto& deps = corpus_.deps();
     const CorpusPos n = corpus_.size();
 
@@ -345,7 +346,9 @@ CollCounts DcollCounter::finish_layer() {
         deviates[static_cast<size_t>(d) >> 6] |= uint64_t{1} << (d & 63);
     }
     auto deviating = [&](CorpusPos c) { return deviates[static_cast<size_t>(c) >> 6] >> (c & 63) & 1; };
-    // the tokens that keep their basic edge
+    // the tokens that keep their basic edge (none without a basic tree)
+    const PositionalAttr* deprel = corpus_.has_attr("deprel") ? &corpus_.attr("deprel") : nullptr;
+    if (corpus_.has_deps()) {
     const auto& deps = corpus_.deps();
     const HeadRelView& rel = deps.head_rel_data();
     auto head_of = [&](CorpusPos c) -> CorpusPos {
@@ -355,7 +358,6 @@ CollCounts DcollCounter::finish_layer() {
         }
         return deps.head(c);
     };
-    const PositionalAttr* deprel = corpus_.has_attr("deprel") ? &corpus_.attr("deprel") : nullptr;
     if (want_all_children_)
         for (CorpusPos c = 0; c < n; ++c) {
             if (deviating(c)) continue;
@@ -372,6 +374,7 @@ CollCounts DcollCounter::finish_layer() {
                     if (uint32_t k = times_of(h)) count(c, k);
                 return true;
             });
+    }
     // the deviating tokens' own edges
     for (size_t i = 0; i < L.deviating(); ++i) {
         const CorpusPos d = L.deviating_pos(i);

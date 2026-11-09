@@ -216,6 +216,7 @@ private:
         size_t nesting_count = 0;
         size_t overlap_count = 0;
         size_t zerowidth_count = 0;
+        bool out_of_order = false;   // a region added before an earlier one (sorted at finalize)
     };
     std::unordered_map<std::string, StructModeDetection> struct_mode_detected_;
 

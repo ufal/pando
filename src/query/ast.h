@@ -486,6 +486,9 @@ struct GroupCommand {
     size_t cat_to = SIZE_MAX;
 };
 
+/// dcoll over the basic dependency tree (no `(via L)`, or `(via head)`): needs the dependency index
+inline bool dcoll_uses_basic_tree(const GroupCommand& c) { return c.dcoll_layer.empty() || c.dcoll_layer == "head"; }
+
 /// `cat`'s page: its window (`cat A 10 19` = 10 hits from hit 10; `cat A 10` = a page from hit 10)
 /// over the options' offset / limit.
 inline void apply_cat_window(const GroupCommand& c, size_t& offset, size_t& limit) {

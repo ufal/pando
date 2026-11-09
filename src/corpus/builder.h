@@ -16,7 +16,8 @@ public:
     explicit CorpusBuilder(const std::string& output_dir, bool overlay_standoff_only = false);
 
     void read_conllu(const std::string& path);
-    /// Read CWB-style vertical: one token per line, tab-separated; <s> </s> for sentence boundaries.
+    /// Read CWB-style vertical: one token per line, tab-separated; <s …> </s> are sentences (with their
+    /// attributes), other tags regions as Manatee's encodevert makes them (corpus/vertical_regions.h).
     /// Optional Korp/Kielipankki header line in an XML comment lists column names, e.g.
     ///   <!-- #vrt positional-attributes: word ref lemma pos ... -->
     /// Without that line, columns are inferred by count (form; form+lemma; form+lemma+upos; or UD 4+).
@@ -89,7 +90,6 @@ private:
     };
     // Region stack for CoNLL-U comment extensions: # newregion X / # endregion X.
     std::vector<OpenRegion> conllu_region_stack_;
-    std::vector<OpenRegion> vrt_region_stack_;
 
     // Multi-word token (MWT) tracking for CoNLL-U contraction regions.
     // When a range ID line (e.g. "1-2\taux\t...") is seen, we record the

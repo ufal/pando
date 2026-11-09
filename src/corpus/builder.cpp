@@ -1,4 +1,6 @@
 #include "corpus/builder.h"
+#include "corpus/vertical_regions.h"
+#include "corpus/vertical_tag.h"
 #include <fstream>
 #include <stdexcept>
 #include <cstdlib>
@@ -577,10 +579,23 @@ void CorpusBuilder::read_vertical(const std::string& path) {
     std::string line;
     std::unordered_map<std::string, std::string> attrs;
     attrs.reserve(8);
-    bool in_sentence = false;
+    bool in_sentence = false;   // tokens since the last sentence boundary
+    bool in_s_element = false;  // inside an explicit <s …> (blank lines do not end it)
+    std::vector<std::pair<std::string, std::string>> s_attrs;   // the open <s …>'s attributes
     std::vector<std::string> vrt_column_names;
+    VerticalRegions regions(builder_, path);
+    VerticalTag tag;
+    size_t line_no = 0;
+
+    auto end_sentence = [&] {
+        if (in_sentence) builder_.end_sentence(s_attrs);
+        in_sentence = false;
+        in_s_element = false;
+        s_attrs.clear();
+    };
 
     while (std::getline(in, line)) {
+        ++line_no;
         // Trim trailing CR
         if (!line.empty() && line.back() == '\r') line.pop_back();
 
@@ -596,71 +611,30 @@ void CorpusBuilder::read_vertical(const std::string& path) {
         // Hash comment line (CWB -n / -N style); avoid treating tabular data as comments.
         if (!line.empty() && line[0] == '#' && line.find('\t') == std::string::npos) continue;
 
-        // XML-style region tags: generic <tag ...> and </tag>
-        if (!line.empty() && line[0] == '<') {
-            // Closing tag: </tag>
-            if (line.size() >= 3 && line[1] == '/') {
-                size_t end_name = line.find_first_of(" >", 2);
-                std::string type = line.substr(2, end_name == std::string::npos ? std::string::npos : end_name - 2);
-                // Close matching region from stack (last with same type)
-                for (auto it = vrt_region_stack_.rbegin(); it != vrt_region_stack_.rend(); ++it) {
-                    if (it->type == type) {
-                        CorpusPos end = builder_.corpus_size() > 0 ? builder_.corpus_size() - 1 : 0;
-                        if (end >= it->start)
-                            builder_.add_region(type, it->start, end, it->attrs);
-                        vrt_region_stack_.erase(std::next(it).base());
-                        break;
-                    }
+        // Structure tags (vertical_tag.h). <s …> are sentences: s.rgn with their attributes (s_<key>);
+        // <s/> is a sentence boundary. Every other tag is a region (vertical_regions.h).
+        if (!line.empty() && line[0] == '<' && parse_vertical_tag(line, tag)) {
+            if (tag.name == "s") {
+                if (tag.kind == VerticalTag::Kind::Open) {
+                    end_sentence();
+                    in_s_element = true;
+                    s_attrs = std::move(tag.attrs);
+                } else {
+                    end_sentence();
                 }
                 continue;
             }
-            // Opening tag: <tag ...>
-            if (line.size() >= 2 && line[1] != '/') {
-                size_t name_start = 1;
-                size_t name_end = line.find_first_of(" >", name_start);
-                std::string type = line.substr(name_start, name_end == std::string::npos ? std::string::npos : name_end - name_start);
-
-                OpenRegion r;
-                r.type = type;
-                r.start = builder_.corpus_size();
-
-                // Parse attributes key="value"
-                size_t pos = line.find(' ', name_end);
-                while (pos != std::string::npos && pos < line.size()) {
-                    while (pos < line.size() && line[pos] == ' ') ++pos;
-                    if (pos >= line.size() || line[pos] == '>' || line[pos] == '/') break;
-                    size_t eq = line.find('=', pos);
-                    if (eq == std::string::npos) break;
-                    std::string key = line.substr(pos, eq - pos);
-                    // trim trailing spaces from key
-                    while (!key.empty() && key.back() == ' ') key.pop_back();
-                    size_t quote1 = line.find('"', eq + 1);
-                    if (quote1 == std::string::npos) break;
-                    size_t quote2 = line.find('"', quote1 + 1);
-                    if (quote2 == std::string::npos) break;
-                    std::string val = line.substr(quote1 + 1, quote2 - quote1 - 1);
-                    if (!key.empty())
-                        r.attrs.push_back({key, val});
-                    pos = quote2 + 1;
-                }
-
-                vrt_region_stack_.push_back(std::move(r));
-                continue;
+            const CorpusPos pos = builder_.corpus_size();
+            switch (tag.kind) {
+                case VerticalTag::Kind::Open:  regions.open(std::move(tag), pos, line_no); break;
+                case VerticalTag::Kind::Close: regions.close(tag.name, pos, line_no); break;
+                case VerticalTag::Kind::Empty: regions.empty(std::move(tag), pos, line_no); break;
             }
+            continue;
         }
 
         if (line.empty()) {
-            if (in_sentence) { builder_.end_sentence(); in_sentence = false; }
-            continue;
-        }
-        // Sentence boundaries (CWB-style)
-        if (line == "<s>" || line == "<s />" || line.find("<s ") == 0) {
-            if (in_sentence) builder_.end_sentence();
-            in_sentence = true;
-            continue;
-        }
-        if (line == "</s>") {
-            if (in_sentence) { builder_.end_sentence(); in_sentence = false; }
+            if (!in_s_element) end_sentence();
             continue;
         }
 
@@ -686,6 +660,8 @@ void CorpusBuilder::read_vertical(const std::string& path) {
         if (cols.empty()) continue;
 
         if (!vrt_column_names.empty()) {
+            // The header names the columns: those and no others (a form from the first column if
+            // none is named one).
             for (size_t i = 0; i < vrt_column_names.size() && i < cols.size(); ++i) {
                 std::string key = map_vrt_col_to_token_attr(vrt_column_names[i]);
                 if (key.empty()) continue;
@@ -697,9 +673,6 @@ void CorpusBuilder::read_vertical(const std::string& path) {
                 std::string form = cols[0];
                 attrs["form"] = form.empty() ? "_" : std::move(form);
             }
-            if (!attrs.count("lemma"))
-                attrs["lemma"] = attrs["form"];
-            if (!attrs.count("upos")) attrs["upos"] = "_";
         } else {
             std::string form = cols[0];
             attrs["form"] = form;
@@ -733,18 +706,11 @@ void CorpusBuilder::read_vertical(const std::string& path) {
                 attrs["upos"]  = "_";
             }
         }
-        if (!in_sentence) in_sentence = true;
+        in_sentence = true;
         builder_.add_token(attrs, -1);  // no dependency info
     }
-    if (in_sentence) builder_.end_sentence();
-
-    // Close any open regions at EOF
-    for (auto& r : vrt_region_stack_) {
-        CorpusPos end = builder_.corpus_size() > 0 ? builder_.corpus_size() - 1 : 0;
-        if (end >= r.start)
-            builder_.add_region(r.type, r.start, end, r.attrs);
-    }
-    vrt_region_stack_.clear();
+    end_sentence();
+    regions.finish(builder_.corpus_size());
 }
 
 // ── JSONL reader (flexicorp integration) ───────────────────────────────────
@@ -1070,6 +1036,7 @@ void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expec
         std::string tok_id;
         std::string head_tok_id;
         long long explicit_head = 0; // 0 = root
+        bool has_head = false;        // "head" (a number) or "head_tok_id" given
         std::string deps;             // enhanced dependencies, CoNLL-U DEPS (`4:nsubj|7:nsubj:xsubj`); empty = none given
         bool has_deps = false;
     };
@@ -1092,6 +1059,12 @@ void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expec
         return std::stoll(ln.substr(p, q - p));
     };
 
+    // "head": a number (0 = root); "head": "_" / null is no head
+    auto has_head_field = [](const std::string& ln) {
+        const size_t p = json_find_member(ln, "head");
+        return p != std::string::npos && p < ln.size() && ln[p] >= '0' && ln[p] <= '9';
+    };
+
     auto flush_sentence = [&](const std::vector<std::pair<std::string, std::string>>& sent_attrs
                               = std::vector<std::pair<std::string, std::string>>{}) {
         if (sentence_buf.empty()) return;
@@ -1101,9 +1074,14 @@ void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expec
             if (!sentence_buf[i].tok_id.empty())
                 tok_id_to_local[sentence_buf[i].tok_id] = static_cast<int>(i);
         }
+        // a sentence without any head: no dependencies (-1), so a corpus without them gets no
+        // dep.* / relation.head / head attributes; with some, a token without one is a root (0)
+        bool sentence_has_heads = false;
+        for (const auto& pt : sentence_buf)
+            if (pt.has_head) { sentence_has_heads = true; break; }
         for (size_t i = 0; i < sentence_buf.size(); ++i) {
             auto& pt = sentence_buf[i];
-            int sentence_head_id = 0;
+            int sentence_head_id = sentence_has_heads ? 0 : -1;
             if (pt.explicit_head > 0) {
                 sentence_head_id = static_cast<int>(pt.explicit_head);
             } else if (!pt.head_tok_id.empty()) {
@@ -1388,6 +1366,7 @@ void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expec
         if (pt.head_tok_id.empty())
             pt.head_tok_id = json_get_string(ln, "head_tok_id");
         pt.explicit_head = get_num_field(ln, "head");
+        pt.has_head = has_head_field(ln) || !pt.head_tok_id.empty();
         // "deps": CoNLL-U DEPS, heads numbered as `head` is (1-based within the sentence)
         if (json_find_member(ln, "deps") != std::string::npos) {
             pt.deps = json_get_string(ln, "deps");
@@ -1419,6 +1398,7 @@ void CorpusBuilder::read_jsonl(const std::string& path, CorpusPos* overlay_expec
         pt.tok_id      = json_get_string(ln, "tok_id");
         pt.head_tok_id = json_get_string(ln, "head_tok_id");
         pt.explicit_head = get_num_field(ln, "head");
+        pt.has_head = has_head_field(ln) || !pt.head_tok_id.empty();
 
         sentence_buf.push_back(std::move(pt));
     };

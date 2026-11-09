@@ -1668,7 +1668,7 @@ static void emit_dcoll_json(std::ostream& out, const Corpus& corpus, const Match
                             const GroupCommand& cmd, const NameIndexMap& name_map,
                             const NameIndexMap* target_name_map,
                             const ProgramOptions& opts) {
-    if (!corpus.has_deps()) {
+    if (!corpus.has_deps() && dcoll_uses_basic_tree(cmd)) {
         out << "{\"ok\": false, \"error\": \"dcoll requires dependency index\"}\n";
         return;
     }
@@ -1691,7 +1691,7 @@ static bool sink_coll_json(std::ostream& out, const Corpus& corpus, HitSet& hs, 
                            const ProgramOptions& opts, ExecProgress* progress) {
     if (hs.materialised || hs.parallel()) return false;
     const bool coll = cmd.type == CommandType::COLL;
-    if (!coll && !corpus.has_deps()) return false;
+    if (!coll && !corpus.has_deps() && dcoll_uses_basic_tree(cmd)) return false;
     const Statement& st = hs.st();
     QueryExecutor ex(corpus);
     setup_executor(ex, hs, progress);

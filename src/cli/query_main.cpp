@@ -2088,7 +2088,7 @@ static void emit_dcoll(const Corpus& corpus, const MatchSet& ms,
                        const GroupCommand& cmd, const Options& opts,
                        const NameIndexMap& name_map,
                        const NameIndexMap* target_name_map) {
-    if (!corpus.has_deps()) {
+    if (!corpus.has_deps() && dcoll_uses_basic_tree(cmd)) {
         std::cerr << "Error: dcoll requires dependency index\n";
         return;
     }
@@ -2674,7 +2674,7 @@ static void run_query(const Corpus& corpus, const std::string& input,
                                 corpus.size());
                         sink_state.sink = std::make_unique<CollHitSink>(*sink_state.coll,
                                                                         index_of(c.coll_on_label, -2));
-                    } else if (targets && c.type == CommandType::DCOLL && corpus.has_deps()
+                    } else if (targets && c.type == CommandType::DCOLL && (corpus.has_deps() || !dcoll_uses_basic_tree(c))
                                && (dcoll_breakdown_name(c).empty() || corpus.has_attr(dcoll_breakdown_name(c)))) {
                         sink_state.dcoll = std::make_unique<DcollCounter>(
                                 corpus, corpus.attr(coll_attr_of(corpus, c)), c.relations, c.dcoll_layer);
