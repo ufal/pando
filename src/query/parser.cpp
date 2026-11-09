@@ -717,6 +717,8 @@ GroupCommand Parser::parse_command() {
             lexer_.consume();
             cmd.freq_query_names.push_back(lexer_.expect(TokType::IDENT).text);
         }
+        // one name: the set to count, as for `count Q by` (else `freq Q by` counted the last query)
+        if (cmd.freq_query_names.size() == 1) cmd.query_name = cmd.freq_query_names[0];
     } else if (cmd.type != CommandType::STATS
                && lexer_.peek().type == TokType::IDENT && lexer_.peek().text != "by"
                && lexer_.peek().text != "vs"

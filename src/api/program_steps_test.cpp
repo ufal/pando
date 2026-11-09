@@ -208,6 +208,10 @@ static void test_filter(Corpus& corpus) {
     CHECK(size_of(run_program_json(corpus, ps, "size A")) == 2);
     js = run_program_json(corpus, ps, "count A by form on match[-1]");
     CHECK(has(js, "\"total_matches\": 2"));
+    // `freq A by` counts A (filtered), not the query defined last
+    js = run_program_json(corpus, ps, "A = [lemma=\"dog\"]; F = [upos=\"ADJ\"]; filter A by F on match[-1]; "
+                                      "G = [upos=\"ADJ\"]; freq A by form");
+    CHECK(has(js, "\"total_matches\": 3"));
     // a sorted set is not reused either
     run_program_json(corpus, ps, "A = [lemma=\"dog\"]; sort A by form; size A");
     CHECK(size_of(run_program_json(corpus, ps, "A = [lemma=\"dog\"]; F = [upos=\"ADJ\"]; size A")) == 7);
