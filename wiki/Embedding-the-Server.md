@@ -159,7 +159,9 @@ Files are read in 64 MB segments by `warm_streams` threads (default 4): on netwo
 storage (Ceph, NFS) several streams read several times faster than one.
 `GET /warm?residency=hot` (or `all`) adds `"residency"`: how many of those bytes are in
 the page cache now (`resident_bytes`, `resident` as a share) — whether the machine has
-the RAM to keep the corpus warm.
+the RAM to keep the corpus warm. On ZFS, which caches in its own ARC and not in the page
+cache, the measure (`mincore`) only sees pages that are already mapped and understates what
+is warm: the answer then carries `"reliable": false` and a `note`.
 In fqs, `"pando": {"warm": "hot"}` in the limits file (or a corpus' `settings.limits`)
 warms every corpus as it is opened.
 

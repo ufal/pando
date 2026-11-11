@@ -5,12 +5,18 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <sys/mount.h>
+#else
+#include <sys/vfs.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -57,6 +63,20 @@ bool is_hot(const Corpus& corpus, const std::string& name) {
 int64_t now_ns() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
                std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// Whether mincore() on a mapping says what is cached for this file's file system. ZFS keeps its data
+// in its own cache (the ARC), not in the page cache: reading a file warms the ARC, while mincore only
+// sees pages something has mapped and touched, so a fully warmed corpus reads as partly resident.
+bool mincore_reliable(int fd) {
+#ifdef __APPLE__
+    struct statfs sfs;
+    return ::fstatfs(fd, &sfs) != 0 || std::strcmp(sfs.f_fstypename, "zfs") != 0;
+#else
+    struct statfs sfs;
+    constexpr long kZfsMagic = 0x2fc12fc1;   // ZFS_SUPER_MAGIC
+    return ::fstatfs(fd, &sfs) != 0 || static_cast<long>(sfs.f_type) != kZfsMagic;
+#endif
 }
 
 }  // namespace
@@ -193,9 +213,11 @@ std::string residency_json(const Corpus& corpus, WarmLevel level) {
     const long pg = ::sysconf(_SC_PAGESIZE);
     const uint64_t page = pg > 0 ? static_cast<uint64_t>(pg) : 4096;
     std::vector<unsigned char> vec;
+    bool reliable = true;
     for (const auto& f : files) {
         const int fd = ::open(f.c_str(), O_RDONLY);
         if (fd < 0) continue;
+        if (!mincore_reliable(fd)) reliable = false;
         struct stat st;
         if (::fstat(fd, &st) != 0 || st.st_size <= 0) { ::close(fd); continue; }
         const uint64_t sz = static_cast<uint64_t>(st.st_size);
@@ -223,7 +245,10 @@ std::string residency_json(const Corpus& corpus, WarmLevel level) {
     std::snprintf(share, sizeof share, "%.4f", total ? static_cast<double>(resident) / static_cast<double>(total) : 0.0);
     return std::string("{\"level\": \"") + warm_level_name(level) + "\", \"files\": " + std::to_string(files.size())
         + ", \"bytes\": " + std::to_string(total) + ", \"resident_bytes\": " + std::to_string(resident)
-        + ", \"resident\": " + share + "}";
+        + ", \"resident\": " + share
+        + (reliable ? "" : ", \"reliable\": false, \"note\": \"this file system (ZFS) caches in its own cache, "
+                           "not the page cache: mincore sees only pages already mapped, so resident understates what is warm\"")
+        + "}";
 }
 
 std::string CorpusWarmer::status_json() const {

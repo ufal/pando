@@ -402,11 +402,14 @@ def check_warm(exe, corpus, label):
               f"{label}: warm all: {w}")
         st, r = srv.post("/warm", {"level": "lukewarm"})
         check(st == 400, f"{label}: bad level: {st} {r}")
-        # residency: after warming everything, (nearly) all of it is in the page cache
+        # residency: after warming everything, (nearly) all of it is in the page cache. Not on ZFS, which
+        # caches in its own ARC: mincore then sees only pages already mapped, and the answer says
+        # "reliable": false (the consistency conditions still hold)
         st, r = srv.get("/warm?residency=all")
         res = r.get("residency", {})
         check(st == 200 and res.get("level") == "all" and res.get("bytes", 0) > 0
-              and res.get("resident_bytes", -1) <= res.get("bytes", 0) and res.get("resident", 0) > 0.5,
+              and res.get("resident_bytes", -1) <= res.get("bytes", 0)
+              and (res.get("reliable") is False or res.get("resident", 0) > 0.5),
               f"{label}: residency all: {st} {res}")
         st, r = srv.get("/warm?residency=hot")
         check(st == 200 and 0 < r.get("residency", {}).get("bytes", 0) < res.get("bytes", 0),

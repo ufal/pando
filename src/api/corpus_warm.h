@@ -18,7 +18,8 @@
 // find the pages in the cache. Smallest files first.
 //
 // residency_json(): how much of a level's files is in the page cache now
-// (mincore), for GET /warm?residency=hot|all.
+// (mincore), for GET /warm?residency=hot|all. On ZFS, which caches in its own ARC, mincore understates
+// what is warm: the answer then says "reliable": false.
 
 #include <atomic>
 #include <cstdint>
