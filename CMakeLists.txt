@@ -205,6 +205,11 @@ add_library(pando_core STATIC
 target_include_directories(pando_core PUBLIC src)
 add_dependencies(pando_core pando_build_info)
 target_link_libraries(pando_core PUBLIC pando_cwb_dialect pando_pmltq_dialect pando_manatee_dialect)
+# The CWB dialect calls back into the core (cwb_parser.cpp uses Parser::parse_global_filter_text), so the
+# two static libraries depend on each other. Saying so lets CMake repeat them on the link line: GNU ld
+# reads a static library once, in order, and otherwise leaves the call unresolved in a program that does
+# not already pull in parser.o (cwb_dialect_test); macOS's linker does not care about the order.
+target_link_libraries(pando_cwb_dialect PUBLIC pando_core)
 
 if(PANDO_WITH_RE2)
     target_compile_definitions(pando_core PUBLIC PANDO_USE_RE2)
