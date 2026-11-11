@@ -104,7 +104,8 @@ def main():
         out = run(f'a:[] >:rst:"{label}" b:[]; tabulate 0 100 a.cpos, b.cpos')
         got = sorted(tuple(map(int, l.split("\t"))) for l in out.splitlines() if l and l[0].isdigit())
         check(got == want, f">:rst:{label}: {got} (reference {want})")
-    check(count('a:[lemma="it"] >>:rst b:[]') == 2, f'a:[lemma="it"] >>:rst b:[]: {count("a:[lemma=\"it\"] >>:rst b:[]")} (reference 2: so, because)')
+    q_it = 'a:[lemma="it"] >>:rst b:[]'   # (no backslash inside an f-string: Python < 3.12)
+    check(count(q_it) == 2, f'{q_it}: {count(q_it)} (reference 2: so, because)')
     check(count('a:[lemma="rain"] >:rst b:[]') == 0 and count('a:[] <:rst b:[lemma="rain"]') == 0,
           "a token without edges has none (no inherited tree)")
     out = run('a:[] >:rst b:[]; count by b.edu_rel')

@@ -121,13 +121,14 @@ def main():
 
     ic, ij = info(idx_c), info(idx_j)
     check("par" in ic.get("structural", "").split(","), "CoNLL-U: bare # newpar gives par regions")
-    check(count(idx_c, "<par>[]") == 3 and count(idx_c, '[par_id="_"]') == 7,
+    par_noid = count(idx_c, '[par_id="_"]')   # (no backslash inside an f-string: Python < 3.12)
+    check(count(idx_c, "<par>[]") == 3 and par_noid == 7,
           f"CoNLL-U: 3 paragraphs, 7 tokens in those without an id ({count(idx_c, '<par>[]')}, "
-          f"{count(idx_c, '[par_id=\"_\"]')})")
+          f"{par_noid})")
     check(count(idx_c, "<doc>[]") == 2, f"CoNLL-U: a bare # newdoc opens a document ({count(idx_c, '<doc>[]')})")
     check(count(idx_c, '[s_text_en="Bob left."]') == 2,
-          f"CoNLL-U: # text_en as s_text_en ({count(idx_c, '[s_text_en=\"Bob left.\"]')})")
-    check(count(idx_c, '[doc_genre="news"]') == 7, f"CoNLL-U: # meta::genre as doc_genre ({count(idx_c, '[doc_genre=\"news\"]')})")
+          f"CoNLL-U: # text_en as s_text_en ({count(idx_c, '[s_text_en=' + chr(34) + 'Bob left.' + chr(34) + ']')})")
+    check(count(idx_c, '[doc_genre="news"]') == 7, f"CoNLL-U: # meta::genre as doc_genre ({count(idx_c, '[doc_genre=' + chr(34) + 'news' + chr(34) + ']')})")
     for key in ("relation.deps", "relation.head"):
         check(ic.get(key) == ij.get(key) and ic.get(key), f"{key}: {ic.get(key)} / {ij.get(key)}")
     for q in ("[]", "<s>[]", "<doc>[]", "<par>[]", "a:[] > b:[]", "a:[] >:deps b:[]", 'a:[] >:deps:"nsubj" b:[]',

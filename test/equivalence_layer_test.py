@@ -123,7 +123,7 @@ def main():
     check("scope=corpus" in p.stderr, f"a class layer across texts: {p.stderr.strip().splitlines()[0] if p.stderr else p}")
     pron = [i for i in range(n) if t[i][2] == "PRON"]
     check(count('[upos="PRON"] =:uposclass []') == str(len(pron) * (len(pron) - 1)),
-          f"default_within=text leaves =:uposclass across texts: {count('[upos=\"PRON\"] =:uposclass []')} "
+          f"default_within=text leaves =:uposclass across texts: {count('[upos=' + chr(34) + 'PRON' + chr(34) + '] =:uposclass []')} "
           f"(reference {len(pron) * (len(pron) - 1)})")
     check(count('[] =:coref []') == str(pairs(ANY, ANY)), "default_within=text with =:coref (scope text): unchanged")
 
