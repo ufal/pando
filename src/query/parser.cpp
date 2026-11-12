@@ -84,7 +84,27 @@ static std::string alternatives_message() {
            "Manatee dialect, which expands them: `MANATEE [a] [b] | [c]`";
 }
 
+// An error that does not say where it is gets the position of the token the parser stopped at (the
+// message may end with a hint, so the position is appended, as "at position N").
+static std::runtime_error with_stop_position(const std::runtime_error& e, Lexer& lexer) {
+    const std::string msg = e.what();
+    if (msg.find(" at position ") != std::string::npos) return e;
+    try {
+        return std::runtime_error(msg + " at position " + std::to_string(lexer.peek().pos));
+    } catch (...) {
+        return e;   // the lexer itself failed: its error is the one to report
+    }
+}
+
 Program Parser::parse() {
+  try {
+    return parse_program();
+  } catch (const std::runtime_error& e) {
+    throw with_stop_position(e, lexer_);
+  }
+}
+
+Program Parser::parse_program() {
     Program prog;
     prog.push_back(parse_statement_with_source());
     while (lexer_.peek().type == TokType::SEMI) {
@@ -212,7 +232,8 @@ Statement Parser::parse_statement() {
                     lexer_.consume();
                     parse_containing_clause(stmt.query, true);
                 } else {
-                    throw std::runtime_error("Expected 'within' or 'containing' after 'not'");
+                    throw std::runtime_error("Expected 'within' or 'containing' after 'not' at position " +
+                                             std::to_string(not_tok.pos));
                 }
             } else if (kw == "containing") {
                 lexer_.consume();
@@ -983,7 +1004,7 @@ QueryToken Parser::parse_token_expr() {
         } else {
             // Not a label — error or bare ident
             throw std::runtime_error("Expected ':' or '[' after identifier '" +
-                                     t1.text + "'");
+                                     t1.text + "' at position " + std::to_string(t1.pos));
         }
     }
 
@@ -1499,7 +1520,8 @@ ConditionPtr Parser::parse_primary_condition() {
         for (char f : flag.text) {
             if (f == 'c') ac.case_insensitive = true;
             else if (f == 'd') ac.diacritics_insensitive = true;
-            else throw std::runtime_error("Unknown flag '%" + flag.text + "' (expected %c, %d or %cd)");
+            else throw std::runtime_error("Unknown flag '%" + flag.text + "' (expected %c, %d or %cd) at position " +
+                                          std::to_string(flag.pos));
         }
     }
 
@@ -1594,7 +1616,7 @@ void Parser::read_region_filter_value(GlobalRegionFilter& gf) {
             break;
         default:
             throw std::runtime_error("Expected a value (string, number or /pattern/) in a region filter, got '"
-                                     + v.text + "'");
+                                     + v.text + "' at position " + std::to_string(v.pos));
     }
     if (gf.regex && gf.op != CompOp::EQ && gf.op != CompOp::NEQ)
         throw std::runtime_error("A pattern in a region filter can only be used with = or !=");
@@ -1698,7 +1720,8 @@ void Parser::parse_containing_clause(TokenQuery& tq, bool negated) {
             "Regions that contain such a token: `s:<s> within s having [lemma=\"x\"]`; "
             "tokens in such a region: `[] within s having [lemma=\"x\"]`");
     } else {
-        throw std::runtime_error("Expected region name or 'subtree' after 'containing'");
+        throw std::runtime_error("Expected region name or 'subtree' after 'containing' at position " +
+                                 std::to_string(t.pos));
     }
 
     tq.containing_clauses.push_back(std::move(cc));
@@ -1708,7 +1731,7 @@ void Parser::parse_global_filters(TokenQuery& tq) {
     auto parse_one = [this, &tq]() {
         Token t = lexer_.next();
         if (t.type != TokType::IDENT)
-            throw std::runtime_error("Expected identifier in global filter");
+            throw std::runtime_error("Expected identifier in global filter at position " + std::to_string(t.pos));
 
         // A derived binding: `np:dep_subtree(n)` (dev/REGION-JOINS-PLAN.md §3.3 rule 4). It is
         // not part of the token sequence; internally it is the same derived token as the
@@ -1718,7 +1741,7 @@ void Parser::parse_global_filters(TokenQuery& tq) {
             Token f = lexer_.next();
             if (f.type != TokType::IDENT || f.text != "dep_subtree")
                 throw std::runtime_error("After `" + t.text + ":` in `::` a derived binding is expected, "
-                                         "e.g. `" + t.text + ":dep_subtree(n)`");
+                                         "e.g. `" + t.text + ":dep_subtree(n)` at position " + std::to_string(f.pos));
             if (tq.tokens.empty())
                 throw std::runtime_error("dep_subtree(…) needs the token query that finds its head");
             lexer_.expect(TokType::LPAREN);

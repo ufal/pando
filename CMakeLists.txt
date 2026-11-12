@@ -443,6 +443,10 @@ if(BUILD_TESTING)
         add_test(NAME bare_string
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/bare_string_test.py
                 --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
+        # a query syntax error says where it is ("at position N")
+        add_test(NAME parser_error_position
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/parser_error_position_test.py
+                --pando $<TARGET_FILE:pando> --pando-index $<TARGET_FILE:pando-index>)
         # year / decade / century in :: filters through a named token (a.text_year)
         add_test(NAME date_func
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/date_func_test.py

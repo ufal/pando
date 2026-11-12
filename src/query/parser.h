@@ -41,6 +41,7 @@ public:
     static bool is_command_keyword(const std::string& text);
 
 private:
+    Program parse_program();   // parse() without the error position added
     Statement parse_statement();
     Statement parse_statement_with_source();
     std::string input_;
